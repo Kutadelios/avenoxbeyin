@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unicodedata
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -1827,12 +1828,84 @@ def _msaa_document(window):
             ole.CoUninitialize()
 
 
+OPERA_WARMUP = 0.8  # seconds for Chromium to build the page tree after accessibility is turned on
+OPERA_TIMEOUT = 1.8  # the reader process start, the warm-up and the bracketing reads
+
+
+def _uia_touch(window):
+    """Ask UI Automation for this window's element and release it at once.
+
+    Chromium answers MSAA on its renderer with a 'Chrome Legacy Window' placeholder while web
+    accessibility is off, and an MSAA query alone does not turn it on (measured on Opera Air,
+    17.10.2026: four seconds of polling, still the placeholder). A UIA request for the same
+    window (its element plus one search for the page Document below it, as measured) does; the
+    MSAA document is there right after it. Nothing found here is read or returned.
+    """
+    import ctypes
+    import uuid
+    from ctypes import wintypes
+
+    class GUID(ctypes.Structure):
+        _fields_ = [('a', ctypes.c_uint32), ('b', ctypes.c_uint16), ('c', ctypes.c_uint16), ('d', ctypes.c_ubyte * 8)]
+
+    class VARIANT(ctypes.Structure):
+        _fields_ = [('vt', ctypes.c_ushort), ('r1', ctypes.c_ushort), ('r2', ctypes.c_ushort), ('r3', ctypes.c_ushort),
+                    ('v1', ctypes.c_void_p), ('v2', ctypes.c_void_p)]
+
+    def guid(text):
+        u = uuid.UUID(text)
+        return GUID(u.time_low, u.time_mid, u.time_hi_version, (ctypes.c_ubyte * 8)(*u.bytes[8:]))
+
+    ole32 = ctypes.windll.ole32
+    ole32.CoInitializeEx.argtypes, ole32.CoInitializeEx.restype = [ctypes.c_void_p, ctypes.c_ulong], ctypes.c_int32
+    started = ole32.CoInitializeEx(None, 0)
+    if started < 0:
+        return False
+    out = ctypes.POINTER(ctypes.c_void_p)
+    uia, element, condition, found = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+    try:
+        ctypes.oledll.ole32.CoCreateInstance(ctypes.byref(guid('ff48dba4-60ef-4201-aa87-54103eef594e')), None, 1,
+                                             ctypes.byref(guid('30cbe57d-d9d0-452a-ab13-7ac5ac4825ee')), ctypes.byref(uia))
+        _com_call(uia, 6, wintypes.HWND(window), ctypes.byref(element), argtypes=(wintypes.HWND, out))  # ElementFromHandle
+        if not element:
+            return False
+        _com_call(uia, 23, 30003, VARIANT(vt=3, v1=50030), ctypes.byref(condition),  # ControlType == Document
+                  argtypes=(ctypes.c_int, VARIANT, out))
+        _com_call(element, 5, 4, condition, ctypes.byref(found),  # FindFirst, descendants
+                  argtypes=(ctypes.c_int, ctypes.c_void_p, out))
+        return True
+    except OSError:
+        return False
+    finally:
+        for obj in (found, condition, element, uia):
+            if obj:
+                _com_call(obj, 2)  # Release
+        ole32.CoUninitialize()
+
+
 def _opera_snapshot(window, at=None):
-    """Page and hovered link from one stable foreground renderer, inside the timed reader."""
+    """Page and hovered link from one stable foreground renderer, inside the timed reader.
+
+    With accessibility off (Chromium turns it off again after a while without assistive use) the
+    renderer answers with a 'Chrome Legacy Window' client placeholder and builds the document
+    asynchronously. MSAA alone does not turn it on, so the renderer is touched once through UI
+    Automation and the document is read again until it is there or the short warm-up ends.
+    """
     identity = _opera_renderer(window)
     if not identity:
         return {}
     first = _msaa_document(identity[0])
+    if not first.get('value'):
+        try:
+            _uia_touch(identity[0])
+        except Exception:
+            pass
+    deadline = time.monotonic() + OPERA_WARMUP
+    while not first.get('value') and time.monotonic() < deadline:
+        time.sleep(0.05)
+        if _opera_renderer(window) != identity:
+            return {}
+        first = _msaa_document(identity[0])
     if not first.get('value'):
         return {}
     posts = _post_site(first['value'])
@@ -1858,7 +1931,7 @@ def _opera_snapshot(window, at=None):
     return result
 
 
-def _windows_opera_snapshot(window, at=None, timeout=ADDRESS_TIMEOUT, cancel=None):
+def _windows_opera_snapshot(window, at=None, timeout=OPERA_TIMEOUT, cancel=None):
     if not window:
         return {}
     request = {'hwnd': int(window)}
