@@ -117,6 +117,21 @@ class AgentConfigurationTest(AgentFiles):
         self.assertEqual(card['path'].read_bytes(), before)
         self.assertEqual(yakala.pending(self.vault, self.state), 1)
 
+    def test_off_switch_status_and_kaldir_survive_settings_of_a_moved_vault(self):
+        # A pinned state travels with a moved vault; its saved settings name the old path.
+        self.configure('claude')
+        config = json.loads(self.config_path.read_text(encoding='utf-8'))
+        config['vault'] = str(Path(self.tmp.name) / 'Eski Konum')
+        self.config_path.write_text(json.dumps(config), encoding='utf-8')
+        with self.assertRaises(ValueError):
+            yakala.configure_agent(self.vault, self.state, 'claude')  # turning on never adopts them
+        self.assertIn('gecersiz', yakala.status(self.vault, self.state)['ajan'])  # durum reports it
+        yakala.configure_agent(self.vault, self.state, 'kapali')
+        self.assertEqual(yakala.agent_settings(self.vault, self.state)['client'], 'kapali')
+        self.config_path.write_text('{"client": ', encoding='utf-8')  # damaged by hand or by a sync tool
+        self.assertEqual(yakala.uninstall(self.vault, self.state)['status'], 'kaldirildi')
+        self.assertEqual(yakala.agent_settings(self.vault, self.state)['client'], 'kapali')
+
     def test_invalid_client_does_not_modify_an_existing_configuration(self):
         self.configure()
         before = self.config_path.read_bytes()

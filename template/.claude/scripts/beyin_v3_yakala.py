@@ -5483,7 +5483,7 @@ def status(vault, state):
     return {'status': 'tamam', 'kurulu': installed, 'dinleyici_calisiyor': running,
             'bekleyen': pending(vault, state), 'klasor': find_inbox(vault, state),
             'pano_uyarisi': _clipboard_warning(),
-            'ajan': agent_settings(vault, state)['client'],
+            'ajan': _agent_client_status(vault, state),
             'araclar': {name: bool(path) for name, path in tools().items()}}
 
 
@@ -5725,11 +5725,15 @@ def _agent_validate_settings(config, vault):
     return config
 
 
+def _agent_defaults(vault):
+    return {'schema': AGENT_SCHEMA, 'vault': str(Path(vault).resolve()), 'client': 'kapali',
+            'timeout_seconds': 900, 'max_queue': 32, 'max_budget_usd': 1.0, 'extra_args': [],
+            'executable': None, 'downloads_dir': str(Path.home() / 'Downloads'), 'last_session_path': None,
+            'gorunum': 'gizli'}
+
+
 def agent_settings(vault, state):
-    config = {'schema': AGENT_SCHEMA, 'vault': str(Path(vault).resolve()), 'client': 'kapali',
-              'timeout_seconds': 900, 'max_queue': 32, 'max_budget_usd': 1.0, 'extra_args': [],
-              'executable': None, 'downloads_dir': str(Path.home() / 'Downloads'), 'last_session_path': None,
-              'gorunum': 'gizli'}
+    config = _agent_defaults(vault)
     path = _agent_no_links(_agent_root(state) / 'config.json')
     if path.exists():
         if path.stat().st_size > 16384:
@@ -5739,6 +5743,14 @@ def agent_settings(vault, state):
             raise ValueError('Ajan ayari JSON nesnesi olmali.')
         config.update(loaded)
     return _agent_validate_settings(config, vault)
+
+
+def _agent_client_status(vault, state):
+    """`durum` reports unusable agent settings instead of failing on the optional feature."""
+    try:
+        return agent_settings(vault, state)['client']
+    except (OSError, ValueError) as exc:
+        return 'gecersiz ayar (' + str(exc)[:160] + '); kapatmak icin: yakala ajan kapali'
 
 
 def _agent_window_supported():
@@ -5751,7 +5763,15 @@ def _agent_windowed(config):
 
 
 def configure_agent(vault, state, client, config_file=None, view=None):
-    config = agent_settings(vault, state)
+    try:
+        config = agent_settings(vault, state)
+    except ValueError:
+        if client != 'kapali' or config_file or view:
+            raise
+        # The off switch and `yakala kaldir` must work even when the saved settings are damaged or
+        # belong to the vault's old path (a pinned state travels with a moved vault): a fresh
+        # `kapali` setting for this vault replaces them. Turning the agent on still refuses them.
+        config = _agent_defaults(vault)
     if not (_agent_root(state) / 'config.json').exists():
         config['downloads_dir'] = _agent_downloads()
     if config_file:
