@@ -5870,6 +5870,10 @@ def _agent_env(state, job_id=None):
     temp = _agent_private_dir(_agent_root(state) / 'tmp')
     env.update(TMP=str(temp), TEMP=str(temp), TMPDIR=str(temp))
     env.pop('BEYIN_YAKALA_SNAPSHOT', None)
+    # Started from inside another Claude Code session (an agent ran ajan-gonder), the child would
+    # inherit its markers and save no transcript; the job is its own top-level session.
+    for name in ('CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_ENTRYPOINT'):
+        env.pop(name, None)
     if job_id:
         env['BEYIN_YAKALA_JOB'] = job_id
     return env
@@ -6727,7 +6731,8 @@ $null = $nodes.Item(0).AppendChild($xml.CreateTextNode([string]$payload.title))
 $null = $nodes.Item(1).AppendChild($xml.CreateTextNode([string]$payload.body))
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('AvenoxBeyin.Yakala.Agent')
-if ($notifier.Setting.ToString() -ne 'Enabled') { exit 2 }
+$setting = $notifier.Setting  # Windows PowerShell 5.1 projects this WinRT enum as null
+if ($null -ne $setting -and [string]$setting -ne 'Enabled') { exit 2 }
 $notifier.Show($toast)
 '''
             encoded = base64.b64encode(script.encode('utf-16le')).decode('ascii')
@@ -7269,10 +7274,18 @@ def _agent_complete(vault, state, job, status, summary, notes=(), downloads=()):
     if not isinstance(notes, (list, tuple)) or len(notes) > 30 or not isinstance(downloads, (list, tuple)) or len(downloads) > 10:
         raise ValueError('Completion notes/downloads must be bounded lists.')
     folder = _agent_job_folder(vault, state, job['id'])
-    note_root = _agent_job_notes(vault, state, job) if notes else None
+    note_root = _agent_job_notes(vault, state, job)
     checked_notes, checked_downloads = [], []
+    if not notes:
+        # Models often describe their notes in prose; this job's own notes are known exactly.
+        root = Path(vault).resolve()
+        notes = sorted(item.relative_to(root).as_posix() for item in note_root.glob('*.md') if item.is_file())
     for note in notes:
-        path = _agent_safe_note(vault, note, job)
+        try:
+            path = _agent_safe_note(vault, note, job)
+        except ValueError as exc:
+            raise ValueError(str(exc) + ' notes yalniz write_note cevabindaki path degerlerini alir; '
+                             'aciklamayi summary alanina yaz ya da notes alanini bos birak.') from exc
         if path.parent != note_root or path.suffix.lower() != '.md':
             raise ValueError('Completion may reference only this job\'s created notes.')
         meta, _body = read_card(path)
@@ -7321,7 +7334,9 @@ def _agent_tool_definitions():
          {'title': string, 'content': string}, ['title', 'content'], False, False),
         ('complete', 'Submit final result: completed, approval_required or failed. Worker alone updates card/receipt.',
          {'status': {'type': 'string', 'enum': ['completed', 'approval_required', 'failed']}, 'summary': string,
-          'notes': {'type': 'array', 'items': string, 'maxItems': 30},
+          'notes': {'type': 'array', 'items': string, 'maxItems': 30,
+                    'description': 'Only the exact path values returned by write_note, never prose. '
+                                   'Leave empty to attach every note this job created.'},
           'downloads': {'type': 'array', 'items': {'type': 'object'}, 'maxItems': 10}},
          ['status', 'summary'], False, False),
     )

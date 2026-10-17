@@ -431,6 +431,15 @@ class AgentWindowViewTest(AgentFiles):
         finalize.assert_not_called()
 
 
+class AgentEnvironmentTest(AgentFiles):
+    def test_job_is_its_own_session_even_when_started_from_an_agent(self):
+        inherited = {'CLAUDECODE': '1', 'CLAUDE_CODE_CHILD_SESSION': '1', 'CLAUDE_CODE_ENTRYPOINT': 'cli'}
+        with patch.dict(yakala.os.environ, inherited):
+            env = yakala._agent_env(self.state, str(uuid.uuid4()))
+        for name in inherited:
+            self.assertNotIn(name, env)
+
+
 class AgentPreflightTest(AgentFiles):
     HELP = ('--print -p --permission-mode --permission-prompts --tools --allowedTools --disallowedTools '
             '--strict-mcp-config --mcp-config --session-id --append-system-prompt '
@@ -613,6 +622,48 @@ class AgentRecoveryTest(AgentFiles):
         self.assertEqual(original['path'].read_bytes(), before)
         self.assertEqual(yakala._agent_load_job(self.vault, self.state, interrupted['id'])['state'], 'approval_required')
         self.assertEqual(yakala._agent_load_job(self.vault, self.state, next_job['id'])['state'], 'approval_required')
+
+
+class AgentCompleteNotesTest(AgentFiles):
+    """First real runs: the model described its note in prose instead of returning write_note's path."""
+
+    def running(self):
+        self.configure()
+        result, job, card = self.queued(request='Kısa bir not yaz.')
+        job['state'] = 'running'
+        folder = yakala._agent_job_dir(self.vault, self.state, job['id'])
+        yakala._agent_json(folder / 'job.json', job)
+        note = yakala._agent_tool_call(self.vault, self.state, job['id'], 'write_note',
+                                      {'title': 'Sonuç', 'content': 'Özet metni.'})
+        return job, folder, note['path']
+
+    def manifest(self, folder):
+        return json.loads((folder / 'result.json').read_text(encoding='utf-8'))
+
+    def test_empty_notes_attach_every_note_this_job_created(self):
+        job, folder, note = self.running()
+        yakala._agent_tool_call(self.vault, self.state, job['id'], 'complete',
+                               {'status': 'completed', 'summary': 'Not yazıldı.'})
+        self.assertEqual(self.manifest(folder)['notes'], [note])
+
+    def test_prose_in_notes_is_refused_with_how_to_fix_it(self):
+        job, folder, note = self.running()
+        with self.assertRaises(ValueError) as caught:
+            yakala._agent_complete(self.vault, self.state, job, 'completed', 'Not yazıldı.',
+                                   notes=['Sonuç notu: ' + note])
+        self.assertIn('write_note', str(caught.exception))
+        self.assertFalse((folder / 'result.json').exists())
+
+    def test_exact_returned_path_is_kept(self):
+        job, folder, note = self.running()
+        yakala._agent_tool_call(self.vault, self.state, job['id'], 'complete',
+                               {'status': 'completed', 'summary': 'Not yazıldı.', 'notes': [note]})
+        self.assertEqual(self.manifest(folder)['notes'], [note])
+
+    def test_windows_toast_tolerates_the_null_setting_of_powershell_5(self):
+        source = Path(yakala.__file__).read_text(encoding='utf-8')
+        self.assertNotIn('$notifier.Setting.ToString()', source)
+        self.assertIn("$null -ne $setting -and [string]$setting -ne 'Enabled'", source)
 
 
 class AgentFinalizationTest(AgentFiles):
