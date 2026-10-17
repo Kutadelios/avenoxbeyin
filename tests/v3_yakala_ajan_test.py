@@ -669,6 +669,18 @@ class AgentCompleteNotesTest(AgentFiles):
 class AgentFinalizationTest(AgentFiles):
     TRACK = b'ID3\x04\0\0\0\0\0\0a deterministic public test track'
 
+    def assertNewestCard(self, fixture):
+        # The companion's card shape, newest first under the title; every earlier byte is kept.
+        text = fixture.last.read_bytes()
+        newline = b'\r\n' if b'\r\n' in fixture.last_before else b'\n'  # write_text gives CRLF on Windows
+        title, earlier = fixture.last_before.split(newline * 2, 1)
+        self.assertTrue(text.startswith(title + newline * 2 + b'## '))
+        self.assertTrue(text.endswith(newline * 2 + earlier))
+        card = text[len(title) + 2 * len(newline):-len(earlier)]
+        self.assertEqual(card.count(b'\n'), card.count(newline))  # the file keeps one line ending
+        self.assertRegex(card.decode('utf-8'), r'^## \d{4}-\d\d-\d\d \d\d:\d\d · Yakala ajanı / Claude · ' +
+                         fixture.job['session_id'][:8] + r'\r?\n')
+
     def prepared(self, download_names=('track.mp3',)):
         (self.vault / 'beyin.py').write_text('# Test receipt entry; never executed.\n', encoding='utf-8')
         memory = self.vault / 'memory'
@@ -757,7 +769,7 @@ class AgentFinalizationTest(AgentFiles):
         self.assertTrue((self.vault / saved['outcome']).is_file())
         self.assertIn('yakala-' + fixture.job['id'], (self.vault / saved['receipt']).read_text(encoding='utf-8'))
         last = fixture.last.read_text(encoding='utf-8')
-        self.assertTrue(fixture.last.read_bytes().startswith(fixture.last_before))
+        self.assertNewestCard(fixture)
         for reference in (fixture.job['card_path'], saved['outcome'], saved['receipt'], fixture.job['session_id']):
             self.assertIn(reference, last)
         self.assertEqual(last.count('<!-- yakala-ajan:' + fixture.job['id'] + ' -->'), 1)
@@ -817,7 +829,7 @@ class AgentFinalizationTest(AgentFiles):
         self.assertIn('approval_required', payload['summary'])
         self.assertIn(saved['outcome'], payload['refs'])
         last = fixture.last.read_text(encoding='utf-8')
-        self.assertTrue(fixture.last.read_bytes().startswith(fixture.last_before))
+        self.assertNewestCard(fixture)
         self.assertIn(saved['receipt'], last)
         partial = conflict.with_name(conflict.name + '.part')
         self.assertEqual(partial.read_bytes(), self.TRACK)

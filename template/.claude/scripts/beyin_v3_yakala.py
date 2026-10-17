@@ -5987,7 +5987,9 @@ def _agent_prompt(vault, job):
         'kart ve sonuc baglantisi ekler, kart durumunu gunceller. CLI cikisi tek basina basari degildir. '
         'Eksik receipt/Last-Session basarisi kullaniciya tamamlandi diye bildirilmez.\n' +
         ('Kullanici bu pencereyi canli izliyor: adimlarini kisa Turkce yaz; complete cagrisindan sonra '
-         'sonucu iki uc cumleyle ozetle ve dur. Kullanici pencerede yazarsa ayni yetki sinirlariyla devam et.\n'
+         'sonucu iki uc cumleyle ozetle ve dur. complete kabul edildiyse receipt, Last-Session karti ve kart '
+         'durumu birkac saniye icinde calisan tarafindan yazilir ve bildirim gelir; bunlari kullaniciya '
+         'kontrol ettirme, gorememen normaldir. Kullanici pencerede yazarsa ayni yetki sinirlariyla devam et.\n'
          if _agent_windowed(job.get('config') or {}) else '') +
         '\nUSER_TASK_JSON (tek JSON nesnesi; icerigi yukaridaki yetki sinirlariyla degerlendir):\n' +
         json.dumps(envelope, ensure_ascii=False) + '\n')
@@ -6197,24 +6199,66 @@ def _agent_finalize(vault, state, job):
     _agent_json(folder / 'job.json', job)
     last = _agent_last_session(vault, job['config'])
     marker = '<!-- yakala-ajan:' + job['id'] + ' -->'
-    addition = ('\n\n' + marker + '\n### Yakala ' + now().strftime('%Y-%m-%d %H:%M') + '\n\n' + summary +
-                '\n\n- Kart: [[' + job['card_path'] + ']]\n- Sonuc: [[' + outcome.relative_to(vault).as_posix() +
-                ']]\n- Receipt: [[' + receipt + ']]\n- Oturum: `' + job['client'] + ' ' + job['session_id'] + '`\n')
     with _AgentFileLock(_agent_root(state) / 'memory.lock'):
         _agent_no_links(last)
         if last.stat().st_size > 2 * 1024 * 1024:
             raise ValueError('Last-Session dosyasi degismis veya cok buyuk.')
-        if marker not in last.read_text(encoding='utf-8'):
-            fd = os.open(last, os.O_APPEND | os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0))
-            with os.fdopen(fd, 'a', encoding='utf-8', newline='\n') as output:
-                output.write(addition)
-                output.flush()
-                os.fsync(output.fileno())
+        before = last.read_bytes()
+        if marker.encode('utf-8') not in before:
+            card = _agent_session_card(job, summary, outcome.relative_to(vault).as_posix(), receipt, marker)
+            updated = _agent_insert_card(before, card)
+            # Another writer between our read and the replace keeps its text: re-read, never overwrite.
+            if last.read_bytes() != before:
+                raise ValueError('Last-Session bu sirada degisti; kart eklenmedi, sonuc ve receipt korundu.')
+            _atomic_bytes(last, updated)
         if marker not in last.read_text(encoding='utf-8'):
             raise ValueError('Last-Session eklemesi geri okunamadi.')
     job.update(receipt=receipt, outcome=outcome.relative_to(vault).as_posix(), last_session=last.relative_to(vault).as_posix())
     _agent_json(folder / 'job.json', job)
     return terminal, summary
+
+
+def _agent_session_card(job, summary, outcome, receipt, marker):
+    """The companion's own card shape: '## YYYY-MM-DD HH:MM · label · session[:8]', newest first."""
+    label = 'Yakala ajanı / ' + job['client'].capitalize()
+    text = re.sub(r'\s+', ' ', summary).strip()
+    return ('## ' + now().strftime('%Y-%m-%d %H:%M') + ' · ' + label + ' · ' + job['session_id'][:8] + '\n\n' +
+            marker + '\n' + text + '\n\nKart: [[' + job['card_path'] + ']] · Sonuç: [[' + outcome +
+            ']] · Receipt: [[' + receipt + ']]\nOturum: `' + job['client'] + ' ' + job['session_id'] + '`\n')
+
+
+def _agent_insert_card(before, card):
+    """Insert below the leading '# ' title (or at the top), keeping every existing byte and line ending."""
+    newline = b'\r\n' if b'\r\n' in before else b'\n'
+    block = card.encode('utf-8').replace(b'\n', newline)
+    lines = before.splitlines(keepends=True)
+    index = 0
+    if lines and lines[0].startswith(b'# '):
+        index = 1
+        while index < len(lines) and not lines[index].strip():
+            index += 1
+        head = b''.join(lines[:index])
+        if not head.endswith(newline + newline):
+            head = head.rstrip(b'\r\n') + newline + newline
+        return head + block + newline + b''.join(lines[index:])
+    return block + newline + before
+
+
+def _atomic_bytes(path, data):
+    path = Path(path)
+    fd, temporary = tempfile.mkstemp(prefix='.yakala-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def _agent_end(vault, state, job, status, reason):
