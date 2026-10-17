@@ -301,10 +301,34 @@ ajan işinin popup'tan ayrılmasını sağlayan yeni süreç ayarını almalıd�
 - `gizli` (varsayılan): iş arka planda başsız bir oturumda çalışır, bitince bildirim gelir.
 - `pencere`: Ctrl+Enter ekranda normal bir Claude Code penceresi açar; ajanın ne yaptığını canlı
   izlersin, gerekirse aynı pencerede yazarak yön verirsin. Araç sınırı gizli çalışmayla aynıdır
-  (genel kabuk yok, yalnız Yakala araçları ve web araması). İş, ajan `complete` çağırınca biter;
-  receipt ve kart güncellemesi yine çalışan tarafından yapılır, pencere açık kalır ve konuşma
-  sürdürülebilir. Pencereyi sonuç bırakmadan kapatırsan iş `onay-bekliyor` olur. Tur ve bütçe
-  sınırları yalnız gizli çalışmada uygulanır; zaman sınırı ikisinde de geçerlidir.
+  (genel kabuk yok, yalnız Yakala araçları; ağ ayarı aşağıda). İş, ajan `complete` çağırınca
+  teslim edilir; receipt ve kart güncellemesi yine çalışan tarafından doğrulanarak yapılır, pencere
+  açık kalır ve konuşma sürdürülebilir. Pencereyi sonuç bırakmadan kapatırsan iş `onay-bekliyor`
+  olur. Tur ve bütçe sınırları yalnız gizli çalışmada uygulanır; zaman sınırı ikisinde de
+  geçerlidir. Pencere bir yalıtım değildir: aynı konsolda kullanıcının kendi Claude Code
+  denetimleri (ör. `!` ile komut) açıktır ve iş bittikten sonra pencere bir sonraki işle aynı anda
+  açık kalabilir.
+
+**Ağ: kısıtlı ya da açık.** Ajan aynı bağlamda hem güvenilmeyen kaynağı hem özel notlarını
+okur; bir kaynağa gizlenmiş talimat, okunan not metnini bir URL'ye ya da arama sorgusuna
+koydurmaya çalışabilir.
+
+- `kisitli` (varsayılan): genel web araması kapalıdır. `fetch_source` ve `download` yalnız
+  yakalanan adresi ve izinli bir sayfadan çalışanın kendi ayrıştırdığı bağlantıları açar; modelin
+  ürettiği yeni adresler reddedilir. Bağlantı seçimi ve zamanlama gibi yan kanallar kalır; bu tam
+  bir veri sızıntısı koruması değildir.
+- `acik`: Claude'un web araması (Codex'te hosted arama) ve herkese açık her adres kullanılabilir.
+  Araştırma gerektiren işler (ör. bir videodaki müziği bulmak) için gerekir; özel notlar ile web
+  aynı çıkış kanalını paylaşır.
+
+```sh
+py -3 beyin.py yakala ajan claude --ag acik
+```
+
+**Last-Session.** Çalışan, sonuç kartını companion düzeninde başlığın altına ekler. Okuma ile
+yazma arasında dosya değişirse kart eklenmez; sonuç ve receipt korunur. Bu kontrol ile atomik
+değiştirme arasındaki çok kısa aralıkta kilide katılmayan bir editörün yazısı kaybolabilir;
+taşınabilir bir karşılaştır-ve-değiştir yolu olmadığından bu risk bilerek kabul edilmiştir.
 
 ```sh
 py -3 beyin.py yakala kur --ajan claude --ajan-gorunum pencere
