@@ -551,10 +551,24 @@ def context(store, budget, session, harness, query='', receipt='', warning='', p
     if project and isinstance(project, str) and project.strip():
         proj_clean = project.strip()
         if not (proj_clean.startswith(('/', '\\')) or '..' in proj_clean.replace('\\', '/').split('/')):
+            candidate_dirs = []
+            try:
+                from beyin_v3_projects import read_project_scopes, _scope_key
+                scopes = read_project_scopes(store.vault_root)
+                if scopes and scopes.get('folders'):
+                    p_key = _scope_key(proj_clean)
+                    for f_key, p_name in scopes['folders']:
+                        if _scope_key(p_name) == p_key:
+                            candidate_dirs.append(store.vault_root / f_key)
+            except Exception:
+                pass
             for folder in ('projects', 'Projeler', 'projeler'):
-                found = False
+                candidate_dirs.append(store.vault_root / folder / proj_clean)
+
+            found = False
+            for cand_dir in candidate_dirs:
                 for p_name in ('Kurallar.md', '.rules.md', 'rules.md'):
-                    lexical = store.vault_root / folder / proj_clean / p_name
+                    lexical = cand_dir / p_name
                     from beyin_v3 import _path_redirected
                     if any(_path_redirected(part) for part in (lexical, *lexical.parents)
                            if part != store.vault_root and part.is_relative_to(store.vault_root)):

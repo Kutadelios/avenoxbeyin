@@ -93,6 +93,57 @@ def read_project_scopes(vault_root):
     }
 
 
+def resolve_active_project(payload, harness, vault_root):
+    """Determine the active project from payload or harness working directory (#288).
+
+    Explicit payload['project'] takes highest precedence.
+    When absent, resolves cwd relative to the vault root:
+    - Vault root itself returns None (global / unscoped negative control).
+    - Checks .beyin-projects.json folder mappings first.
+    - Falls back to standard conventions: projects/<name>, Projeler/<name>, projeler/<name>.
+    Returns cleaned project name string or None.
+    """
+    if not isinstance(payload, dict):
+        return None
+    explicit = payload.get("project")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+
+    from beyin_v3_bridge import working_directory
+    cwd = working_directory(payload, harness)
+    if cwd is None:
+        return None
+
+    try:
+        resolved_cwd = Path(cwd).resolve()
+        resolved_vault = Path(vault_root).resolve()
+        if not resolved_cwd.is_relative_to(resolved_vault) or resolved_cwd == resolved_vault:
+            return None
+        rel = resolved_cwd.relative_to(resolved_vault).as_posix()
+    except (ValueError, OSError):
+        return None
+
+    # 1. Match against .beyin-projects.json configured folders
+    try:
+        scopes = read_project_scopes(resolved_vault)
+        if scopes and scopes.get("folders"):
+            rel_key = _scope_key(rel)
+            for f_key, p_name in scopes["folders"]:
+                if rel_key == f_key or rel_key.startswith(f_key + "/"):
+                    return p_name
+    except Exception:
+        pass
+
+    # 2. Standard conventions: projects/<name>, Projeler/<name>, projeler/<name>
+    parts = rel.split("/")
+    if len(parts) >= 2 and parts[0] in ("projects", "Projeler", "projeler"):
+        cand = parts[1].strip()
+        if cand and (resolved_vault / parts[0] / cand).is_dir():
+            return cand
+
+    return None
+
+
 def check_project_scopes(vault_root):
     """Inspect .beyin-projects.json for doctor. Reads only local file and vault directory names."""
     path = Path(vault_root) / PROJECT_SCOPES_FILE

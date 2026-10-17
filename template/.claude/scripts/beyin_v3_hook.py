@@ -592,8 +592,8 @@ def main():
             else:
                 store = MemoryStore(state, vault)
             query = prompt_text(payload)
-            project = payload.get('project')
-            project = project if isinstance(project, str) and project.strip() else None
+            from beyin_v3_projects import resolve_active_project
+            project = resolve_active_project(payload, args.harness, vault)
             session = hashlib.sha256(str(payload.get('session_id', 'unknown')).encode()).hexdigest()[:24]
             warning = ('V3 source sync is still running; this context comes from the previous index. '
                        'Verify current Markdown sources before relying on it.\n') if pending else ''

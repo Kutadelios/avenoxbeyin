@@ -366,6 +366,57 @@ class ProjectScopesTest(unittest.TestCase):
         self.assertEqual(added['status'], 'saved')
         self.assertIn('Projeler/Beta', added['folders'])
 
+    def test_resolve_active_project_precedence_and_conventions(self):
+        """resolve_active_project gives explicit project highest precedence, then resolves cwd (#288)."""
+        import beyin_v3_projects as projects
+        # 1. Explicit payload takes precedence even with cwd
+        payload = {'project': 'explicit_proj', 'cwd': str(self.vault / 'projects/alpha')}
+        self.assertEqual(projects.resolve_active_project(payload, 'claude', self.vault), 'explicit_proj')
+
+        # 2. Standard conventions: projects/<name>, Projeler/<name>, projeler/<name>
+        (self.vault / 'projects/alpha').mkdir(parents=True, exist_ok=True)
+        self.assertEqual(projects.resolve_active_project({'cwd': str(self.vault / 'projects/alpha')}, 'claude', self.vault), 'alpha')
+
+        (self.vault / 'Projeler/Beta/nested').mkdir(parents=True, exist_ok=True)
+        self.assertEqual(projects.resolve_active_project({'cwd': str(self.vault / 'Projeler/Beta/nested')}, 'claude', self.vault), 'Beta')
+
+        # 3. Negative controls: vault root itself or outside directories return None
+        self.assertIsNone(projects.resolve_active_project({'cwd': str(self.vault)}, 'claude', self.vault))
+        outside = Path(self.tmp.name) / 'outside'
+        outside.mkdir(parents=True, exist_ok=True)
+        self.assertIsNone(projects.resolve_active_project({'cwd': str(outside)}, 'claude', self.vault))
+
+    def test_resolve_active_project_from_scoped_folder_and_companion_loading(self):
+        """Active project resolves from .beyin-projects.json and companion loads its Kurallar.md (#288)."""
+        import beyin_v3_projects as projects
+        import beyin_v3_companion as companion
+        custom_folder = '🏰 300-Projects/serai'
+        (self.vault / custom_folder).mkdir(parents=True, exist_ok=True)
+        self.scopes({'folders': {custom_folder: 'serai'}})
+
+        # CWD inside mapped folder resolves project
+        payload = {'cwd': str(self.vault / custom_folder)}
+        self.assertEqual(projects.resolve_active_project(payload, 'claude', self.vault), 'serai')
+
+        # Companion context loads rules from this custom mapped project folder
+        comp_dir = self.vault / '🔮 850-Companion'
+        comp_dir.mkdir(parents=True, exist_ok=True)
+        (comp_dir / 'Core.md').write_text('# Core\nKimlik.\n', encoding='utf-8')
+        (comp_dir / 'Kurallar.md').write_text('# Kurallar\n- **kural:** GLOBAL_RULE\n- [kapsam: other] OTHER_RULE\n', encoding='utf-8')
+        (comp_dir / 'Last-Session.md').write_text('# Son oturum\n', encoding='utf-8')
+        (comp_dir / 'Threads.md').write_text('# Threads\n', encoding='utf-8')
+        (self.vault / custom_folder / 'Kurallar.md').write_text('# Serai Kuralları\n- **kural:** SERAI_CUSTOM_RULE\n', encoding='utf-8')
+
+        for f in ('Core.md', 'Kurallar.md', 'Last-Session.md', 'Threads.md'):
+            self.store.ingest({'id': f, 'kind': 'note', 'status': 'active',
+                               'source': f'🔮 850-Companion/{f}', 'text': (comp_dir / f).read_text(encoding='utf-8')})
+        self.store.ingest({'id': 'serai-rules', 'kind': 'note', 'status': 'active',
+                           'source': f'{custom_folder}/Kurallar.md', 'text': (self.vault / custom_folder / 'Kurallar.md').read_text(encoding='utf-8')})
+
+        text = companion.context(self.store, 8000, 'test-session', 'claude', project='serai')
+        self.assertIn('SERAI_CUSTOM_RULE', text)
+        self.assertIn('GLOBAL_RULE', text)
+        self.assertNotIn('OTHER_RULE', text)
 
 if __name__ == '__main__':
     unittest.main()
