@@ -6008,14 +6008,15 @@ def _agent_receipt(vault, state, job, summary, refs):
     entry = _agent_vault_file(vault, 'beyin.py')
     prefix = [_windows_python(), str(entry), 'receipt']
     rc, help_text, error = _run([*prefix, '--help'], 15, cwd=str(vault))
-    if rc or any(flag not in help_text for flag in ('--file', '--harness', '--session')):
-        raise ValueError('Kurulu beyin.py receipt sozlesmesi dogrulanamadi (--file/--harness/--session).')
+    if rc or any(flag not in help_text for flag in ('--file', '--harness')):
+        raise ValueError('Kurulu beyin.py receipt sozlesmesi dogrulanamadi (--file/--harness).')
     event_id = 'yakala-' + job['id']
     payload = {'event_id': event_id, 'summary': summary, 'refs': refs, 'session': job['session_id']}
     path = _agent_job_dir(vault, state, job['id']) / 'receipt.json'
     _agent_json(path, payload)
-    rc, output, error = _run([*prefix, '--file', str(path), '--harness', job['client'],
-                             '--session', job['session_id'], '--json'], 60, cwd=str(vault))
+    # The session travels in the JSON payload: beyin.py rejects --file combined with --session.
+    rc, output, error = _run([*prefix, '--file', str(path), '--harness', job['client'], '--json'],
+                             60, cwd=str(vault))
     if rc:
         raise ValueError('Receipt kaydedilemedi; sonuc dosyalari korundu. ' + error[-300:])
     try:

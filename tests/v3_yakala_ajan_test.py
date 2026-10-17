@@ -588,7 +588,7 @@ class AgentFinalizationTest(AgentFiles):
             if '--help' in argv:
                 return 0, '--file --harness --session --json', ''
             self.assertEqual(argv[argv.index('--harness') + 1], fixture.job['client'])
-            self.assertEqual(argv[argv.index('--session') + 1], fixture.job['session_id'])
+            self.assertNotIn('--session', argv)  # beyin.py: --file cannot be combined with receipt flags
             payload = json.loads(Path(argv[argv.index('--file') + 1]).read_text(encoding='utf-8'))
             self.assertEqual(payload['session'], fixture.job['session_id'])
             self.assertEqual(payload['event_id'], 'yakala-' + fixture.job['id'])
