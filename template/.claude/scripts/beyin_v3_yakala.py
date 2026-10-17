@@ -6891,6 +6891,15 @@ def _agent_job_notes(vault, state, job):
     return _agent_checked_path(vault, parts, create=True)
 
 
+def _agent_own_note(parts, job):
+    """This job's card, its raw text, its attached files and the result notes it created."""
+    if not job:
+        return False
+    card = _agent_parts(job['card_path'])
+    return (parts == card or parts == card[:-1] + [RAW, job['card_id'] + '.md'] or
+            parts[:-1] in (card[:-1] + [FILES], card[:-1] + ['Ajan', job['id']]))
+
+
 def _agent_safe_note(vault, path, job=None):
     parts = _agent_parts(path)
     special = path in ('AGENTS.md', 'CLAUDE.md', '.agents/skills/beyin-yakala/SKILL.md',
@@ -6908,14 +6917,14 @@ def _agent_safe_note(vault, path, job=None):
     if not target.is_file():
         raise ValueError('Note is missing or is not a regular file.')
     if raw:
-        _agent_read_note(_agent_checked_path(vault, _agent_parts(job['card_path'])))
+        _agent_read_note(_agent_checked_path(vault, _agent_parts(job['card_path'])), own=True)
     # Captured attachments are a separate private store. Only this card's linked text is available.
     if FILES in parts and job:
         card_parts = _agent_parts(job['card_path'])
         if parts[:-1] != card_parts[:-1] + [FILES]:
             raise ValueError('Only this card\'s attached text files are available.')
         card = _agent_checked_path(vault, card_parts)
-        body = _agent_read_note(card)
+        body = _agent_read_note(card, own=True)
         if path not in re.findall(r'\[\[([^\]\r\n]+)\]\]', body):
             raise ValueError('The requested file is not attached to this card.')
     return target
@@ -6935,10 +6944,11 @@ def _agent_read_text(path, limit=_AGENT_NOTE_BYTES):
     return data.decode('utf-8-sig', 'strict')
 
 
-def _agent_read_note(path):
+def _agent_read_note(path, own=False):
     """Honor explicit scalar privacy metadata, in addition to the filename/path deny rules.
 
-    `private` is not itself a remote ban: capture cards use it for ordinary user notes.
+    `visibility: private` keeps a note out of hook context (audience "internal"); it stays out of
+    this job too, except for the job's own card, raw text, attachments and result notes (`own`).
     Accept canonical JSON frontmatter and bounded flat YAML, not a general YAML parser.
     Ambiguous/duplicate privacy metadata must not silently become an unrestricted note.
     """
@@ -6977,7 +6987,7 @@ def _agent_read_note(path):
                 value = _value(scalar.group(1)) if scalar else raw.strip()
                 pairs.append((key, value))
             metadata = unique(pairs)
-        for key in ('remote_allowed', 'sensitivity', 'kaynak_guveni'):
+        for key in ('remote_allowed', 'sensitivity', 'kaynak_guveni', 'visibility'):
             if key in metadata:
                 if isinstance(metadata[key], (dict, list)) or metadata[key] is None:
                     raise ValueError('Privacy metadata must have an unambiguous scalar value.')
@@ -6986,6 +6996,8 @@ def _agent_read_note(path):
                 metadata.get('sensitivity') in ('sensitive', 'secret', 'restricted', 'confidential', 'hassas', 'gizli') or
                 metadata.get('kaynak_guveni') in ('blocked', 'engellendi', 'yasak')):
             raise ValueError('This note\'s frontmatter forbids remote/background reading.')
+        if metadata.get('visibility') == 'private' and not own:
+            raise ValueError('visibility: private notes stay out of background jobs, as they stay out of hook context.')
     return text
 
 
@@ -7418,7 +7430,8 @@ def _agent_tool_call(vault, state, job_id, name, arguments):
         raise ValueError('This job has already completed; additional writes are disabled.')
     if name == 'read_note':
         path = _agent_safe_note(vault, arguments['path'], job)
-        return {'path': arguments['path'], 'text': _agent_read_note(path), 'source_trust': 'vault-data'}
+        own = _agent_own_note(_agent_parts(arguments['path']), job)
+        return {'path': arguments['path'], 'text': _agent_read_note(path, own=own), 'source_trust': 'vault-data'}
     if name == 'search_notes':
         return _agent_note_search(vault, arguments['query'])
     if name == 'fetch_source':

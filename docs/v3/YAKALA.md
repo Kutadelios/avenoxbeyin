@@ -450,8 +450,8 @@ başarılar kaybolmaz: her yayın niyeti ve tamamlanan dosya ayrı kaydedilir, k
 receipt ve Last-Session kapanışına dahil edilir.
 Bridge gizli/hassas yolları, sembolik bağları ve Windows junction'larını reddeder.
 `remote_allowed: false`, hassas `sensitivity` veya engellenmiş `kaynak_guveni` metadata'sı olan
-notları okumaz. `visibility: private` tek başına uzaktaki modele gönderme yasağı değildir;
-normal yakalama kartları da bu değeri kullanır.
+notları okumaz. `visibility: private` notlar hook bağlamına girmediği gibi bu işe de açılmaz;
+yalnız işin kendi kartı, ham metni, ekleri ve kendi sonuç notları okunur.
 Bu mahremiyet kontrolü canonical JSON frontmatter ve düz skaler YAML alanlarını okur;
 tekrarlanan anahtar, bozuk/kapanmamış metadata veya desteklenmeyen biçim sessizce atlanmaz.
 

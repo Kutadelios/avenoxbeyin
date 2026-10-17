@@ -1512,22 +1512,24 @@ class AgentBridgeFilesTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.call('read_note', path=path)
         self.assertEqual(self.call('search_notes', query='needle')['matches'], [])
-        self.note('ordinary.md', '---\nvisibility: private\n---\nordinary authorized private note')
+        self.note('ordinary.md', '---\nvisibility: internal\n---\nordinary authorized internal note')
         self.assertIn('ordinary authorized', self.call('read_note', path='ordinary.md')['text'])
 
     def test_json_and_quoted_yaml_privacy_flags_control_both_reading_and_search(self):
         canary = 'metadata-permission-canary'
         cases = (
             ('json-false', '{"remote_allowed":false}', False),
-            ('json-true', '{"remote_allowed":true,"visibility":"private"}', True),
+            ('json-true', '{"remote_allowed":true,"visibility":"internal"}', True),
+            ('json-true-private', '{"remote_allowed":true,"visibility":"private"}', False),
             ('json-sensitive', '{"remote_allowed":true,"sensitivity":"sensitive"}', False),
             ('json-escaped-key-false', r'{"remote\u005fallowed":false}', False),
             ('json-escaped-key-true', r'{"remote\u005fallowed":true}', True),
             ('json-escaped-value', r'{"sensitivity":"sensi\u0074ive","remote_allowed":true}', False),
-            ('json-pretty', '{\n  "remote_allowed": true,\n  "visibility": "private"\n}', True),
+            ('json-pretty', '{\n  "remote_allowed": true,\n  "visibility": "internal"\n}', True),
             ('yaml-double-quoted-key', '"remote_allowed": false', False),
             ('yaml-single-quoted-key', "'remote_allowed': false", False),
-            ('yaml-quoted-key-true', '"remote_allowed": true\nvisibility: private', True),
+            ('yaml-quoted-key-true', '"remote_allowed": true\nvisibility: internal', True),
+            ('yaml-true-private', '"remote_allowed": true\nvisibility: private', False),
             ('yaml-quoted-blocked', '"kaynak_guveni": blocked', False),
         )
         expected = []
@@ -1575,6 +1577,27 @@ class AgentBridgeFilesTest(unittest.TestCase):
         self.note(raw, 'private raw source')
         with self.assertRaises(ValueError):
             self.call('read_note', path=raw)
+
+    def test_private_notes_stay_out_except_this_jobs_own_card_raw_and_results(self):
+        # Hook context never shows `visibility: private` (audience "internal"); neither may a job
+        # that also has public fetch and web search. Its own card and outputs stay readable.
+        canary = 'private-diary-canary'
+        self.note('knowledge/gunluk.md', '---\nvisibility: private\n---\n' + canary)
+        self.note('knowledge/gunluk-json.md', '---\n{"visibility": "private"}\n---\n' + canary)
+        other = yakala.capture(self.vault, text='Baska bir pano metni ' + canary, why='Baska is', state=self.state)
+        for path in ('knowledge/gunluk.md', 'knowledge/gunluk-json.md', other['path']):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                self.call('read_note', path=path)
+        self.assertEqual(self.call('search_notes', query=canary)['matches'], [])
+        own = yakala.capture(self.vault, text='Bu isin pano metni', why='Ozetle', state=self.state)
+        self.assertEqual(yakala.find_card(self.vault, own['id'], self.state)['meta']['visibility'], 'private')
+        self.job.update(card_id=own['id'], card_path=own['path'], url='')
+        self.assertIn('Bu isin pano metni', self.call('read_note', path=own['path'])['text'])
+        raw = (Path(own['path']).parent / '.ham' / (own['id'] + '.md')).as_posix()
+        self.note(raw, '---\nvisibility: private\n---\nham metin')
+        self.assertIn('ham metin', self.call('read_note', path=raw)['text'])
+        result = self.call('write_note', title='Ozet', content='Sonuc metni')
+        self.assertIn('Sonuc metni', self.call('read_note', path=result['path'])['text'])
 
     def test_search_excludes_hidden_sensitive_and_attachment_folders(self):
         self.note('.cache/needle.md', 'needle')
