@@ -286,6 +286,24 @@ veya `py -3 beyin.py yakala ajan codex` yeterlidir. Mac/Linux'ta `py -3` yerine 
 Bu Windows sürümüne ilk geçişte `kur` komutunu yeniden çalıştır: state'teki dinleyici kopyası da
 ajan işinin popup'tan ayrılmasını sağlayan yeni süreç ayarını almalıdır.
 
+**Görünüm: gizli ya da pencere.** Claude ve Windows'ta ajanın nasıl çalışacağını seçebilirsin:
+
+- `gizli` (varsayılan): iş arka planda başsız bir oturumda çalışır, bitince bildirim gelir.
+- `pencere`: Ctrl+Enter ekranda normal bir Claude Code penceresi açar; ajanın ne yaptığını canlı
+  izlersin, gerekirse aynı pencerede yazarak yön verirsin. Araç sınırı gizli çalışmayla aynıdır
+  (genel kabuk yok, yalnız Yakala araçları ve web araması). İş, ajan `complete` çağırınca biter;
+  receipt ve kart güncellemesi yine çalışan tarafından yapılır, pencere açık kalır ve konuşma
+  sürdürülebilir. Pencereyi sonuç bırakmadan kapatırsan iş `onay-bekliyor` olur. Tur ve bütçe
+  sınırları yalnız gizli çalışmada uygulanır; zaman sınırı ikisinde de geçerlidir.
+
+```sh
+py -3 beyin.py yakala kur --ajan claude --ajan-gorunum pencere
+py -3 beyin.py yakala ajan claude --gorunum gizli
+```
+
+`kur --ajan claude` bir terminalde `--ajan-gorunum` olmadan çalıştırılırsa hangisini istediğini
+sorar. Kurulumu bir ajana yaptırıyorsan ajan bu seçimi sana sormalıdır.
+
 1. Kısayola bas, kaynağı seç ve **Neden** alanına yapılacak işi yaz. Özellik açıkken altta
    `Ctrl+Enter · Kaydet ve ajana ver (claude)` veya `(codex)` görünür. Kapalıyken bu satır
    görünmez; Ctrl+Enter bir ajan işi başlatmaz ve yanlışlıkla düz Enter kaydına dönüşmez.

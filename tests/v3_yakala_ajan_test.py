@@ -358,6 +358,79 @@ class AgentCommandTest(AgentFiles):
             self.assertIn(required, prompt)
 
 
+class AgentWindowViewTest(AgentFiles):
+    """gorunum=pencere: a visible interactive Claude Code console with the hidden run's tool boundary."""
+
+    def windowed(self, request='Bu gönderinin linkini kontrol et.'):
+        with patch.object(yakala, '_agent_window_supported', return_value=True):
+            self.configure('claude')
+            result = yakala.configure_agent(self.vault, self.state, 'claude', view='pencere')
+        self.assertEqual(result['gorunum'], 'pencere')
+        return self.queued(request=request, url='https://example.com/post')
+
+    def test_hidden_is_the_default_and_old_settings_without_the_field_still_load(self):
+        self.configure('claude')
+        self.assertEqual(yakala.agent_settings(self.vault, self.state)['gorunum'], 'gizli')
+        saved = json.loads(self.config_path.read_text(encoding='utf-8'))
+        saved.pop('gorunum')
+        self.config_path.write_text(json.dumps(saved), encoding='utf-8')
+        self.assertEqual(yakala.agent_settings(self.vault, self.state)['gorunum'], 'gizli')
+
+    def test_window_is_only_offered_for_claude_on_windows(self):
+        with patch.object(yakala, '_agent_window_supported', return_value=True), self.assertRaises(ValueError):
+            yakala.configure_agent(self.vault, self.state, 'codex', view='pencere')
+        with patch.object(yakala, '_agent_window_supported', return_value=False), self.assertRaises(ValueError):
+            yakala.configure_agent(self.vault, self.state, 'claude', view='pencere')
+        self.assertFalse(self.config_path.exists())
+
+    def test_window_command_is_interactive_with_the_same_tool_boundary(self):
+        result, job, card = self.windowed(request='Müziği bul "--dangerously-skip-permissions" $(x)')
+        prefix = [str(Path(self.tmp.name) / 'native CLI' / 'claude.exe')]
+        with patch.object(yakala, '_agent_window_supported', return_value=True), patch.object(yakala, '_agent_executable', return_value=prefix):
+            argv = yakala._agent_command(self.vault, self.state, job, job['config'])
+        self.assertEqual(argv[:len(prefix)], prefix)
+        for flag in ('-p', '--output-format', '--verbose'):
+            self.assertNotIn(flag, argv)
+        for flag in ('--strict-mcp-config', '--no-chrome', '--session-id'):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index('--session-id') + 1], result['session_id'])
+        self.assertEqual(argv[argv.index('--tools') + 1], 'WebSearch')
+        self.assertEqual(argv[argv.index('--permission-mode') + 1], 'dontAsk')
+        for flag in ('--dangerously-skip-permissions', 'bypassPermissions', '--bare'):
+            self.assertNotIn(flag, argv)
+        # The request travels only inside the single prompt argument, after every option.
+        self.assertTrue(argv[-1].startswith('Bu vault icinde'))
+        self.assertIn('canli izliyor', argv[-1])
+        self.assertEqual([item for item in argv if 'Müziği bul' in item], [argv[-1]])
+
+    def run_window(self, poll, manifest):
+        result, job, card = self.windowed()
+        folder = yakala._agent_job_dir(self.vault, self.state, job['id'])
+        if manifest:
+            (folder / 'result.json').write_text('{}', encoding='utf-8')
+        process = types.SimpleNamespace(pid=777, poll=Mock(return_value=poll), kill=Mock())
+        with patch.object(yakala, '_agent_window_supported', return_value=True), \
+                patch.object(yakala.subprocess, 'Popen', return_value=process) as popen, \
+                patch.object(yakala, '_agent_finalize', return_value=('completed', 'tamam')) as finalize, \
+                patch('time.sleep'):
+            outcome = yakala._agent_run_window(self.vault, self.state, job, ['claude.exe', 'istem'])
+        return outcome, process, popen, finalize, job
+
+    def test_window_job_finalizes_on_the_manifest_and_leaves_the_console_open(self):
+        outcome, process, popen, finalize, job = self.run_window(poll=None, manifest=True)
+        self.assertEqual(outcome, ('completed', 'tamam'))
+        finalize.assert_called_once()
+        process.kill.assert_not_called()
+        self.assertTrue(popen.call_args.kwargs['creationflags'] & 0x10)  # CREATE_NEW_CONSOLE
+        self.assertNotIn('stdin', popen.call_args.kwargs)
+        self.assertEqual(yakala._agent_load_job(self.vault, self.state, job['id'])['gorunum'], 'pencere')
+
+    def test_closing_the_window_without_a_result_is_not_completion(self):
+        outcome, process, popen, finalize, job = self.run_window(poll=0, manifest=False)
+        self.assertEqual(outcome[0], 'approval_required')
+        finalize.assert_not_called()
+
+
 class AgentPreflightTest(AgentFiles):
     HELP = ('--print -p --permission-mode --permission-prompts --tools --allowedTools --disallowedTools '
             '--strict-mcp-config --mcp-config --session-id --append-system-prompt '

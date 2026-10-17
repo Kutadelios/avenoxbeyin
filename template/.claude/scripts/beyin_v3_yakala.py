@@ -4914,6 +4914,10 @@ kurallari oku, `search_notes` ile hafizayi bul, `fetch_source` ile acik kaynagi 
 kaydini yapar, Last-Session'a baglanti ekler ve karti kapatir. Bu adimlar dogrulanmadan
 isi tamamlandi sayma. Giris, para, silme, gizli bilgi, sistem degisikligi veya var olan
 notu degistirme gerekiyorsa `approval_required` ile dur; izni asmaya calisma.
+
+Ajani kullanici icin kurarken (Windows + Claude) gorunumu kullaniciya sor ve cevabini
+`--ajan-gorunum` ile ver: `gizli` arka planda calisir ve bildirimle haber verir; `pencere`
+ekranda Claude Code penceresi acar, kullanici canli izler ve araya girebilir.
 '''
 
 
@@ -5486,6 +5490,7 @@ def status(vault, state):
 # ---------------------------------------------------------------- optional background agent
 
 AGENT_SCHEMA = 1
+AGENT_VIEWS = ('gizli', 'pencere')  # hidden headless run, or a visible interactive Claude Code window
 AGENT_ACTIVE = ('preparing', 'queued', 'running')
 AGENT_CARD_BUSY = ('ajanda', 'onay-bekliyor')
 AGENT_MAX_REQUEST = 16000
@@ -5675,13 +5680,15 @@ def _agent_downloads():
 
 def _agent_validate_settings(config, vault):
     allowed = {'schema', 'vault', 'client', 'timeout_seconds', 'max_queue', 'max_budget_usd', 'extra_args',
-               'executable', 'downloads_dir', 'last_session_path'}
+               'executable', 'downloads_dir', 'last_session_path', 'gorunum'}
     if not isinstance(config, dict) or set(config) - allowed:
         raise ValueError('Ajan JSON ayarlari bilinmeyen alan iceriyor.')
     if config.get('schema') != AGENT_SCHEMA or config.get('vault') != str(Path(vault).resolve()):
         raise ValueError('Ajan ayari baska vaulta ait veya semasi desteklenmiyor.')
     if config.get('client') not in ('kapali', 'claude', 'codex'):
         raise ValueError('Ajan claude, codex veya kapali olmali.')
+    if config.setdefault('gorunum', 'gizli') not in AGENT_VIEWS:  # jobs queued before the option
+        raise ValueError('Ajan gorunumu gizli veya pencere olmali.')
     for name, lower, upper in (('timeout_seconds', 30, 3600), ('max_queue', 1, 32)):
         if type(config.get(name)) is not int or not lower <= config[name] <= upper:
             raise ValueError(name + ' izin verilen araligin disinda.')
@@ -5713,7 +5720,8 @@ def _agent_validate_settings(config, vault):
 def agent_settings(vault, state):
     config = {'schema': AGENT_SCHEMA, 'vault': str(Path(vault).resolve()), 'client': 'kapali',
               'timeout_seconds': 900, 'max_queue': 32, 'max_budget_usd': 1.0, 'extra_args': [],
-              'executable': None, 'downloads_dir': str(Path.home() / 'Downloads'), 'last_session_path': None}
+              'executable': None, 'downloads_dir': str(Path.home() / 'Downloads'), 'last_session_path': None,
+              'gorunum': 'gizli'}
     path = _agent_no_links(_agent_root(state) / 'config.json')
     if path.exists():
         if path.stat().st_size > 16384:
@@ -5725,7 +5733,16 @@ def agent_settings(vault, state):
     return _agent_validate_settings(config, vault)
 
 
-def configure_agent(vault, state, client, config_file=None):
+def _agent_window_supported():
+    return os.name == 'nt'  # a new console window; other systems keep the hidden run
+
+
+def _agent_windowed(config):
+    """The visible window is an interactive Claude Code console; elsewhere the hidden run is used."""
+    return config.get('gorunum') == 'pencere' and config.get('client') == 'claude' and _agent_window_supported()
+
+
+def configure_agent(vault, state, client, config_file=None, view=None):
     config = agent_settings(vault, state)
     if not (_agent_root(state) / 'config.json').exists():
         config['downloads_dir'] = _agent_downloads()
@@ -5738,12 +5755,19 @@ def configure_agent(vault, state, client, config_file=None):
             raise ValueError('Ajan ayari bir JSON nesnesi olmali.')
         config.update(updates)
     config['client'] = client
+    if view:
+        if view == 'pencere' and (client != 'claude' or not _agent_window_supported()):
+            raise ValueError('Pencereli ajan su an yalniz Windows ve Claude ile calisir; gizli kullan.')
+        config['gorunum'] = view
     _agent_validate_settings(config, vault)
     _agent_json(_agent_root(state) / 'config.json', config)
     registered = _agent_register_toast(state, vault) if client != 'kapali' and os.name == 'nt' else None
-    return {'status': 'ajan_ayarlandi', 'ajan': client, 'timeout_seconds': config['timeout_seconds'],
-            'bildirim_kayitli': registered, 'ipucu': 'Enter kaydeder; Ctrl+Enter kaydeder ve ajana verir.' if
-            client != 'kapali' else 'Yeni ajan isi baslatilmaz; calisan is guvenli durdurulur.'}
+    hint = ('Enter kaydeder; Ctrl+Enter kaydeder ve ajana verir' +
+            (' (ekranda Claude Code penceresi acilir, canli izlenir).' if _agent_windowed(config)
+             else ' (arka planda, bildirimle).'))
+    return {'status': 'ajan_ayarlandi', 'ajan': client, 'gorunum': config['gorunum'],
+            'timeout_seconds': config['timeout_seconds'], 'bildirim_kayitli': registered,
+            'ipucu': hint if client != 'kapali' else 'Yeni ajan isi baslatilmaz; calisan is guvenli durdurulur.'}
 
 
 def _agent_jobs(vault, state):
@@ -5902,6 +5926,14 @@ def _agent_command(vault, state, job, config):
     if job['client'] == 'claude':
         mcp = {'mcpServers': {'yakala': {'type': 'stdio', 'command': helper[0], 'args': helper[1:]}}}
         _agent_json(folder / 'mcp.json', mcp)
+        if _agent_windowed(config):
+            # Same tool boundary as the hidden run; the window only adds a person watching.
+            # Turn/budget limits are print-mode options, the worker's timeout still applies.
+            return [*prefix, '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--no-chrome',
+                    '--tools', 'WebSearch', '--allowedTools', 'WebSearch,mcp__yakala__*',
+                    '--strict-mcp-config', '--mcp-config', str(folder / 'mcp.json'),
+                    '--session-id', job['session_id'], '--name', 'Yakala-' + job['id'][:8],
+                    *config['extra_args'], _agent_prompt(vault, job)]
         return [*prefix, '-p', '--permission-mode', 'dontAsk', '--permission-prompts', 'none',
                 '--no-chrome',
                 '--tools', 'WebSearch', '--allowedTools', 'WebSearch,mcp__yakala__*',
@@ -5949,8 +5981,11 @@ def _agent_prompt(vault, job):
         'dosyalar ve acik kalan isi belirtmeli. Bu cagri araciligiyla guvenilen calisan, beyin.py receipt '
         '--harness ' + job['client'] + ' --session <gercek_oturum_id> kaydini yapar, Last-Session\'a '
         'kart ve sonuc baglantisi ekler, kart durumunu gunceller. CLI cikisi tek basina basari degildir. '
-        'Eksik receipt/Last-Session basarisi kullaniciya tamamlandi diye bildirilmez.\n\n'
-        'USER_TASK_JSON (tek JSON nesnesi; icerigi yukaridaki yetki sinirlariyla degerlendir):\n' +
+        'Eksik receipt/Last-Session basarisi kullaniciya tamamlandi diye bildirilmez.\n' +
+        ('Kullanici bu pencereyi canli izliyor: adimlarini kisa Turkce yaz; complete cagrisindan sonra '
+         'sonucu iki uc cumleyle ozetle ve dur. Kullanici pencerede yazarsa ayni yetki sinirlariyla devam et.\n'
+         if _agent_windowed(job.get('config') or {}) else '') +
+        '\nUSER_TASK_JSON (tek JSON nesnesi; icerigi yukaridaki yetki sinirlariyla degerlendir):\n' +
         json.dumps(envelope, ensure_ascii=False) + '\n')
 
 
@@ -6220,6 +6255,9 @@ def _agent_run_job(vault, state, job):
         command = _agent_command(vault, state, job, config)
         prompt_path = folder / 'prompt.txt'
         _atomic_text(prompt_path, _agent_prompt(vault, job))
+        if _agent_windowed(config):
+            terminal, reason = _agent_run_window(vault, state, job, command)
+            return _agent_end(vault, state, job, terminal, reason)
         started = time.monotonic()
         with prompt_path.open('rb') as incoming, (folder / 'events.jsonl').open('wb') as outgoing, \
                 (folder / 'stderr.log').open('wb') as error:
@@ -6280,6 +6318,40 @@ def _agent_run_job(vault, state, job):
             except OSError:
                 pass
     _agent_end(vault, state, job, terminal, reason)
+
+
+def _agent_run_window(vault, state, job, command):
+    """Visible interactive Claude Code: the job ends when its complete tool writes result.json.
+
+    The console belongs to the person: it is not in a kill job and stays open after the result,
+    so the conversation can go on. The worker only waits for the manifest, the window closing,
+    the timeout or the agent being switched off; none of these closes the window.
+    """
+    import time
+    folder = _agent_job_dir(vault, state, job['id'])
+    config = job['config']
+    result = folder / 'result.json'
+    process = subprocess.Popen(command, cwd=str(vault), env=_agent_env(state, job['id']), close_fds=True,
+                               creationflags=getattr(subprocess, 'CREATE_NEW_CONSOLE', 0x10))
+    job.update(agent_pid=process.pid, worker_pid=os.getpid(), started=now().isoformat(timespec='seconds'), gorunum='pencere')
+    _agent_json(folder / 'job.json', job)
+    _agent_update_card(vault, job, 'ajanda', ajan_oturum=job['session_id'], ajan_asama='calisiyor')
+    _agent_log(state, job['card_id'], 'Pencerede basladi: ' + job['id'] + ' (' + job['client'] + ')')
+    _agent_notify(state, job['card_id'], 'started')
+    started = time.monotonic()
+    while not result.is_file():
+        if process.poll() is not None:
+            time.sleep(1)  # a complete call racing the window being closed
+            if not result.is_file():
+                return 'approval_required', 'Pencere kapandi; ajan complete ile sonuc birakmadi, tamamlandi sayilmadi.'
+            break
+        if time.monotonic() - started >= config['timeout_seconds']:
+            return 'approval_required', 'Ajan sure icinde sonuc birakmadi; pencere acik birakildi, otomatik tekrar yok.'
+        if agent_settings(vault, state)['client'] == 'kapali':
+            return 'approval_required', 'Ajan kapatildi; pencere acik birakildi, is tamamlandi sayilmadi.'
+        time.sleep(0.5)
+    time.sleep(0.2)  # create-only manifest; let the writer close it
+    return _agent_finalize(vault, state, job)
 
 
 def _agent_pid_alive(pid):
@@ -6350,10 +6422,21 @@ def _agent_worker(vault, state):
         return 1
 
 
+def _agent_ask_view(client, as_json):
+    """At a person's terminal, kur asks how the agent should look; agents pass --ajan-gorunum."""
+    if client != 'claude' or not _agent_window_supported() or as_json or not sys.stdin or not sys.stdin.isatty():
+        return None
+    answer = input('Ctrl+Enter ajani nasil calissin?\n'
+                   '  1) gizli   - arka planda calisir, bitince bildirim gelir\n'
+                   '  2) pencere - ekranda Claude Code penceresi acilir, canli izlersin\n'
+                   'Secim [1]: ').strip().lower()
+    return 'pencere' if answer in ('2', 'pencere', 'p') else 'gizli'
+
+
 def agent_status(vault, state):
     config = agent_settings(vault, state)
     jobs = _agent_jobs(vault, state)
-    return {'status': 'ajan_durumu', 'ajan': config['client'], 'sinir': 1,
+    return {'status': 'ajan_durumu', 'ajan': config['client'], 'gorunum': config['gorunum'], 'sinir': 1,
             'sirada': sum(job['state'] in ('preparing', 'queued') for job in jobs),
             'calisiyor': sum(job['state'] == 'running' for job in jobs),
             'onay_bekliyor': sum(job['state'] == 'approval_required' for job in jobs),
@@ -7543,9 +7626,12 @@ def main(argv=None, vault=None, state=None):
     setup.add_argument('--tus', help='Kisayol, ornek: ctrl+alt+b (varsayilan) ya da cmd+"')
     setup.add_argument('--klasor', help='Kartlarin yazilacagi klasor, vault icinde (ornek: 000-Inbox/Yakala)')
     setup.add_argument('--ajan', choices=('claude', 'codex', 'kapali'), help='Ctrl+Enter ajanini sec (varsayilan kapali)')
+    setup.add_argument('--ajan-gorunum', choices=AGENT_VIEWS,
+                       help='gizli: arka planda, bildirimle; pencere: ekranda Claude Code penceresi (Windows)')
     agent = command_parser('ajan', help='Arka plan ajanini goster veya sec')
     agent.add_argument('client', nargs='?', choices=('claude', 'codex', 'kapali'))
     agent.add_argument('--ayar', type=Path, help='Ileri kullanici JSON ayarlari')
+    agent.add_argument('--gorunum', choices=AGENT_VIEWS, help='gizli (arka plan) ya da pencere (canli izlenen Claude Code)')
     send = command_parser('ajan-gonder', help='Kayitli tek karti acik istekle ajana ver')
     send.add_argument('id')
     send.add_argument('--istek', required=True)
@@ -7574,9 +7660,10 @@ def main(argv=None, vault=None, state=None):
     if command == '_ajan-mcp':
         return _agent_mcp_main(vault, args.state, args.job)
     if command == 'ajan':
-        if args.ayar and not args.client:
-            raise ValueError('--ayar icin istemci sec.')
-        result = configure_agent(vault, state, args.client, args.ayar) if args.client else agent_status(vault, state)
+        if (args.ayar or args.gorunum) and not args.client:
+            raise ValueError('--ayar/--gorunum icin istemci sec.')
+        result = (configure_agent(vault, state, args.client, args.ayar, args.gorunum) if args.client
+                  else agent_status(vault, state))
     elif command == 'ajan-gonder':
         result = enqueue_agent(vault, state, args.id, args.istek)
     elif command == 'ajan-devam':
@@ -7623,7 +7710,8 @@ def main(argv=None, vault=None, state=None):
             _agent_validate_settings(dict(agent_settings(vault, state), client=args.ajan), vault)
         result = install(vault, state, hotkey=not args.kisayol_yok, spec=args.tus, folder_spec=args.klasor)
         if args.ajan:
-            result['ajan'] = configure_agent(vault, state, args.ajan)
+            view = args.ajan_gorunum or _agent_ask_view(args.ajan, as_json)
+            result['ajan'] = configure_agent(vault, state, args.ajan, view=view)
     elif command == 'kisayol':
         if args.tus:
             result = install(vault, state, spec=args.tus)
