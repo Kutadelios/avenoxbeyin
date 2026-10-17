@@ -211,6 +211,12 @@ def human_result(result, command, installed_version=None):
             return format_human(result)
         except Exception:
             return json.dumps(result, ensure_ascii=False, indent=2)
+    if command == 'audit':
+        try:
+            from beyin_v3_audit import format_audit_human
+            return format_audit_human(result)
+        except Exception:
+            return json.dumps(result, ensure_ascii=False, indent=2)
     if command == 'jev':
         features = result.get('features', {})
         provider = result.get('provider')
