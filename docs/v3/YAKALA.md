@@ -374,8 +374,8 @@ kapanış kayıtlarını gösterir. Last-Session'a bunların bağlantıları ekl
 "o indirdiğin müzik" gibi bir isteği bu kaynak kayıtları üzerinden bulmak mümkündür; bunun için
 normal vault hafıza kurallarının ve hook'larının kurulmuş olması gerekir.
 
-**Receipt entegrasyonu — varsayım:** Bu modül `beyin.py receipt` uygulamasını içermez. Adaptör,
-yerel `receipt --help` çıktısında `--file`, `--harness` ve `--session` desteğini arar; `--json`
+**Receipt entegrasyonu, varsayım:** Bu modül `beyin.py receipt` uygulamasını içermez. Adaptör,
+yerel `receipt --help` çıktısında `--file` ve `--harness` desteğini arar; oturum kimliği dosyadaki `session` alanıyla gider; `--json`
 ile makinece okunur yanıt bekler. Dosya girdisinin `event_id`, `summary`, `refs`, `session`
 alanlarını kabul etmesi; yanıtın aynı `event_id`, başarı durumu ve vault içindeki gerçek `source`
 yolunu vermesi beklenen entegrasyon sözleşmesidir. Kod boş olmayan bir `status` ister ve yaygın
@@ -407,9 +407,9 @@ py -3 beyin.py yakala ajan claude --ayar yakala-ajan.json
 | Alan | Varsayılan ve sınır |
 |---|---|
 | `client` | `kapali`; CLI üzerinden `claude`, `codex` veya `kapali` seçilir |
-| `timeout_seconds` | 900 saniye; 30–3600. CLI çalışma süresidir; hazırlık ve hafıza kapanışı ayrıca sürebilir |
-| `max_queue` | 32; çalışan dahil 1–32 aktif iş. Eşzamanlı çalışma sınırı sabit 1'dir |
-| `max_budget_usd` | 1.0; 0.05–20. Claude'un tahmini harcama sınırıdır; Codex'e uygulanmaz, kesin fatura tavanı değildir |
+| `timeout_seconds` | 900 saniye; 30 ile 3600 arası. CLI çalışma süresidir; hazırlık ve hafıza kapanışı ayrıca sürebilir |
+| `max_queue` | 32; çalışan dahil 1 ile 32 arası aktif iş. Eşzamanlı çalışma sınırı sabit 1'dir |
+| `max_budget_usd` | 1.0; 0.05 ile 20 arası. Claude'un tahmini harcama sınırıdır; Codex'e uygulanmaz, kesin fatura tavanı değildir |
 | `extra_args` | `[]`; yalnız `--model DEĞER` ve Claude için `--effort DEĞER`, her biri en fazla bir kez |
 | `executable` | `null`; PATH'ten bulunur. Özelleştirilecekse tek bir mutlak executable veya tanınan npm shim yolu |
 | `downloads_dir` | İlk kurulumda işletim sisteminin İndirilenler klasörü, bulunamazsa `~/Downloads`; mutlak yerel klasör |
@@ -461,6 +461,12 @@ MCP yapılandırmasıyla çalışır; `--permission-prompts` için en az 2.1.259
 MCP/eklenti envanteri doğrulanamazsa veya etkin ek araç varsa iş durur. Yerel CLI yardım/sürümü
 denetlenir; bilinmeyen konfigürasyonda izinler gevşetilmez. Web araması iki istemcide de ayrıca
 açıktır. `bypassPermissions` ve tam dosya sistemi erişimi verilmez. [belge: CLI, config ve izin kaynakları]
+
+Ölçüm (Claude Code 2.1.302, Codex 0.160.0, macOS): Claude oturumunun araç listesi yalnız
+`WebSearch` ve altı `mcp__yakala__*` aracıdır; Bash ve dosya araçları yoktur. Codex'te kabuk aracı
+yoktur, ancak `view_image` (vault dışındaki yerel görüntüleri de okuyabilir), `apply_patch`
+(read-only sandbox yazmayı reddeder), kod modu `exec` ve alt ajan (`spawn_agent`) araçları listede
+kalır. Codex için "yalnız altı araç ve web araması" sınırı bu sürümde tam değildir.
 
 **Güven sınırı:** Normal vault hook'ları, istemci ve `beyin.py receipt` güvenilen yerel koddur;
 onların kendi davranışları bu araç köprüsü tarafından sandbox içine alınmaz. Ajanın kullandığı
