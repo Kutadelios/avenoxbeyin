@@ -5548,11 +5548,19 @@ class _AgentFileLock:
 
 
 def _agent_root(state):
-    return Path(state) / 'yakala' / 'ajan'
+    # Resolved once here: a state folder the user keeps behind a link (macOS /var -> /private/var,
+    # a Windows 8.3 TEMP name such as RUNNER~1) is their choice, and every owned path derived from
+    # this root then compares equal to the resolved spellings the bridge and the worker use.
+    return Path(state).resolve() / 'yakala' / 'ajan'
 
 
 def _agent_no_links(path):
-    """Inspect ancestors before descendants, including Windows junctions and dangling links."""
+    """Inspect ancestors before descendants, including Windows junctions and dangling links.
+
+    Callers pass a path below a root resolved once (_agent_root, the resolved vault or Downloads
+    folder), so a linked prefix above that root is already its real path; a link at or below the
+    root is still refused.
+    """
     path = Path(path).absolute()
     if str(path).startswith(('\\\\', '//')):
         raise ValueError('Ajan durum ve indirme yolu yerel diskte olmali.')
@@ -6110,7 +6118,8 @@ def _agent_publish_downloads(vault, state, job, manifest):
         source = _agent_checked_path(folder, ['downloads', name])
         if source.stat().st_size != item['bytes']:
             raise ValueError('Indirme dosyasi degismis.')
-        destination = _agent_private_dir(Path(job['config']['downloads_dir']))
+        # A Downloads folder the user moved behind a link is accepted; links below it are not.
+        destination = _agent_private_dir(Path(job['config']['downloads_dir']).resolve())
         # Publish by a same-filesystem hard link: atomic, and never replaces a user's file.
         # Record each intent before copying, and each effect immediately after publication.
         # On unsupported filesystems or interrupted copies, the explicit .part file is kept.
@@ -6147,6 +6156,7 @@ def _agent_publish_downloads(vault, state, job, manifest):
 
 
 def _agent_finalize(vault, state, job):
+    vault = Path(vault).resolve()  # note paths below are compared with the resolved bridge paths
     folder = _agent_job_dir(vault, state, job['id'])
     path = _agent_no_links(folder / 'result.json')
     if path.stat().st_size > 512 * 1024:

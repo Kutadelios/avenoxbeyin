@@ -34,14 +34,17 @@ class AgentFiles(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='v3-yakala-ajan-')
         self.addCleanup(self.tmp.cleanup)
-        self.vault = Path(self.tmp.name) / 'Örnek Beyin'
+        # main() and enqueue resolve the vault and state (macOS /var, Windows RUNNER~1);
+        # the fixture uses the same spelling, so argv and path assertions compare like with like.
+        base = Path(self.tmp.name).resolve()
+        self.vault = base / 'Örnek Beyin'
         self.vault.mkdir()
-        self.state = Path(self.tmp.name) / 'state'
+        self.state = base / 'state'
         self.config_path = self.state / 'yakala' / 'ajan' / 'config.json'
         local_state = patch.object(yakala, 'default_state', return_value=self.state)
         local_state.start()
         self.addCleanup(local_state.stop)
-        self.downloads = Path(self.tmp.name) / 'İndirilenler'
+        self.downloads = base / 'İndirilenler'
         self.downloads.mkdir()
         downloads = patch.object(yakala, '_agent_downloads', return_value=str(self.downloads))
         downloads.start()
@@ -263,6 +266,70 @@ class AgentQueueTest(AgentFiles):
         for value in ('../outside', '../../outside', '', '/tmp/outside', '..\\outside'):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 yakala._agent_job_dir(self.vault, self.state, value)
+
+
+class AgentLinkedRootTest(unittest.TestCase):
+    """A link ABOVE the vault, state or Downloads folder is the user's choice (macOS /var ->
+    /private/var, Windows RUNNER~1, a vault kept under a linked folder); a link BELOW is refused."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='yakala-agent-linked-')
+        self.addCleanup(temporary.cleanup)
+        real = Path(temporary.name) / 'gercek klasor'
+        real.mkdir()
+        self.linked = Path(temporary.name) / 'bagli klasor'
+        try:
+            os.symlink(real, self.linked, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest('symlinks are not available to this account')
+        self.vault, self.state, self.downloads = self.linked / 'Örnek Beyin', self.linked / 'state', self.linked / 'İndirilenler'
+        self.vault.mkdir()
+        self.downloads.mkdir()
+        self.outside = Path(temporary.name) / 'disari'
+        self.outside.mkdir()
+        for name, value in (('default_state', self.state), ('_agent_downloads', str(self.downloads)),
+                            ('_agent_spawn_worker', None), ('_agent_register_toast', None), ('_agent_notify', None)):
+            mocked = patch.object(yakala, name, return_value=value)
+            mocked.start()
+            self.addCleanup(mocked.stop)
+
+    def test_linked_prefix_above_vault_state_and_downloads_is_accepted(self):
+        self.assertEqual(yakala.agent_settings(self.vault, self.state)['client'], 'kapali')
+        yakala.configure_agent(self.vault, self.state, 'claude')
+        saved = yakala.capture(self.vault, url='https://example.com/music', why='Find the music', state=self.state)
+        # `beyin.py yakala ajan-devam` passes the state exactly as resolve_state() spelled it.
+        queued = yakala.enqueue_agent(self.vault, self.state, saved['id'], 'Find the music')
+        job = yakala._agent_load_job(self.vault, self.state, queued['job_id'])
+        job['state'] = 'running'
+        yakala._agent_json(yakala._agent_job_dir(self.vault, self.state, job['id']) / 'job.json', job)
+        body = b'ID3\x04\0\0\0\0\0\0a test track'
+
+        def fetch(url, byte_limit, output):
+            output.write(body)
+            return {'url': url, 'body': None, 'bytes': len(body), 'content_type': 'audio/mpeg',
+                    'sha256': hashlib.sha256(body).hexdigest()}
+        with patch.object(yakala, '_agent_public_get', side_effect=fetch):
+            download = yakala._agent_tool_call(self.vault, self.state, job['id'], 'download',
+                                              {'url': 'https://example.com/a.mp3', 'filename': 'song.mp3'})
+        note = yakala._agent_tool_call(self.vault, self.state, job['id'], 'write_note',
+                                      {'title': 'Result', 'content': 'Verified result'})
+        yakala._agent_tool_call(self.vault, self.state, job['id'], 'complete',
+                               {'status': 'completed', 'summary': 'Saved.', 'notes': [note['path']], 'downloads': [download]})
+        manifest = json.loads((yakala._agent_job_dir(self.vault, self.state, job['id']) / 'result.json').read_text(encoding='utf-8'))
+        published = yakala._agent_publish_downloads(self.vault, self.state, job, manifest)
+        self.assertEqual(Path(published[0]['path']).read_bytes(), body)
+        self.assertEqual(Path(published[0]['path']).parent, self.downloads.resolve())
+
+    def test_link_below_the_state_root_is_still_refused(self):
+        yakala.configure_agent(self.vault, self.state, 'claude')
+        jobs = self.state / 'yakala' / 'ajan' / 'jobs'
+        os.symlink(self.outside, jobs, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            yakala._agent_jobs(self.vault, self.state)
+        saved = yakala.capture(self.vault, text='Not', why='Istek', state=self.state)
+        with self.assertRaises(ValueError):
+            yakala.enqueue_agent(self.vault, self.state, saved['id'], 'Istek')
+        self.assertEqual(list(self.outside.iterdir()), [])
 
 
 class AgentLifecycleTest(AgentFiles):
@@ -1103,7 +1170,7 @@ class AgentPlatformTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()  # _agent_register_toast passes the resolved vault
 
     def file(self, relative, text='fixture'):
         path = self.root / relative
@@ -1342,7 +1409,8 @@ class AgentBridgeFilesTest(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='yakala-agent-bridge-')
         self.addCleanup(temporary.cleanup)
-        self.vault, self.state = Path(temporary.name) / 'Örnek Vault', Path(temporary.name) / 'state'
+        base = Path(temporary.name).resolve()  # the bridge is started with a resolved vault and state
+        self.vault, self.state = base / 'Örnek Vault', base / 'state'
         self.vault.mkdir()
         self.state.mkdir()
         result = yakala.capture(self.vault, url='https://example.com/music', why='Find the music', state=self.state)
