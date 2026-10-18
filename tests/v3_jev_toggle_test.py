@@ -402,6 +402,22 @@ class StatusReportTest(JevToggleTestCase):
         self.assertNotIn('Jev: acik', rendered[5])
         self.assertIn('Jev: golge (yalniz), saglayici: laya', rendered[6])
 
+    def test_jev_status_and_doctor_report_context_mode_notice_when_not_turn(self):
+        import beyin_v3_preferences as prefs
+        prefs.save(self.vault, {'context_mode': 'session'})
+        self.cli('jev', 'on', '--enable', 'auto_context')
+        status = json.loads(self.cli('jev', 'status').stdout)
+        self.assertIn('context_mode_notice', status)
+        self.assertIn("Automatic context requires context_mode 'turn'", status['context_mode_notice'])
+        doctor = json.loads(self.cli('doctor').stdout)
+        self.assertIn('context_mode_notice', doctor['jev'])
+        # When context_mode is turn, notice is not added
+        prefs.save(self.vault, {'context_mode': 'turn'})
+        status_turn = json.loads(self.cli('jev', 'status').stdout)
+        self.assertNotIn('context_mode_notice', status_turn)
+        doctor_turn = json.loads(self.cli('doctor').stdout)
+        self.assertNotIn('context_mode_notice', doctor_turn['jev'])
+
 
 if __name__ == '__main__':
     unittest.main()

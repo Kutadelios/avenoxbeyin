@@ -313,6 +313,11 @@ def jev_advice(result):
     laya = result.get("provider") == "laya"
     if result.get("automatic_model_calls"):
         result["notice"] = JEV_NOTICE_LAYA if laya else JEV_NOTICE
+        if result.get("context_mode") and result.get("context_mode") != "turn":
+            result["context_mode_notice"] = (
+                f"Automatic context requires context_mode 'turn', but current mode is '{result['context_mode']}'. "
+                "Enable with: beyin.py preferences --context-mode turn"
+            )
     if laya:
         result["provider_notice"] = LAYA_NOTICE.format(base_url=result.get("laya", {}).get("base_url", "?"))
     elif result.get("mode") != "off" and not result.get("key_present"):
@@ -1107,12 +1112,17 @@ def main(argv=None, return_result=False):
                 result = jev_client().status(state)
                 if args.check:
                     result["server"] = jev_client().probe(state)
+                import beyin_v3_preferences as preferences
+                result["context_mode"] = preferences.read(vault).get("context_mode")
                 result = jev_advice(result)
             else:
                 if args.check:
                     raise ValueError("--check works only with jev status")
-                result = jev_advice(jev_client().set_mode(state, args.mode, enable=args.enable, disable=args.disable,
-                                                          provider=args.provider, laya=laya or None))
+                result = jev_client().set_mode(state, args.mode, enable=args.enable, disable=args.disable,
+                                                provider=args.provider, laya=laya or None)
+                import beyin_v3_preferences as preferences
+                result["context_mode"] = preferences.read(vault).get("context_mode")
+                result = jev_advice(result)
                 result["changed"] = True
         elif args.command == "hook-reconcile":
             result = hook_reconcile(vault, state, force=getattr(args, 'force', False))
@@ -1191,6 +1201,9 @@ def main(argv=None, return_result=False):
             except Exception as exc:  # information only; never hides the rest of doctor
                 result['instruction_references'] = {'status': 'unavailable', 'error': type(exc).__name__}
             result['jev'] = jev_status(state)
+            if result['jev'].get('automatic_model_calls') and result['preferences'].get('context_mode') != 'turn':
+                result['jev']['context_mode'] = result['preferences'].get('context_mode')
+                result['jev'] = jev_advice(result['jev'])
             result['automatic_model_calls'] = result['jev'].get('automatic_model_calls', False)
             health = result['hook-health.json'] or {}
             gaps_info = result['receipt-gaps.json']

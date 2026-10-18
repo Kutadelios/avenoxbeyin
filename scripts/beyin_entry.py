@@ -46,6 +46,9 @@ def jev_lines(result):
         lines.append('Otomatik baglam acik: her turda istemin ve en fazla 8 aday ic/kamu notunun basligi ile'
                      ' ilk 600 karakteri ' + ('yerel Laya sunucusuna' if laya else 'saglayiciya') +
                      ' gider. Ozel notlar gonderilmez.')
+        if result.get('context_mode_notice'):
+            lines.append("Uyari: otomatik baglam yalniz 'context_mode: turn' ile calisir; su anki ayar '" +
+                         ascii_text(result.get('context_mode', '?')) + "' (etkinlestirmek icin: beyin.py preferences --context-mode turn).")
         if laya and not result.get('auto_context_applied'):
             lines.append('Laya yalniz golge modda calisir: otomatik baglam puanlari yalniz kaydedilir, baglami degistirmez.')
     if laya:
@@ -356,6 +359,10 @@ def human_result(result, command, installed_version=None):
                          (', saglayici: laya (' if jev.get('provider') == 'laya' else ' (') + 'otomatik baglam: ' +
                          ('acik' if jev.get('automatic_model_calls') else 'kapali') + '), son 24 saat ' +
                          str(jev.get('last_24h', {}).get('calls', 0)) + ' cagri')
+            if jev.get('context_mode_notice'):
+                cm = ascii_text(jev.get('context_mode', (result.get('preferences') or {}).get('context_mode', '?')))
+                lines.append("Jev otomatik baglam yalniz 'context_mode: turn' ile calisir; su an '" +
+                             cm + "' modunda. Etkinlestirmek icin: beyin.py preferences --context-mode turn")
         if result.get('secrets_redacted'):
             lines.append('Sir suzgeci ' + str(result['secrets_redacted']) + ' eslesmeyi [REDACTED] olarak yazdi.')
         cov = result.get('receipt_coverage')

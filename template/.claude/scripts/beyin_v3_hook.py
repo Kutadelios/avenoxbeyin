@@ -562,9 +562,7 @@ def main():
             print(json.dumps(reminder) if reminder else (json.dumps(output_context(args.harness, event, notice)) if notice else ('{"decision":"stop"}' if args.harness == 'antigravity' else '{}')))
             return
         if event in ("SessionStart", "UserPromptSubmit"):
-            if not due and not disabled:
-                print(json.dumps(output_context(args.harness, event, notice + 'V3 automatic check deferred by your interval preference. Read current sources or use beyin.py context for fresh information.')))
-                return
+            deferred = not due and not disabled
             pending = False
             try:
                 if process is not None:
@@ -577,17 +575,21 @@ def main():
             # markdown_sources table, which the sync worker creates and every reader tolerates
             # missing, so the foreground skips importing the sync engine.
             from beyin_v3 import MemoryStore
-            if pending:
-                # A sync slower than SYNC_WAIT keeps running in the background. Retrieval reads the
-                # index the previous sync committed, read-only so it never contends for the
-                # worker's write lock; only a store that does not exist yet injects nothing.
-                # A sync that outgrows SQLite's page cache holds the exclusive lock until it commits;
-                # waiting the store's default 10 s would outlive the client's 5 s hook limit.
+            if pending or deferred:
+                # A sync slower than SYNC_WAIT keeps running in the background, or an interval preference
+                # defers source synchronization. Retrieval reads the index the previous sync committed,
+                # read-only so it never contends for the worker's write lock; only a store that does
+                # not exist yet injects nothing. A sync that outgrows SQLite's page cache holds the
+                # exclusive lock until it commits; waiting the store's default 10 s would outlive the
+                # client's 5 s hook limit.
                 try:
                     store = MemoryStore(state, vault, read_only=True,
                                         busy_timeout=max(0.1, HOOK_BUDGET - 1.0 - (time.monotonic() - started)))
                 except ValueError:
-                    print(json.dumps(output_context(args.harness, event, notice + "V3 source sync is pending. Verify current Markdown sources before using prior context.")))
+                    msg = ("V3 source sync is pending. Verify current Markdown sources before using prior context."
+                           if pending else
+                           "V3 automatic check deferred by your interval preference. Read current sources or use beyin.py context for fresh information.")
+                    print(json.dumps(output_context(args.harness, event, notice + msg)))
                     return
             else:
                 store = MemoryStore(state, vault)
@@ -595,8 +597,14 @@ def main():
             project = payload.get('project')
             project = project if isinstance(project, str) and project.strip() else None
             session = hashlib.sha256(str(payload.get('session_id', 'unknown')).encode()).hexdigest()[:24]
-            warning = ('V3 source sync is still running; this context comes from the previous index. '
-                       'Verify current Markdown sources before relying on it.\n') if pending else ''
+            if pending:
+                warning = ('V3 source sync is still running; this context comes from the previous index. '
+                           'Verify current Markdown sources before relying on it.\n')
+            elif deferred:
+                warning = ('V3 automatic check deferred by your interval preference; this context comes from the previous index. '
+                           'Read current sources or use beyin.py context for fresh information.\n')
+            else:
+                warning = ''
             health = state / "hook-health.json"
             if health.exists():
                 sync = json.loads(health.read_text(encoding="utf-8")).get("sync", {})
@@ -703,10 +711,13 @@ def main():
         else:
             print(json.dumps(reminder) if reminder else (json.dumps(output_context(args.harness, event, notice)) if notice else ('{"decision":"stop"}' if args.harness == "antigravity" else "{}")))
     except Exception as exc:
-        if locals().get("pending") is True and type(exc).__module__ == "sqlite3":
-            # The previous index stayed locked by the running sync past the hook budget: the
-            # worker is not failing, so keep the pending notice and record no hook error.
-            print(json.dumps(output_context(args.harness, event, notice + "V3 source sync is pending. Verify current Markdown sources before using prior context.")))
+        if (locals().get("pending") is True or locals().get("deferred") is True) and type(exc).__module__ == "sqlite3":
+            # The previous index stayed locked past the hook budget: the
+            # worker is not failing, so keep the pending/deferred notice and record no hook error.
+            msg = ("V3 source sync is pending. Verify current Markdown sources before using prior context."
+                   if locals().get("pending") is True else
+                   "V3 automatic check deferred by your interval preference. Read current sources or use beyin.py context for fresh information.")
+            print(json.dumps(output_context(args.harness, event, notice + msg)))
             return
         atomic(state / "hook-error.json", {"at": time.time(), "error": type(exc).__name__})
         if not args.metadata_only and locals().get("event") in ("SessionStart", "UserPromptSubmit"):

@@ -1169,6 +1169,43 @@ runpy.run_path({str(HOOK)!r}, run_name='__main__')
         context = self.invoke(payload, 'claude', script=self.slow_sync_hook())['hookSpecificOutput']['additionalContext']
         self.assertIn('V3 source sync is pending', context)
 
+    def deferred_sync_hook(self):
+        """The real hook where interval preference defers source synchronization."""
+        wrapper = self.root / 'deferred_sync_hook.py'
+        wrapper.write_text(f'''import runpy, sys
+sys.path.insert(0, {str(SCRIPTS)!r})
+import beyin_v3_preferences
+beyin_v3_preferences.claim_check = lambda *args, **kwargs: False
+sys.argv[0] = {str(HOOK)!r}
+runpy.run_path({str(HOOK)!r}, run_name='__main__')
+''', encoding='utf-8')
+        self.env.pop('BEYIN_V3_NO_SPAWN', None)
+        return wrapper
+
+    def test_user_prompt_submit_reads_previous_index_when_check_is_deferred(self):
+        # Issue #398: context_mode: turn with interval_minutes > 0 used to drop context entirely.
+        # When check is deferred, prompt retrieval reads the previous committed index.
+        self.seed()
+        import beyin_v3_preferences as preferences
+        preferences.save(self.vault, {'context_mode': 'turn', 'interval_minutes': 15})
+        payload = {'hook_event_name': 'UserPromptSubmit', 'session_id': 'deferred-turn', 'event_id': 'deferred-1',
+                   'cwd': str(self.vault), 'prompt': 'Nebula calibration owner'}
+        context = self.invoke(payload, 'claude', script=self.deferred_sync_hook())['hookSpecificOutput']['additionalContext']
+        self.assertIn('Synthetic Reviewer', context)
+        self.assertIn('deferred by your interval preference', context)
+        self.assertIn('previous index', context)
+        self.assertFalse((self.state / 'hook-error.json').exists())
+
+    def test_user_prompt_submit_without_index_when_check_is_deferred_keeps_notice(self):
+        import beyin_v3_preferences as preferences
+        preferences.save(self.vault, {'context_mode': 'turn', 'interval_minutes': 15})
+        payload = {'hook_event_name': 'UserPromptSubmit', 'session_id': 'first-deferred', 'event_id': 'first-deferred-1',
+                   'cwd': str(self.vault), 'prompt': 'Nebula calibration owner'}
+        context = self.invoke(payload, 'claude', script=self.deferred_sync_hook())['hookSpecificOutput']['additionalContext']
+        self.assertIn('deferred by your interval preference', context)
+        self.assertNotIn('previous index', context)
+        self.assertFalse((self.state / 'hook-error.json').exists())
+
     def test_user_prompt_submit_synthetic_filter_honours_opt_out_env(self):
         self.seed()
         self.env['BEYIN_V3_FILTER_HARNESS_TURNS'] = '0'
