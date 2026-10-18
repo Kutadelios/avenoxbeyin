@@ -5999,8 +5999,44 @@ def _agent_spawn_worker(vault, state):
                                 **({} if os.name == 'nt' else {'start_new_session': True}))
 
 
+# Codex features that give a model a way past the bridge: shell and unified exec, the code-mode
+# host (a JS/Node runtime), app connectors and plugins (bundled ones include computer use, a
+# browser, Gmail and Drive), sub-agents, goals and image generation. Measured on Codex CLI
+# 0.155.1 (18.10.2026): with shell_tool alone disabled the model still had `exec`; with
+# code_mode_host disabled it fails closed. Disabled per run; the user's config is untouched.
+CODEX_DISABLED = ('shell_tool', 'unified_exec', 'code_mode_host', 'apps', 'multi_agent', 'plugins',
+                  'remote_plugin', 'computer_use', 'browser_use', 'browser_use_external', 'in_app_browser',
+                  'image_generation', 'goals')
+
+
+def _agent_codex_flags(mcp_off=()):
+    flags = ['-a', 'never']
+    for feature in CODEX_DISABLED:
+        flags += ['--disable', feature]
+    for name in mcp_off:  # names checked by _agent_preflight; TOML bare keys
+        flags += ['-c', 'mcp_servers.' + name + '.enabled=false']
+    return flags
+
+
+def _agent_codex_inventory(prefix, vault, noun, mcp_off=()):
+    rc, output, error = _run([*prefix, *_agent_codex_flags(mcp_off), noun, 'list', '--json'], 15,
+                             cwd=str(vault) if vault else None)
+    try:
+        value = json.loads(output) if not rc else None
+        entries = value if noun == 'mcp' else value['installed']
+        if not isinstance(entries, list) or any(not isinstance(item, dict) or
+                                                not isinstance(item.get('enabled'), bool) for item in entries):
+            raise ValueError('Durumu bilinmeyen ' + noun)
+        return entries
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ValueError('Codex ' + noun + ' envanteri dogrulanamadi; normal oturumda yapilandirmayi incele.') from exc
+
+
 def _agent_preflight(client, prefix, vault=None):
-    """Probe local CLI contracts without a model call; this is not an isolation proof."""
+    """Probe local CLI contracts without a model call; this is not an isolation proof.
+
+    Returns the MCP servers to switch off for this run (Codex), or an empty tuple.
+    """
     if client == 'claude':
         # Claude documents that --help omits some supported options. permission-prompts
         # requires 2.1.259; keep the fixed argv and let unsupported versions fail safely.
@@ -6008,7 +6044,7 @@ def _agent_preflight(client, prefix, vault=None):
         match = re.search(r'\b(\d+)\.(\d+)\.(\d+)\b', output)
         if rc or not match or tuple(map(int, match.groups())) < (2, 1, 259):
             raise ValueError('Claude Code 2.1.259 veya sonrasi gerekli; yerel surum dogrulanamadi.')
-        return
+        return ()
     rc, output, error = _run([*prefix, '--help'], 15, cwd=str(vault) if vault else None)
     required = ('--disable', '--ask-for-approval')
     if rc or any(flag not in output for flag in required):
@@ -6017,17 +6053,22 @@ def _agent_preflight(client, prefix, vault=None):
         rc, output, error = _run([*prefix, 'exec', '--help'], 15, cwd=str(vault) if vault else None)
         if rc or any(flag not in output for flag in ('--ignore-rules', '--json', '--sandbox', '--skip-git-repo-check')):
             raise ValueError('Codex exec guvenlik bayraklari dogrulanamadi.')
-        for noun in ('mcp', 'plugin'):
-            rc, output, error = _run([*prefix, noun, 'list', '--json'], 15, cwd=str(vault) if vault else None)
-            try:
-                value = json.loads(output) if not rc else None
-                entries = value if noun == 'mcp' else value['installed']
-                if not isinstance(entries, list) or any(not isinstance(item, dict) or item.get('enabled') is not False
-                                                       for item in entries):
-                    raise ValueError('Etkin veya durumu bilinmeyen ' + noun)
-            except (ValueError, TypeError, KeyError) as exc:
-                raise ValueError('Codex icin etkin ' + noun + ' olmamali; envanter dogrulanamadi. '
-                                 'Normal oturumda yapilandirmayi incele.') from exc
+        # Most installs have plugins and MCP servers on. The plugins feature is disabled for the
+        # run; a server left from the user's own config is switched off by name, then the
+        # inventory is read again with exactly the run's flags and must show nothing enabled.
+        if any(item['enabled'] for item in _agent_codex_inventory(prefix, vault, 'plugin')):
+            raise ValueError('Codex eklentileri bu calistirmada kapatilamadi; surumu guncelle veya eklentileri incele.')
+        mcp_off = []
+        for item in _agent_codex_inventory(prefix, vault, 'mcp'):
+            if item['enabled']:
+                name = item.get('name')
+                if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', name) or name == 'yakala':
+                    raise ValueError('Codex MCP sunucusu adi guvenle kapatilamiyor: ' + repr(name)[:80])
+                mcp_off.append(name)
+        if any(item['enabled'] for item in _agent_codex_inventory(prefix, vault, 'mcp', mcp_off)):
+            raise ValueError('Codex MCP sunuculari bu calistirmada kapatilamadi; normal oturumda incele.')
+        return tuple(mcp_off)
+    return ()
 
 
 def _agent_windows_argv(command):
@@ -6082,7 +6123,7 @@ def _agent_command(vault, state, job, config):
                 ('mcp_servers.yakala.enabled', True),
                 ('mcp_servers.yakala.args', helper[1:]), ('mcp_servers.yakala.required', True),
                 ('mcp_servers.yakala.tool_timeout_sec', 60)]
-    command = [*prefix, '-a', 'never', '--disable', 'shell_tool', '--disable', 'apps', '--disable', 'multi_agent']
+    command = [*prefix, *_agent_codex_flags(job.get('codex_mcp_off') or ())]
     for key, value in settings:
         # JSON strings/arrays/booleans form a valid TOML value for these scalar-only settings.
         command += ['-c', key + '=' + json.dumps(value, ensure_ascii=True)]
@@ -6443,7 +6484,7 @@ def _agent_run_job(vault, state, job):
     try:
         _agent_validate_settings(config, vault)
         prefix = _agent_executable(job['client'], config.get('executable'))
-        _agent_preflight(job['client'], prefix, vault)
+        job['codex_mcp_off'] = list(_agent_preflight(job['client'], prefix, vault))
         if job['url']:
             _safe_source_url(job['url'])
         command = _agent_command(vault, state, job, config)

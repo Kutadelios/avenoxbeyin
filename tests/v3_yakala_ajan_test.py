@@ -802,6 +802,44 @@ class AgentPreflightTest(AgentFiles):
             with self.subTest(response=response), self.assertRaises((ValueError, RuntimeError, OSError)):
                 self.invoke(plugins=response)
 
+    def test_user_mcp_server_is_switched_off_for_the_run_only(self):
+        calls = []
+        enabled = '[{"name": "node_repl", "enabled": true}, {"name": "old", "enabled": false}]'
+        off = '[{"name": "node_repl", "enabled": false}, {"name": "old", "enabled": false}]'
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            if 'mcp' in argv and 'list' in argv:
+                stdout = off if 'mcp_servers.node_repl.enabled=false' in argv else enabled
+            elif 'plugin' in argv and 'list' in argv:
+                stdout = '{"installed": [], "available": []}'
+            else:
+                stdout = self.HELP
+            return subprocess.CompletedProcess(argv, 0, stdout.encode('utf-8'), b'')
+
+        system = types.SimpleNamespace(**{**vars(os), 'name': 'posix'})
+        with patch.object(yakala, 'os', system), patch.object(yakala.subprocess, 'run', side_effect=run):
+            self.assertEqual(yakala._agent_preflight('codex', ['codex'], self.vault), ('node_repl',))
+        listing = [argv for argv in calls if 'list' in argv]
+        for feature in ('plugins', 'code_mode_host', 'unified_exec', 'computer_use'):
+            self.assertTrue(all(feature in argv for argv in listing), feature)
+
+    def test_unsafe_mcp_name_is_refused_not_quoted(self):
+        for name in ('a.b', 'x y', 'yakala', ''):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                self.invoke(mcp=json.dumps([{'name': name, 'enabled': True}]))
+
+    def test_codex_command_disables_every_bypass_feature_and_named_servers(self):
+        self.configure('codex')
+        result, job, card = self.queued(url='https://example.com/post')
+        job['codex_mcp_off'] = ['node_repl']
+        with patch.object(yakala, '_agent_executable', return_value=['codex']):
+            argv = yakala._agent_command(self.vault, self.state, job, job['config'])
+        for feature in yakala.CODEX_DISABLED:
+            self.assertIn(feature, argv)
+        self.assertIn('mcp_servers.node_repl.enabled=false', argv)
+        self.assertLess(argv.index('mcp_servers.node_repl.enabled=false'), argv.index('exec'))
+
     def test_unsupported_cli_does_not_silently_drop_required_flags(self):
         for client, output in (('codex', 'Usage: old-codex exec PROMPT'),
                                ('claude', '2.1.258 (Claude Code)'), ('claude', 'unexpected version output')):
