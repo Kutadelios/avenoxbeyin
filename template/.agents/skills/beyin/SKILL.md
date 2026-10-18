@@ -58,7 +58,15 @@ Yeni `notes/` veya `knowledge/` kaydı için `python3 beyin.py note-create --fil
 {"source":"knowledge/ornek-karar.md","text":"Kalıcı karar ve dayandığı kaynak bağlantıları.","metadata":{"kind":"fact","project":"proje-adi","visibility":"internal"}}
 ```
 
-Kullanıcının başka bir klasör düzeni varsa onu koruyarak normal dosya araçlarıyla yazabilirsin; aynı adı taşıyan mevcut notu yeni not sanıp ezme.
+Kullanıcının başka bir klasör düzeni varsa onu koru; yeni insan notunu `note-edit` ile `expected_sha256: null` ve `content` vererek oluşturabilirsin. Aynı adı taşıyan mevcut notu yeni not sanıp ezme.
+
+Var olan insan yazımı notları (Last-Session.md, Threads.md, Journal.md, proje ve kişi notları) doğrudan dosya araçlarıyla düzenleme. Önce `python3 beyin.py note-read "klasor/not.md"` ile JSON `content` ve `sha256` oku; ardından `python3 beyin.py note-edit --file ISTEK_JSON` kullan (`--file -` stdin okur). Windows'ta `py -3` kullan. İstek:
+
+```json
+{"source":"klasor/not.md","expected_sha256":"note-read-sha256","edits":[{"old":"tek bir kez geçen mevcut metin","new":"yeni metin"}]}
+```
+
+Her `old` tam bir kez geçmeli; BOM ve CRLF dahil okunan metni ve satır sonlarını koru. Mevcut not için tam `content` gönderme. Çıkış 0 `written` veya `unchanged`, çıkış 2 `conflict`, çıkış 1 `error` demektir. Çakışmada yeniden oku, diğer ajanın metnini koruyarak düzenlemeyi yeniden kur; yalnız hash'i değiştirip eski isteği körlemesine tekrarlama. Hata halinde doğrudan yazmaya geçme. `note-edit` başarılı yazımdan sonra indeksi günceller; otomatik receipt göndermez. Geçici isteği `.beyin-note-write/` içinde benzersiz adla tut, Git'e ekleme ve iş bitince sil. Bu klasörün kilit ve yedeklerini eşitleme; kalıcı `writer.lock` dosyasını silme. Görevleri `task-update` ile güncelle; receipt, generated görünüm ve yapılandırma dosyalarını bu not komutlarıyla düzenleme. Kilit yalnız bu komutları kullanan yazarları koordine eder; aynı notu Obsidian veya başka yazıcıyla eşzamanlı düzenleme.
 
 Genel notlar frontmatter olmadan da indekslenir. Kalıcı karar veya öğrenimde `kind: fact` kullanabilir, dayandığı kaynakları notun gövdesinde bağlayabilirsin. Kullanıcının söylediği ile bağımsız doğruladığın sonucu ayır. Var olan dosyanın gövdesini ve ilgisiz alanlarını koru.
 

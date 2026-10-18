@@ -47,6 +47,8 @@ Beyni Guncelle.cmd
 .omp/hooks/pre/beyin-v3.ts
 # companion-compact süreçler arası kilidi; kalıcıdır ama kullanıcı verisi değildir
 **/.beyin-compact.lock
+# Aynı makinedeki not yazarlarının yerel kilidi, istekleri ve tam bayt yedekleri
+.beyin-note-write/
 # Yerel veritabanından üretilen görünümler: her makine kendisininkini üretir
 daily/v3/
 knowledge/v3/
@@ -154,6 +156,60 @@ göre sıralar, en yenisini korur.
   kalır; `sync` uyarı vermez ve iki makinenin görünümleri sessizce ayrışır. Bunu önlemek için
   `event_id`'nin sonuna kart başlığındaki gibi `Receipt session=` değerinin ilk 8 karakterini
   ekle: `ortak-konu-2026-09-27-3f9a1c2b`.
+
+## Aynı makinede birden çok ajan
+
+Claude Code ve Codex aynı vault'taki insan yazımı notları düzenlerken doğrudan
+dosya yazmak yerine `note-read` ve `note-edit` kullanır. Last-Session.md, Threads.md,
+Journal.md ve proje notları bu akışa dahildir. Görevler için revision kontrollü
+`task-update`, receipt ve üretilen görünümler için kendi V3 komutları kullanılır.
+
+```text
+python3 beyin.py note-read "proje/Threads.md"
+python3 beyin.py note-edit --file istek.json
+```
+
+Windows'ta `python3` yerine `py -3` kullan. `note-read` JSON olarak `source`,
+`sha256`, `content` verir; dosya yoksa son iki alan `null` olur. `content`, UTF-8 BOM
+ve CRLF dahil okunan metni korur; hash ham baytların SHA-256 özetidir. İsteği bu
+okumadan oluştur, satır sonlarını dönüştürme:
+
+```json
+{"source":"proje/Threads.md","expected_sha256":"okumadan-gelen-64-haneli-hash","edits":[{"old":"tek bir kez geçen eski metin","new":"yeni metin"}]}
+```
+
+Her `old` boş olmayan metin olmalı ve uygulandığı anda tam bir kez geçmelidir;
+birden çok düzenleme sırayla uygulanır. Mevcut dosyada tam `content` verilmez.
+Yeni dosyada `expected_sha256: null` ve `content` kullan, `edits` verme.
+`--file -` (varsayılan) JSON'u stdin'den okur. Çıktı her zaman JSON'dur:
+`written` veya `unchanged` çıkış 0, `conflict` çıkış 2, `error` çıkış 1.
+Çakışmada yeniden oku ve diğer ajanın metnini koruyarak hedefli düzenlemeyi yeniden
+kur. Sadece hash'i yenileyip eski metni yeniden yazma; doğrudan dosya yazımıyla
+korumayı atlama. İndeks geri okuması başarısızsa kaynak yazılmış olabilir; mesajı
+kontrol et, yeniden oku ve `sync` çalıştır.
+
+Kilit ve önceki baytların base64 JSON yedekleri vault içindeki
+`.beyin-note-write/` altındadır. MSIX uygulamaları AppData'yı sanallaştırabildiği
+için aynı `.beyin-runtime.json` state yolu bile iki istemcide farklı klasöre
+ulaşabilir. Vault içindeki kilit bu ayrışmadan etkilenmez. Üstteki `.gitignore`
+satırını ekle; araç ayrıca bu yerel klasörde `*` içeren bir `.gitignore` oluşturur.
+İstek dosyalarını da burada benzersiz adla tutup iş bitince kendi isteğini sil.
+Yedekler hassas not metni taşıyabilir, eşitleme ve Git dışında kalmalıdır;
+otomatik yedek temizliği yoktur. `writer.lock` kalıcıdır, açık yazarlar varken silme.
+
+OS kilidi en çok 15 saniye bekler ve süreç kapanınca bırakılır. Kilit altında
+hash kontrolü, tekil hedef denetimi, tam bayt yedeği, geçici dosyaya yazım ve atomik
+değiştirme yapılır; değiştirmeden hemen önce ve sonra kaynak yeniden okunur.
+Başarılı yazım ilgili V3 indeksini günceller. Claude Code oturum kimliği varsa
+receipt hatırlatma penceresi açılır; otomatik receipt gönderilmez.
+
+Koruma işbirliğine dayalıdır. Obsidian, companion yazıcıları ve doğrudan dosya
+araçları bu kilidi almaz; öncesi/sonrası denetim bütün dış yarışları önleyemez.
+Aynı notu eşzamanlı bu araçlarla düzenleme. Kilit çok dosyalı işlem veya ayrı
+makinelerdeki git çalışma kopyaları için garanti vermez. `.beyin-note-write/`
+klasörünü bulut senkronundan da hariç tut. Kaynak yolu vault-göreli görünür
+Markdown olmalıdır; yönetilen kaynaklar, yapılandırma, gizli yollar, symlink ve
+junction yolları reddedilir.
 
 ## Vault'u başka klasöre ya da hesaba taşımak
 

@@ -27,7 +27,7 @@ def default_state(vault: Path) -> Path:
     return base / "beyin-v3" / key
 
 
-SOURCE_WRITE_COMMANDS = ("note-create", "task-create", "task-update")
+SOURCE_WRITE_COMMANDS = ("note-create", "note-edit", "task-create", "task-update")
 
 
 def mark_session_edit(state: Path) -> None:
@@ -827,6 +827,10 @@ def parser():
     ingest.add_argument("--file", default="-", help="JSON input path, or - for stdin")
     note = sub.add_parser("note-create", help="Create a semantic Markdown source without overwriting")
     note.add_argument("--file", default="-", help="JSON {source, text, metadata}")
+    note_read = sub.add_parser("note-read", help="Read a human Markdown source and its byte SHA-256")
+    note_read.add_argument("source")
+    note_edit = sub.add_parser("note-edit", help="Edit a human Markdown source with an expected SHA-256")
+    note_edit.add_argument("--file", default="-", help="JSON {source, expected_sha256, edits} or new content; - for stdin")
     task = sub.add_parser("task-create", help="Create and verify an explicit new task")
     task.add_argument("--file", default="-", help="JSON {source: tasks/name.md, text, metadata: {id,status,owner}}")
     context = sub.add_parser("context", help="Retrieve source-backed shared context")
@@ -929,7 +933,7 @@ def main(argv=None, return_result=False):
         # The advisor switch reads and writes one small file; it needs no index or sync engine.
         engine = load_engine() if args.command not in ("jev", "project-scope", "ingest-server") else None
         store = engine.MemoryStore(state, vault, read_only=read_only_context) if engine else None
-        sync = load_sync()(vault, state) if args.command in ("sync", "recover-views", "recap", "receipt", "task-update", "note-create", "task-create", "context", "jev-review", "jev-answer", "jev-memory", "history") and not read_only_context else None
+        sync = load_sync()(vault, state) if args.command in ("sync", "recover-views", "recap", "receipt", "task-update", "note-create", "note-read", "note-edit", "task-create", "context", "jev-review", "jev-answer", "jev-memory", "history") and not read_only_context else None
         if args.command == "ingest-server":
             _ensure_scripts_path()
             import beyin_v3_ingest_server
@@ -1381,6 +1385,10 @@ def main(argv=None, return_result=False):
         elif args.command == "ingest":
             payload = read_json(args.file)
             result = [store.ingest(record) for record in payload] if isinstance(payload, list) else store.ingest(payload)
+        elif args.command == "note-read":
+            result = sync.note_read(args.source)
+        elif args.command == "note-edit":
+            result = sync.note_edit(read_json(args.file))
         elif args.command == "note-create":
             payload = read_json(args.file)
             result = sync.note_create(payload['source'], payload['text'], payload.get('metadata'))
@@ -1477,7 +1485,9 @@ def main(argv=None, return_result=False):
         else:
             payload = read_json(args.file)
             result = sync.update_task(payload["id"], payload["expected_revision"], payload["changes"])
-        if args.command in SOURCE_WRITE_COMMANDS:
+        if (args.command in SOURCE_WRITE_COMMANDS
+                and (args.command != "note-edit" or result.get('status') == 'written')
+                and os.environ.get("CLAUDE_CODE_SESSION_ID")):
             mark_session_edit(state)
         if return_result:
             return result, 0
@@ -1486,12 +1496,18 @@ def main(argv=None, return_result=False):
     except Exception as exc:
         # No traceback or raw input dump: callers retain their local source files.
         error = {"error": type(exc).__name__, "message": str(exc)}
+        code = 1
+        if args.command in ("note-read", "note-edit"):
+            from beyin_v3_notes import NoteConflict
+            code = 2 if isinstance(exc, NoteConflict) else 1
+            error['status'] = 'conflict' if code == 2 else 'error'
         if isinstance(exc, ValueError) and str(exc) in ERROR_HINTS:
             error["hint"] = ERROR_HINTS[str(exc)]
         if return_result:
-            return error, 1
-        print(json.dumps(error, ensure_ascii=True), file=sys.stderr)
-        return 1
+            return error, code
+        print(json.dumps(error, ensure_ascii=True),
+              file=sys.stdout if args.command in ("note-read", "note-edit") else sys.stderr)
+        return code
 
 
 if __name__ == "__main__":

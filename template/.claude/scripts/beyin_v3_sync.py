@@ -1215,6 +1215,14 @@ class SyncEngine:
         self._record_redactions(redacted)
         return self._write_diagnostics(dict(result_record, redacted=redacted, secrets_redacted=redacted), result)
 
+    def note_read(self, source):
+        from beyin_v3_notes import read
+        return read(self, source)
+
+    def note_edit(self, request):
+        from beyin_v3_notes import apply
+        return apply(self, request)
+
     def note_create(self, source, text, metadata=None):
         if not isinstance(text, str) or not text.strip() or (metadata is not None and not isinstance(metadata, dict)):
             raise ValueError('note text and metadata required')
