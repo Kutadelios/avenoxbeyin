@@ -2002,6 +2002,24 @@ class AgentBridgeFilesTest(unittest.TestCase):
                 self.call('read_note', path=path)
         self.assertEqual(self.call('search_notes', query=canary)['matches'], [])
 
+    def test_obsidian_list_properties_stay_readable_but_never_carry_a_policy_value(self):
+        # Obsidian writes list properties as indented `- item` blocks; most vault notes have them.
+        readable = ('tags:\n  - proje\n  - fikir\naliases:\n  - Plan',
+                    'tags:\n- proje\nremote_allowed: true')
+        for index, front in enumerate(readable):
+            path = 'knowledge/liste-%02d.md' % index
+            self.note(path, '---\n' + front + '\n---\nlist property text')
+            with self.subTest(header=front):
+                self.assertIn('list property text', self.call('read_note', path=path)['text'])
+        refused = ('tags:\n  - proje\nsensitivity: secret', 'sensitivity:\n  - secret',
+                   'sensitivity: internal\n  - secret', 'remote_allowed:\n  - true\n  - false')
+        for index, front in enumerate(refused):
+            path = 'knowledge/liste-yasak-%02d.md' % index
+            self.note(path, '---\n' + front + '\n---\nlist policy canary')
+            with self.subTest(header=front), self.assertRaises(ValueError):
+                self.call('read_note', path=path)
+        self.assertEqual(self.call('search_notes', query='list policy canary')['matches'], [])
+
     def test_simple_allowed_yaml_and_json_values_keep_working_with_crlf(self):
         headers = (
             'remote_allowed: true\nsensitivity: ordinary # safe',

@@ -7149,9 +7149,12 @@ def _agent_read_note(path, own=False):
                 raise ValueError('JSON frontmatter must be one object.')
         else:
             pairs = []
+            owner = False  # a non-policy key with an empty value: Obsidian's `tags:` block list
             for line in text[3:end].splitlines():
                 if not line.strip() or line.lstrip().startswith('#'):
                     continue
+                if owner and re.match(r'^\s*-(?:\s|$)', line):  # YAML allows zero-indent items
+                    continue  # an item of that list; a policy key never owns one (empty value fails)
                 match = re.match(r'''^("(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[\w-]+):\s?(.*)$''', line)
                 if not match:
                     raise ValueError('Unsupported frontmatter cannot be safely read in the background.')
@@ -7162,10 +7165,12 @@ def _agent_read_note(path, own=False):
                 if key.casefold().replace('\u0307', '') in ('remote_allowed', 'sensitivity', 'kaynak_guveni',
                                                             'visibility'):
                     value = _agent_yaml_scalar(raw)
+                    owner = False
                 else:
                     # Non-policy flat metadata can contain the JSON arrays emitted by _dump.
                     # Keys still use the strict decoder so escapes cannot hide a privacy key.
                     value = raw.strip()
+                    owner = not value
                 pairs.append((key, value))
             metadata = unique(pairs)
         for key in ('remote_allowed', 'sensitivity', 'kaynak_guveni', 'visibility'):
