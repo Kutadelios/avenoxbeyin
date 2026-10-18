@@ -41,7 +41,7 @@ class AgentProcessIdentityTest(unittest.TestCase):
         boot = '00000000-0000-0000-0000-000000000001'
 
         def read(path, **_):
-            return boot if str(path).endswith('/boot_id') else raw
+            return boot if Path(path).name == 'boot_id' else raw  # Windows paths use backslashes
 
         system = types.SimpleNamespace(**{**vars(os), 'name': 'posix'})
         platform = types.SimpleNamespace(**{**vars(sys), 'platform': 'linux'})

@@ -7505,7 +7505,7 @@ def _agent_reparse(path):
     """Junctions are reparse points too; is_symlink() alone misses them on Windows."""
     import stat
     info = Path(path).lstat()
-    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, 'st_file_attributes', 0) & 0x400)
+    return stat.S_ISLNK(info.st_mode) or bool((getattr(info, 'st_file_attributes', 0) or 0) & 0x400)
 
 
 def _agent_parts(value):
