@@ -329,8 +329,9 @@ class AgentAutomaticClientTest(AgentFiles):
         self.assertEqual(config['client'], 'claude')
         self.assertEqual(config['gorunum'], 'pencere')
 
-    def test_setup_codex_does_not_offer_a_view_and_explicit_view_skips_prompt(self):
-        for client, options in (('codex', []), ('claude', ['--ajan-gorunum', 'gizli'])):
+    def test_setup_explicit_view_skips_the_prompt_for_both_clients(self):
+        # Both clients now offer the window view; an explicit --ajan-gorunum still skips the question.
+        for client, options in (('codex', ['--ajan-gorunum', 'gizli']), ('claude', ['--ajan-gorunum', 'gizli'])):
             environment = {'CODEX_THREAD_ID': 'test-thread'} if client == 'codex' else {'CLAUDECODE': '1'}
             with self.subTest(client=client), patch.dict(os.environ, environment), \
                     patch.object(yakala, 'install', return_value={'web_clipper_sablonu': 'clipper.json'}), \
