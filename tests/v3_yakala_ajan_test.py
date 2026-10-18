@@ -1812,6 +1812,91 @@ class AgentBridgeFilesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.call('read_note', path=unrelated)
 
+    def test_sensitive_source_card_name_is_readable_only_for_its_job(self):
+        canary = 'source-filename-canary'
+        for word in ('gizli', 'sifre', 'password'):
+            own = yakala.capture(self.vault, text=canary, title=word + ' kaynak', state=self.state)
+            self.job.update(card_id=own['id'], card_path=own['path'])
+            with self.subTest(word=word):
+                self.assertTrue(yakala._agent_private_name(Path(own['path']).name))
+                self.assertIn(canary, self.call('read_note', path=own['path'])['text'])
+                self.assertEqual(self.call('search_notes', query=canary)['matches'], [])
+                self.job.update(card_path='another-card.md')
+                with self.assertRaisesRegex(ValueError, 'Hidden and sensitive'):
+                    self.call('read_note', path=own['path'])
+
+    def test_other_sensitive_notes_and_cards_remain_unavailable(self):
+        other = yakala.capture(self.vault, url='https://example.com/other', title='gizli kart', state=self.state)
+        for path in ('knowledge/gizli.md', other['path']):
+            with self.subTest(path=path):
+                if path != other['path']:
+                    self.note(path)
+                with self.assertRaisesRegex(ValueError, 'Hidden and sensitive'):
+                    self.call('read_note', path=path)
+
+    def test_sensitive_source_raw_and_only_linked_attachment_are_readable(self):
+        own = yakala.capture(self.vault, text='Source text', title='gizli kaynak', state=self.state)
+        self.job.update(card_id=own['id'], card_path=own['path'])
+        parent = Path(own['path']).parent
+        raw = (parent / yakala.RAW / (own['id'] + '.md')).as_posix()
+        attached = (parent / yakala.FILES / 'gizli-ek.txt').as_posix()
+        unrelated = (parent / yakala.FILES / 'gizli-diger.txt').as_posix()
+        other_raw = (parent / yakala.RAW / 'gizli-diger.md').as_posix()
+        for path in (raw, attached, unrelated, other_raw):
+            self.note(path, '---\nvisibility: private\n---\nSource file text')
+        card = self.vault / own['path']
+        card.write_text(card.read_text(encoding='utf-8') + '\n- [[' + attached + ']]\n', encoding='utf-8')
+        for path in (raw, attached):
+            with self.subTest(path=path):
+                self.assertIn('Source file text', self.call('read_note', path=path)['text'])
+        for path in (unrelated, other_raw):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                self.call('read_note', path=path)
+
+    def test_source_filename_exception_preserves_hidden_and_sensitive_directories(self):
+        for folder in ('.hidden', 'gizli'):
+            self.job.update(card_id='gizli-kart', card_path=folder + '/gizli-kart.md')
+            paths = (self.job['card_path'], folder + '/' + yakala.RAW + '/gizli-kart.md',
+                     folder + '/' + yakala.FILES + '/gizli-ek.txt')
+            for path in paths:
+                self.note(path)
+                with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'Hidden and sensitive'):
+                    self.call('read_note', path=path)
+        self.job.update(card_path='knowledge/.gizli.md')
+        self.note(self.job['card_path'])
+        with self.assertRaisesRegex(ValueError, 'Hidden and sensitive'):
+            self.call('read_note', path=self.job['card_path'])
+
+    def test_source_filename_exception_preserves_explicit_metadata_bans(self):
+        self.job.update(card_id='gizli-kart', card_path='knowledge/gizli-kart.md')
+        raw = 'knowledge/' + yakala.RAW + '/gizli-kart.md'
+        attached = 'knowledge/' + yakala.FILES + '/gizli-ek.txt'
+        for field in ('remote_allowed: false', 'sensitivity: sensitive', 'kaynak_guveni: blocked'):
+            header = '---\n' + field + '\n---\n'
+            self.note(self.job['card_path'], header + '[[' + attached + ']]')
+            self.note(raw)
+            self.note(attached)
+            for path in (self.job['card_path'], raw, attached):
+                with self.subTest(field=field, path=path), self.assertRaisesRegex(ValueError, 'frontmatter forbids'):
+                    self.call('read_note', path=path)
+
+    def test_case_and_short_aliases_cannot_impersonate_the_source_card(self):
+        own = 'knowledge/gizli-kart.md'
+        foreign = self.note('knowledge/gizli-diger.md', 'FOREIGN_CARD_CANARY')
+        self.job.update(card_path=own)
+        original = yakala._agent_checked_path
+
+        def alias_lookup(root, parts, create=False):
+            if '/'.join(parts) in (own, own.upper(), 'knowledge/GIZLIK~1.MD', 'knowledge/ordinary.md'):
+                return foreign
+            return original(root, parts, create=create)
+
+        # Simulate aliases on every host, including an exact spelling with a foreign canonical target.
+        with patch.object(yakala, '_agent_checked_path', side_effect=alias_lookup):
+            for path in (own, own.upper(), 'knowledge/GIZLIK~1.MD', 'knowledge/ordinary.md'):
+                with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'Hidden and sensitive'):
+                    self.call('read_note', path=path)
+
     def test_note_reads_are_bounded_and_reject_binary(self):
         self.note('large.md', 'x' * (200 * 1024 + 1))
         self.note('binary.md', 'first\0second')

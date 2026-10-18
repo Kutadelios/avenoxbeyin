@@ -7087,8 +7087,11 @@ def _agent_safe_note(vault, path, job=None):
     def check_names(components):
         special = '/'.join(components) in controls
         raw = bool(job) and list(components) == card_parts[:-1] + [RAW, job['card_id'] + '.md']
-        if not special and any((part.startswith('.') and not (raw and part == RAW)) or
-                               _agent_private_name(part) for part in components):
+        source = bool(job) and (list(components) == card_parts or raw or
+                                list(components[:-1]) == card_parts[:-1] + [FILES])
+        # Only source filenames are exempt; attachment links are checked below.
+        if not special and (any(part.startswith('.') and not (raw and part == RAW) for part in components) or
+                            any(_agent_private_name(part) for part in (components[:-1] if source else components))):
             raise ValueError('Hidden and sensitive notes are not available to this job.')
         if Path(components[-1]).suffix.lower() not in ('.md', '.txt'):
             raise ValueError('Only Markdown and plain-text notes can be read.')

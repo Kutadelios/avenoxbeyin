@@ -487,6 +487,7 @@ desteklemeyen hedefte `.part` korunur ve kart inceleme bekler. Birden fazla dosy
 başarılar kaybolmaz: her yayın niyeti ve tamamlanan dosya ayrı kaydedilir, kısmi sonuç da
 receipt ve Last-Session kapanışına dahil edilir.
 Bridge gizli/hassas yolları, sembolik bağları ve Windows junction'larını reddeder.
+Ajan kendisine verilen karti adi ne olursa olsun okur; diger hassas notlara erisim degismez.
 `remote_allowed: false`, hassas `sensitivity` veya engellenmiş `kaynak_guveni` metadata'sı olan
 notları okumaz. `visibility: private` notlar hook bağlamına girmediği gibi bu işe de açılmaz;
 yalnız işin kendi kartı, ham metni, ekleri ve kendi sonuç notları okunur.
