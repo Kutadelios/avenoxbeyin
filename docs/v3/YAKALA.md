@@ -304,17 +304,17 @@ veya `py -3 beyin.py yakala ajan codex` yeterlidir. Mac/Linux'ta `py -3` yerine 
 Bu Windows sürümüne ilk geçişte `kur` komutunu yeniden çalıştır: state'teki dinleyici kopyası da
 ajan işinin popup'tan ayrılmasını sağlayan yeni süreç ayarını almalıdır.
 
-**Görünüm: gizli ya da pencere.** Claude ve Windows'ta ajanın nasıl çalışacağını seçebilirsin:
+**Görünüm: gizli ya da pencere.** Windows'ta Claude ve Codex için ajanın nasıl çalışacağını seçebilirsin:
 
 - `gizli` (varsayılan): iş arka planda başsız bir oturumda çalışır, bitince bildirim gelir.
-- `pencere`: Ctrl+Enter ekranda normal bir Claude Code penceresi açar; ajanın ne yaptığını canlı
+- `pencere`: Ctrl+Enter ekranda seçili istemcinin Claude Code veya Codex penceresini açar; ajanın ne yaptığını canlı
   izlersin, gerekirse aynı pencerede yazarak yön verirsin. Araç sınırı gizli çalışmayla aynıdır
   (genel kabuk yok, yalnız Yakala araçları; ağ ayarı aşağıda). İş, ajan `complete` çağırınca
   teslim edilir; receipt ve kart güncellemesi yine çalışan tarafından doğrulanarak yapılır, pencere
   açık kalır ve konuşma sürdürülebilir. Pencereyi sonuç bırakmadan kapatırsan iş `onay-bekliyor`
   olur. Tur ve bütçe sınırları yalnız gizli çalışmada uygulanır; zaman sınırı ikisinde de
-  geçerlidir. Pencere bir yalıtım değildir: aynı konsolda kullanıcının kendi Claude Code
-  denetimleri (ör. `!` ile komut) açıktır ve iş bittikten sonra pencere bir sonraki işle aynı anda
+  geçerlidir. Pencere bir yalıtım değildir: aynı konsolda kullanıcının kendi istemci
+  denetimleri (Claude'da ör. `!` ile komut) açıktır ve iş bittikten sonra pencere bir sonraki işle aynı anda
   açık kalabilir.
 
 **Ağ: kısıtlı ya da açık.** Ajan aynı bağlamda hem güvenilmeyen kaynağı hem özel notlarını
@@ -344,10 +344,11 @@ taşınabilir bir karşılaştır-ve-değiştir yolu olmadığından bu risk bil
 
 ```sh
 py -3 beyin.py yakala kur --ajan claude --ajan-gorunum pencere
+py -3 beyin.py yakala ajan codex --gorunum pencere
 py -3 beyin.py yakala ajan claude --gorunum gizli
 ```
 
-`kur --ajan claude` (veya `otomatik` ile Claude seçimi) bir terminalde `--ajan-gorunum` olmadan
+`kur --ajan claude`, `kur --ajan codex` veya `kur --ajan otomatik` bir terminalde `--ajan-gorunum` olmadan
 çalıştırılırsa hangisini istediğini sorar. Kurulumu bir ajana yaptırıyorsan ajan bu seçimi sana sormalıdır.
 
 1. Kısayola bas, kaynağı seç ve **Neden** alanına yapılacak işi yaz. Özellik açıkken altta
@@ -404,8 +405,13 @@ Aynı kartın yakalanması yeni notu korur; devam eden iş ikinci kez başlatıl
 Karttaki `ajan_isi` iş UUID'sidir; `ajan_oturum` istemcinin oturum UUID'sidir. Claude için UUID
 başlamadan üretilir ve `--session-id` ile verilir; başarı için CLI çıktısında aynı gerçek oturumun
 görülmesi gerekir. Başlamamış bir Claude işinde ayrılmış UUID'nin yazması, oturumun oluştuğunu
-kanıtlamaz. Codex UUID'si ilk `thread.started` olayının `thread_id` alanından alınır; iş UUID'si
-Codex oturumu yerine kullanılmaz. [belge: aşağıdaki CLI ve başsız çalışma kaynakları]
+kanıtlamaz. Codex UUID'si gizli kipte ilk `thread.started` olayının `thread_id` alanından alınır;
+pencere kipinde `CODEX_HOME/sessions` (varsayılan `~/.codex/sessions`) altındaki yeni oturumların
+yalnız ilk satır meta verisi okunur. Başlangıç zamanı ve vault yolu eşleşen tek bir oturum
+bulunmalıdır. Kimlik bulunamazsa veya birden fazla aday varsa sonuç korunur, iş `onay-bekliyor`
+olur; hafıza kapanışı yapılmaz. Aynı vault'ta eşzamanlı açılan Codex oturumları bu eşleştirmeyi
+belirsizleştirebilir. İş UUID'si Codex oturumu yerine kullanılmaz.
+[belge: aşağıdaki CLI ve başsız çalışma kaynakları]
 
 Vault klasöründeki terminalden aynı oturumu açmak için:
 

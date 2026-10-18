@@ -5523,7 +5523,7 @@ def status(vault, state):
 # ---------------------------------------------------------------- optional background agent
 
 AGENT_SCHEMA = 1
-AGENT_VIEWS = ('gizli', 'pencere')  # hidden headless run, or a visible interactive Claude Code window
+AGENT_VIEWS = ('gizli', 'pencere')  # hidden headless run, or a visible interactive client window
 # kisitli: no general web search; fetch/download only the captured URL and links an authorized
 # page returned (closes the overt channel for private note text). acik: web search and any
 # public URL, for research tasks; private notes and fetched text then share one outbound channel.
@@ -5823,8 +5823,9 @@ def _agent_window_supported():
 
 
 def _agent_windowed(config):
-    """The visible window is an interactive Claude Code console; elsewhere the hidden run is used."""
-    return config.get('gorunum') == 'pencere' and config.get('client') == 'claude' and _agent_window_supported()
+    """Use an interactive client console on supported systems."""
+    return (config.get('gorunum') == 'pencere' and config.get('client') in ('claude', 'codex') and
+            _agent_window_supported())
 
 
 def _agent_open_network(config):
@@ -5853,8 +5854,8 @@ def configure_agent(vault, state, client, config_file=None, view=None, network=N
         config.update(updates)
     config['client'] = client
     if view:
-        if view == 'pencere' and (client != 'claude' or not _agent_window_supported()):
-            raise ValueError('Pencereli ajan su an yalniz Windows ve Claude ile calisir; gizli kullan.')
+        if view == 'pencere' and (client not in ('claude', 'codex') or not _agent_window_supported()):
+            raise ValueError('Pencereli ajan yalniz Windows ve Claude/Codex ile calisir; gizli kullan.')
         config['gorunum'] = view
     if network:
         config['ag'] = network
@@ -5862,7 +5863,8 @@ def configure_agent(vault, state, client, config_file=None, view=None, network=N
     _agent_json(_agent_root(state) / 'config.json', config)
     registered = _agent_register_toast(state, vault) if client != 'kapali' and os.name == 'nt' else None
     hint = ('Enter kaydeder; Ctrl+Enter kaydeder ve ajana verir' +
-            (' (ekranda Claude Code penceresi acilir, canli izlenir).' if _agent_windowed(config)
+            (' (ekranda ' + ('Codex' if client == 'codex' else 'Claude Code') +
+             ' penceresi acilir, canli izlenir).' if _agent_windowed(config)
              else ' (arka planda, bildirimle).'))
     return {'status': 'ajan_ayarlandi', 'ajan': client, 'gorunum': config['gorunum'], 'ag': config['ag'],
             'timeout_seconds': config['timeout_seconds'], 'bildirim_kayitli': registered,
@@ -6115,7 +6117,8 @@ def _agent_command(vault, state, job, config):
                 '--session-id', job['session_id'], '--name', 'Yakala-' + job['id'][:8],
                 '--output-format', 'stream-json', '--verbose', '--max-turns', '24',
                 '--max-budget-usd', str(config['max_budget_usd']), *config['extra_args']]
-    # No writable vault/Downloads sandbox root, shell, inherited rules, apps, or existing MCP/plugin.
+    # No writable vault/Downloads sandbox root, shell, apps, or existing MCP/plugin.
+    # Only exec supports --ignore-rules; interactive runs retain the same disabled shell tools.
     # General hosted search is also an outbound channel for private note contents.
     # Network access and local writes both go through the bounded bridge.
     settings = [('features.shell_tool', False), ('features.apps', False), ('features.multi_agent', False),
@@ -6128,6 +6131,9 @@ def _agent_command(vault, state, job, config):
     for key, value in settings:
         # JSON strings/arrays/booleans form a valid TOML value for these scalar-only settings.
         command += ['-c', key + '=' + json.dumps(value, ensure_ascii=True)]
+    if _agent_windowed(config):
+        return _agent_windows_argv([*command, '-C', str(vault), '-s', 'read-only',
+                                    *config['extra_args'], '--', _agent_prompt(vault, job)])
     return [*command, 'exec', '-C', str(vault), '-s', 'read-only', '--ignore-rules', '--json',
             '--skip-git-repo-check', '-o', str(folder / 'last-message.txt'), *config['extra_args'], '-']
 
@@ -6558,8 +6564,59 @@ def _agent_run_job(vault, state, job):
     _agent_end(vault, state, job, terminal, reason)
 
 
+def _agent_codex_window_session(vault, started_ns):
+    """Match one new rollout using only its bounded first-line session metadata."""
+    import time
+    home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex').expanduser()
+    root = (Path(vault) / home).resolve() / 'sessions'  # relative homes use the CLI's cwd
+    _agent_no_links(root)
+    if not root.exists():
+        return None
+    # Metadata timestamps have millisecond precision. Do not infer identity from a recent
+    # mtime alone: an older conversation may have received a new message during this job.
+    lower, upper = started_ns // 1000000, time.time_ns() // 1000000
+    candidates = set()
+
+    def walk_error(exc):
+        raise exc
+
+    for directory, children, files in os.walk(root, followlinks=False, onerror=walk_error):
+        children[:] = [name for name in children if not _agent_reparse(Path(directory) / name)]
+        for name in files:
+            match = re.fullmatch(r'rollout-.+-([0-9a-f-]{36})\.jsonl', name)
+            if not match:
+                continue
+            path = _agent_no_links(Path(directory) / name)
+            if path.stat().st_mtime_ns < started_ns:
+                continue
+            with path.open('rb') as stream:
+                line = stream.readline(65537)
+            if len(line) > 65536:
+                continue
+            try:
+                row = json.loads(line)
+                if not isinstance(row, dict) or row.get('type') != 'session_meta':
+                    continue
+                meta = row.get('payload')
+                if not isinstance(meta, dict):
+                    continue
+                session = _agent_uuid(meta.get('id'))
+                stamp = datetime.fromisoformat(meta['timestamp'].replace('Z', '+00:00'))
+                stamp_ms = int(stamp.timestamp()) * 1000 + stamp.microsecond // 1000
+                if (stamp.tzinfo is None or not lower <= stamp_ms <= upper or
+                        session != match[1] or not isinstance(meta.get('cwd'), str) or
+                        not Path(meta['cwd']).is_absolute() or Path(meta['cwd']).resolve() != Path(vault).resolve()):
+                    continue
+                candidates.add(session)
+            except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+                continue
+    if len(candidates) > 1:
+        raise ValueError('Codex pencere oturumu belirsiz: ayni vault icin birden fazla yeni oturum var.')
+    return next(iter(candidates), None)
+
+
 def _agent_run_window(vault, state, job, command):
-    """Visible interactive Claude Code: the job ends when its complete tool writes result.json.
+    """Visible interactive client: the job ends when its complete tool writes result.json.
 
     The console belongs to the person: it is not in a kill job and stays open after the result,
     so the conversation can go on. The worker only waits for the manifest, the window closing,
@@ -6569,11 +6626,12 @@ def _agent_run_window(vault, state, job, command):
     folder = _agent_job_dir(vault, state, job['id'])
     config = job['config']
     result = folder / 'result.json'
+    session_started_ns = time.time_ns()
     process = subprocess.Popen(command, cwd=str(vault), env=_agent_env(state, job['id']), close_fds=True,
                                creationflags=getattr(subprocess, 'CREATE_NEW_CONSOLE', 0x10))
     job.update(agent_pid=process.pid, worker_pid=os.getpid(), started=now().isoformat(timespec='seconds'), gorunum='pencere')
     _agent_json(folder / 'job.json', job)
-    _agent_update_card(vault, job, 'ajanda', ajan_oturum=job['session_id'], ajan_asama='calisiyor')
+    _agent_update_card(vault, job, 'ajanda', ajan_oturum=job.get('session_id'), ajan_asama='calisiyor')
     _agent_log(state, job['card_id'], 'Pencerede basladi: ' + job['id'] + ' (' + job['client'] + ')')
     _agent_notify(state, job['card_id'], 'started', job['card_path'], vault=vault)
     started = time.monotonic()
@@ -6589,6 +6647,17 @@ def _agent_run_window(vault, state, job, command):
             return 'approval_required', 'Ajan kapatildi; pencere acik birakildi, is tamamlandi sayilmadi.'
         time.sleep(0.5)
     # result.json is published atomically by _agent_create_json only after fsync.
+    if job['client'] == 'codex':
+        try:
+            session = _agent_codex_window_session(vault, session_started_ns)
+        except (OSError, ValueError) as exc:
+            return 'approval_required', 'Codex pencere oturumu dogrulanamadi: ' + str(exc)[:800]
+        if not session:
+            return 'approval_required', ('Codex pencere oturum kimligi bulunamadi; CODEX_HOME/sessions '
+                                         'meta verisini incele. Sonuc korundu, hafizaya kayit yapilmadi.')
+        job['session_id'] = session
+        _agent_json(folder / 'job.json', job)
+        _agent_update_card(vault, job, 'ajanda', ajan_oturum=session, ajan_asama='calisiyor')
     return _agent_finalize(vault, state, job)
 
 
@@ -6697,11 +6766,12 @@ def _agent_select_client(client, as_json):
 
 def _agent_ask_view(client, as_json):
     """At a person's terminal, kur asks how the agent should look; agents pass --ajan-gorunum."""
-    if client != 'claude' or not _agent_window_supported() or as_json or not sys.stdin or not sys.stdin.isatty():
+    if client not in ('claude', 'codex') or not _agent_window_supported() or as_json or not sys.stdin or not sys.stdin.isatty():
         return None
     answer = input('Ctrl+Enter ajani nasil calissin?\n'
                    '  1) gizli   - arka planda calisir, bitince bildirim gelir\n'
-                   '  2) pencere - ekranda Claude Code penceresi acilir, canli izlersin\n'
+                   '  2) pencere - ekranda ' + ('Codex' if client == 'codex' else 'Claude Code') +
+                   ' penceresi acilir, canli izlersin\n'
                    'Secim [1]: ').strip().lower()
     return 'pencere' if answer in ('2', 'pencere', 'p') else 'gizli'
 
