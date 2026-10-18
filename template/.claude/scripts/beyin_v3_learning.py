@@ -2,6 +2,7 @@
 
 Maintains lightweight, source-linked learning candidates before knowledge distillation.
 Persisted in state/learning-state.jsonl; zero network, zero external dependencies.
+Cross-process concurrency safety via advisory file locks.
 """
 from __future__ import annotations
 
@@ -12,28 +13,89 @@ import os
 from pathlib import Path
 import time
 
+from _portalock import exclusive
+
 LEARNING_STATE_FILE = "learning-state.jsonl"
+LEARNING_LOCK_FILE = "learning-state.lock"
+
+
+def _lock_handle(state_dir: Path):
+    lock_file = Path(state_dir) / LEARNING_LOCK_FILE
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    return open(lock_file, "a+", encoding="utf-8")
 
 
 def _atomic_append(file_path: Path, record: dict) -> None:
     file_path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(record, ensure_ascii=False) + "\n"
-    with open(file_path, "a", encoding="utf-8") as f:
-        f.write(line)
-        f.flush()
-        os.fsync(f.fileno())
+    with _lock_handle(file_path.parent) as lock_f:
+        with exclusive(lock_f):
+            with open(file_path, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+
+
+def _normalize_session(session: str | None) -> str:
+    if not session or session == "cli":
+        return "cli"
+    session_str = str(session).strip()
+    if len(session_str) > 24:
+        return hashlib.sha256(session_str.encode("utf-8")).hexdigest()[:24]
+    return session_str[:24]
+
+
+def _check_source_trust(state: Path, source: str) -> None:
+    """Validate that source is not marked private or untrusted."""
+    if not source:
+        return
+    db_path = Path(state) / "memory.sqlite3"
+    if db_path.is_file():
+        try:
+            from contextlib import closing
+            import sqlite3
+            with closing(sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True, timeout=5)) as db:
+                row = db.execute(
+                    "SELECT payload FROM records WHERE id = ? OR instr(payload, ?) > 0 LIMIT 1",
+                    (source, source)
+                ).fetchone()
+                if row:
+                    rec = json.loads(row[0])
+                    if (rec.get("visibility") == "private" or
+                        rec.get("trust") == "untrusted" or
+                        rec.get("trusted") is False or
+                        rec.get("status") == "untrusted" or
+                        rec.get("kind") == "untrusted"):
+                        raise ValueError(f"source '{source}' is private or untrusted")
+        except ValueError:
+            raise
+        except Exception:
+            pass
 
 
 def stage_candidate(state: Path, session: str, candidate: str, source: str = "", scope: str = "global") -> dict:
     """Stage a learning candidate into learning-state.jsonl."""
     state = Path(state)
-    record_id = hashlib.sha256(f"{session}:{time.time()}:{candidate}".encode("utf-8")).hexdigest()[:16]
+    _check_source_trust(state, source)
+
+    cand_text = str(candidate).strip()
+    try:
+        from beyin_v3_secrets import redact, record as record_redactions
+        redacted_text, count = redact(cand_text, state)
+        if count > 0:
+            record_redactions(state, count)
+        cand_text = redacted_text
+    except Exception:
+        pass
+
+    norm_session = _normalize_session(session)
+    record_id = hashlib.sha256(f"{norm_session}:{time.time()}:{cand_text}".encode("utf-8")).hexdigest()[:16]
     now = datetime.now(timezone.utc).isoformat()
     record = {
         "id": record_id,
         "created_at": now,
-        "session": session[:24] if session else "unknown",
-        "candidate": str(candidate).strip(),
+        "session": norm_session,
+        "candidate": cand_text,
         "source": str(source).strip(),
         "scope": str(scope).strip() or "global",
         "status": "candidate"
@@ -43,11 +105,12 @@ def stage_candidate(state: Path, session: str, candidate: str, source: str = "",
     return record
 
 
-def list_candidates(state: Path, session: str | None = None, status: str = "candidate") -> list[dict]:
-    """Read learning candidates matching session and status."""
+def list_candidates(state: Path, session: str | None = None, status: str = "candidate", scope: str | None = None) -> list[dict]:
+    """Read learning candidates matching session, status, and scope."""
     ledger = Path(state) / LEARNING_STATE_FILE
     if not ledger.is_file():
         return []
+    target_sess = _normalize_session(session) if session else None
     results = []
     try:
         with open(ledger, "r", encoding="utf-8") as f:
@@ -57,9 +120,11 @@ def list_candidates(state: Path, session: str | None = None, status: str = "cand
                     continue
                 try:
                     item = json.loads(line)
-                    if session and item.get("session") != session[:24]:
+                    if target_sess and item.get("session") not in (target_sess, "cli"):
                         continue
                     if status and item.get("status") != status:
+                        continue
+                    if scope and item.get("scope") not in (scope, "global"):
                         continue
                     results.append(item)
                 except Exception:
@@ -69,9 +134,9 @@ def list_candidates(state: Path, session: str | None = None, status: str = "cand
     return results
 
 
-def has_candidates(state: Path, session: str | None = None) -> bool:
+def has_candidates(state: Path, session: str | None = None, scope: str | None = None) -> bool:
     """True if active candidates exist for this session (or overall)."""
-    return len(list_candidates(state, session=session, status="candidate")) > 0
+    return len(list_candidates(state, session=session, status="candidate", scope=scope)) > 0
 
 
 def resolve_candidates(state: Path, session: str, target_status: str = "distilled") -> int:
@@ -81,30 +146,32 @@ def resolve_candidates(state: Path, session: str, target_status: str = "distille
         return 0
     records = []
     count = 0
-    target_session = session[:24] if session else "unknown"
+    target_session = _normalize_session(session)
     try:
-        with open(ledger, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    item = json.loads(line)
-                    if item.get("session") == target_session and item.get("status") == "candidate":
-                        item["status"] = target_status
-                        item["resolved_at"] = datetime.now(timezone.utc).isoformat()
-                        count += 1
-                    records.append(item)
-                except Exception:
-                    continue
-        # Atomic rewrite
-        temp = ledger.parent / (ledger.name + ".tmp")
-        with open(temp, "w", encoding="utf-8") as out:
-            for rec in records:
-                out.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            out.flush()
-            os.fsync(out.fileno())
-        os.replace(temp, ledger)
+        with _lock_handle(ledger.parent) as lock_f:
+            with exclusive(lock_f):
+                with open(ledger, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            item = json.loads(line)
+                            if item.get("session") in (target_session, "cli") and item.get("status") == "candidate":
+                                item["status"] = target_status
+                                item["resolved_at"] = datetime.now(timezone.utc).isoformat()
+                                count += 1
+                            records.append(item)
+                        except Exception:
+                            continue
+                # Atomic rewrite
+                temp = ledger.parent / (ledger.name + ".tmp")
+                with open(temp, "w", encoding="utf-8") as out:
+                    for rec in records:
+                        out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    out.flush()
+                    os.fsync(out.fileno())
+                os.replace(temp, ledger)
     except OSError:
         return 0
     return count

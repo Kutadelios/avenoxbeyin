@@ -885,7 +885,7 @@ def parser():
     learn = sub.add_parser("learn", help="Stage or inspect learning candidates before distillation (RFC #368)")
     learn.add_argument("--candidate", help="Candidate learning content text")
     learn.add_argument("--source", default="", help="Source file or note path linking to this learning")
-    learn.add_argument("--scope", default="global", help="Scope of the learning: global or project name")
+    learn.add_argument("--scope", default=None, help="Scope of the learning: global or project name")
     learn.add_argument("--session", default="", help="Session ID associated with candidate")
     learn.add_argument("--list", action="store_true", help="List active candidate learnings")
     return root
@@ -1483,10 +1483,11 @@ def main(argv=None, return_result=False):
         elif args.command == "learn":
             _ensure_scripts_path()
             from beyin_v3_learning import stage_candidate, list_candidates
+            sess = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BEYIN_V3_SESSION_ID") or "cli"
             if args.candidate:
-                result = stage_candidate(state, args.session or "cli", args.candidate, source=args.source, scope=args.scope)
+                result = stage_candidate(state, sess, args.candidate, source=args.source, scope=args.scope or "global")
             elif args.list:
-                result = {"candidates": list_candidates(state, session=args.session or None)}
+                result = {"candidates": list_candidates(state, session=args.session or None, scope=args.scope)}
             else:
                 raise ValueError("either --candidate or --list is required")
         else:
