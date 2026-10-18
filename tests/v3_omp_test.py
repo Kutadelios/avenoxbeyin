@@ -229,7 +229,10 @@ class OMPHarnessTest(unittest.TestCase):
         global_dir = Path.home() / '.omp/agent/hooks/pre'
         global_dir.mkdir(parents=True, exist_ok=True)
         global_link = global_dir / 'beyin-v3.ts'
-        global_link.symlink_to(self.hook_file)
+        try:
+            global_link.symlink_to(self.hook_file)
+        except OSError:
+            self.skipTest('symlinks unavailable on host')
         self.addCleanup(lambda: (global_link.unlink(missing_ok=True), global_dir.rmdir()))
         doctor = json.loads(self.cli('doctor').stdout)
         self.assertNotIn('omp_global_hook', doctor)
