@@ -595,7 +595,9 @@ class AgentNetworkOptionTest(AgentFiles):
         argv, job = self.argv('claude', 'acik')
         self.assertEqual(argv[argv.index('--tools') + 1], 'WebSearch')
         self.assertEqual(argv[argv.index('--allowedTools') + 1], 'WebSearch,mcp__yakala__*')
-        self.assertIn('Not iceriklerini arama sorgusuna', yakala._agent_prompt(self.vault, job))
+        prompt = yakala._agent_prompt(self.vault, job)
+        for rule in ('yalniz herkese acik bilgi', 'arama sorgusuna, URL', 'approval_required") ile kullanicidan izin'):
+            self.assertIn(rule, prompt)
 
     def test_open_network_turns_codex_hosted_search_on(self):
         codex, _ = self.argv('codex', 'acik')

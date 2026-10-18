@@ -319,7 +319,11 @@ koydurmaya çalışabilir.
   bir veri sızıntısı koruması değildir.
 - `acik`: Claude'un web araması (Codex'te hosted arama) ve herkese açık her adres kullanılabilir.
   Araştırma gerektiren işler (ör. bir videodaki müziği bulmak) için gerekir; özel notlar ile web
-  aynı çıkış kanalını paylaşır.
+  aynı çıkış kanalını paylaşır. Bu kipte ajana ayrıca talimat verilir: arama ve indirme yalnız
+  herkese açık bilgi içindir; notlardan, kişisel bilgilerden veya özel ya da kullanıcının kendi
+  yüklediği içerikten hiçbir metin arama sorgusuna, adrese ya da dosya adına konmaz, bunu
+  gerektiren iş kullanıcının izni için `onay-bekliyor` olur. Bu bir model talimatıdır, teknik bir
+  engel değildir.
 
 ```sh
 py -3 beyin.py yakala ajan claude --ag acik
