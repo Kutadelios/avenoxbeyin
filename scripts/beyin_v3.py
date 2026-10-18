@@ -882,6 +882,12 @@ def parser():
     ingest_server.add_argument("--host", default="127.0.0.1", help="Host interface to bind (default 127.0.0.1)")
     ingest_server.add_argument("--port", type=int, default=8484, help="Port to listen on (default 8484)")
     ingest_server.add_argument("--token", help="Optional Bearer token for authentication")
+    learn = sub.add_parser("learn", help="Stage or inspect learning candidates before distillation (RFC #368)")
+    learn.add_argument("--candidate", help="Candidate learning content text")
+    learn.add_argument("--source", default="", help="Source file or note path linking to this learning")
+    learn.add_argument("--scope", default="global", help="Scope of the learning: global or project name")
+    learn.add_argument("--session", default="", help="Session ID associated with candidate")
+    learn.add_argument("--list", action="store_true", help="List active candidate learnings")
     return root
 
 
@@ -1474,6 +1480,15 @@ def main(argv=None, return_result=False):
                 print(json.dumps({'source_sync': {'status': 'degraded', 'warnings': warnings[:20],
                                                   'warning_count': len(warnings), 'truncated': len(warnings) > 20}},
                                  ensure_ascii=True), file=sys.stderr)
+        elif args.command == "learn":
+            _ensure_scripts_path()
+            from beyin_v3_learning import stage_candidate, list_candidates
+            if args.candidate:
+                result = stage_candidate(state, args.session or "cli", args.candidate, source=args.source, scope=args.scope)
+            elif args.list:
+                result = {"candidates": list_candidates(state, session=args.session or None)}
+            else:
+                raise ValueError("either --candidate or --list is required")
         else:
             payload = read_json(args.file)
             result = sync.update_task(payload["id"], payload["expected_revision"], payload["changes"])

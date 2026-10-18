@@ -540,10 +540,24 @@ class HookInstallerTest(unittest.TestCase):
             return hashlib.sha256(name.encode()).hexdigest()[:24]
         sess_name = 'no-learn-session'
         self.lifecycle('PostToolUse', sess_name, 'claude')
-        summary = "Routine bugfix completed.\nÖğrenilen: Yok"
+        summary = "Routine bugfix completed.\nÖğrenilen: Yok (rutin hata düzeltmesi)"
         engine.receipt('no-learn-1', summary, ['notes/task.md'], 'claude', session=session(sess_name))
         response = self.lifecycle('Stop', sess_name, 'claude')
         self.assertEqual(response, {})
+
+    def test_stop_knowledge_reminder_challenges_bare_no_learning_without_explanation(self):
+        engine = self.seed()
+        def session(name):
+            return hashlib.sha256(name.encode()).hexdigest()[:24]
+        sess_name = 'bare-no-learn-session'
+        self.lifecycle('PostToolUse', sess_name, 'claude')
+        summary = "Routine bugfix completed.\nÖğrenilen: Yok"
+        engine.receipt('bare-1', summary, ['notes/task.md'], 'claude', session=session(sess_name))
+        response = self.lifecycle('Stop', sess_name, 'claude')
+        self.assertEqual(response.get('decision'), 'block')
+        self.assertIn("Öğrenilen: yok", response.get('reason', ''))
+        # A second stop passes open
+        self.assertEqual(self.lifecycle('Stop', sess_name, 'claude'), {})
 
     def test_learning_declaration_reads_only_the_label_line(self):
         declared = self.hook._has_declared_learning
