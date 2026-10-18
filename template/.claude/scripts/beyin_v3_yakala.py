@@ -5999,12 +5999,12 @@ def _agent_spawn_worker(vault, state):
                                 **({} if os.name == 'nt' else {'start_new_session': True}))
 
 
-# Codex features that give a model a way past the bridge: shell and unified exec, the code-mode
-# host (a JS/Node runtime), app connectors and plugins (bundled ones include computer use, a
-# browser, Gmail and Drive), sub-agents, goals and image generation. Measured on Codex CLI
-# 0.155.1 (18.10.2026): with shell_tool alone disabled the model still had `exec`; with
-# code_mode_host disabled it fails closed. Disabled per run; the user's config is untouched.
-CODEX_DISABLED = ('shell_tool', 'unified_exec', 'code_mode_host', 'apps', 'multi_agent', 'plugins',
+# Codex features that give a model a way past the bridge: shell and unified exec, app connectors
+# and plugins (bundled ones include computer use, a browser, Gmail and Drive), sub-agents, goals
+# and image generation. Disabled per run; the user's config is untouched. The code-mode host
+# stays on: Codex 0.155.1 calls MCP tools through it, and its JS has no fs, child_process or
+# fetch (measured 18.10.2026: 'unsupported import in exec', 'fetch is not defined').
+CODEX_DISABLED = ('shell_tool', 'unified_exec', 'apps', 'multi_agent', 'plugins',
                   'remote_plugin', 'computer_use', 'browser_use', 'browser_use_external', 'in_app_browser',
                   'image_generation', 'goals')
 

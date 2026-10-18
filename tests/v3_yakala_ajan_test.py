@@ -821,7 +821,7 @@ class AgentPreflightTest(AgentFiles):
         with patch.object(yakala, 'os', system), patch.object(yakala.subprocess, 'run', side_effect=run):
             self.assertEqual(yakala._agent_preflight('codex', ['codex'], self.vault), ('node_repl',))
         listing = [argv for argv in calls if 'list' in argv]
-        for feature in ('plugins', 'code_mode_host', 'unified_exec', 'computer_use'):
+        for feature in ('plugins', 'unified_exec', 'computer_use'):
             self.assertTrue(all(feature in argv for argv in listing), feature)
 
     def test_unsafe_mcp_name_is_refused_not_quoted(self):
