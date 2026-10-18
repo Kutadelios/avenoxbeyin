@@ -474,8 +474,8 @@ yeteneği sunar; genel komut çalıştırma ve serbest yazma yetkisi açılmaz:
 |---|---|
 | `read_note` | Sınırlar içinde mevcut Markdown/metin notunu ve bu kartın bağlı metnini okur |
 | `search_notes` | Görünür notlarda sınırlı arama yapar; en fazla 30 sonuç verir |
-| `fetch_source` | Herkese açık HTTP(S) kaynağından sınırlı metin okur |
-| `download` | Doğrudan medya/metin/PDF dosyasını en fazla 50 MiB olarak hazırlar; iş başına en fazla 10 dosya |
+| `fetch_source` | Herkese açık HTTP(S) kaynağından sınırlı metin okur; `kisitli` ağda yalnız yakalanan adres ve izinli sayfanın bağlantıları |
+| `download` | Doğrudan medya/metin/PDF dosyasını en fazla 50 MiB olarak hazırlar; iş başına en fazla 10 dosya; adres kuralı `fetch_source` ile aynı |
 | `write_note` | Yalnız bu işin klasöründe en fazla 30 yeni sonuç notu oluşturur; mevcut notu değiştirmez |
 | `complete` | Doğrulanacak sonuç bildirir; kartı, receipt'i ve Last-Session'ı güvenilen çalışan günceller |
 
@@ -497,12 +497,13 @@ Claude profili `dontAsk`, `--permission-prompts none`, sınırlı built-in araç
 MCP yapılandırmasıyla çalışır; `--permission-prompts` için en az 2.1.259 gerekir. Codex profili
 `-a never`, `-s read-only`, kapalı shell/apps/multi-agent ve `--ignore-rules` kullanır; mevcut
 MCP/eklenti envanteri doğrulanamazsa veya etkin ek araç varsa iş durur. Yerel CLI yardım/sürümü
-denetlenir; bilinmeyen konfigürasyonda izinler gevşetilmez. Web araması iki istemcide de ayrıca
-açıktır. `bypassPermissions` ve tam dosya sistemi erişimi verilmez. [belge: CLI, config ve izin kaynakları]
+denetlenir; bilinmeyen konfigürasyonda izinler gevşetilmez. Web araması yalnız `ag: acik` iken
+açıktır (Claude `WebSearch`, Codex `web_search="live"`). `bypassPermissions` ve tam dosya sistemi erişimi verilmez. [belge: CLI, config ve izin kaynakları]
 
-Ölçüm (Claude Code 2.1.302, Codex 0.160.0, macOS): Claude oturumunun araç listesi yalnız
-`WebSearch` ve altı `mcp__yakala__*` aracıdır; Bash ve dosya araçları yoktur. Codex'te kabuk aracı
-yoktur, ancak `view_image` (vault dışındaki yerel görüntüleri de okuyabilir), `apply_patch`
+Ölçüm (Claude Code 2.1.302, Codex 0.160.0, macOS): `kisitli` ağda Claude oturumunun araç listesi
+yalnız altı `mcp__yakala__*` aracıdır, `acik` ağda buna `WebSearch` eklenir; Bash ve dosya araçları
+yoktur. `kisitli` ağda model URL'ye not metni ekleyince köprü adresi reddetti. Codex'te kabuk aracı
+ve `kisitli` ağda web araması yoktur, ancak `view_image` (vault dışındaki yerel görüntüleri de okuyabilir), `apply_patch`
 (read-only sandbox yazmayı reddeder), kod modu `exec` ve alt ajan (`spawn_agent`) araçları listede
 kalır. Codex için "yalnız altı araç ve web araması" sınırı bu sürümde tam değildir.
 
