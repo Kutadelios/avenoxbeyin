@@ -5989,6 +5989,7 @@ def _agent_load_job(vault, state, job_id):
     _agent_validate_settings(job['config'], vault, require_existing_paths=False)
     if job['config']['client'] != job['client']:
         raise ValueError('Ajan is kaydi ve istemci ayari eslesmiyor.')
+    _agent_music_permissions(job)
     if job.get('session_id') is not None:
         _agent_uuid(job['session_id'])
     if job['client'] == 'claude' and not job.get('session_id'):
@@ -6207,7 +6208,7 @@ def _agent_update_card(vault, job, status, reason='', **fields):
         write_card(path, meta, body)
 
 
-def enqueue_agent(vault, state, card_id, request, delivery_id=None):
+def enqueue_agent(vault, state, card_id, request, delivery_id=None, *, music=None):
     """Durable outbox, then detached wake-up. No URL/DNS/model work on the Tk thread."""
     import time
     import uuid
@@ -6219,12 +6220,16 @@ def enqueue_agent(vault, state, card_id, request, delivery_id=None):
         raise ValueError('Ajana verilecek istegi Neden alanina yaz (en fazla 16000 karakter).')
     if delivery_id is not None and not re.fullmatch(r'[a-f0-9]{32}', delivery_id):
         raise ValueError('Gecersiz teslim kimligi.')
+    music = _agent_music_permissions({'music': music}) if music is not None else None
+    if music and music['extract'] and not _agent_open_network(config):
+        raise ValueError('Ses isleme icin ajan ag ayari acik olmali; bu ayar servis yukleme izni vermez.')
     with _AgentFileLock(_agent_root(state) / 'queue.lock'):
         jobs = _agent_jobs(vault, state)
         if delivery_id:
             old = next((job for job in jobs if job.get('delivery_id') == delivery_id), None)
             if old:
-                if old['card_id'] != card_id or old['request'] != request.strip():
+                if (old['card_id'] != card_id or old['request'] != request.strip() or
+                        _agent_music_permissions(old) != _agent_music_permissions({'music': music})):
                     raise ValueError('Ayni teslim kimligi farkli istekle kullanilamaz.')
                 # The first sender may have died after the durable commit but
                 # before Popen. A retry is also a wake-up, never a second job.
@@ -6252,6 +6257,8 @@ def enqueue_agent(vault, state, card_id, request, delivery_id=None):
                    'url': card['meta'].get('url') or '', 'client': config['client'], 'session_id': session_id,
                    'delivery_id': delivery_id, 'created_ns': time.time_ns(), 'created': now().isoformat(timespec='seconds'),
                    'state': 'preparing', 'config': config}
+            if music is not None:
+                job['music'] = music  # host-authored CLI consent, committed before worker wake-up
             folder = _agent_job_dir(vault, state, job_id)
             _agent_json(folder / 'job.json', job)
             meta = dict(card['meta'])
@@ -6276,6 +6283,10 @@ def enqueue_agent(vault, state, card_id, request, delivery_id=None):
 
 def _agent_env(state, job_id=None):
     env = dict(os.environ, PYTHONIOENCODING='utf-8', PYTHONDONTWRITEBYTECODE='1', NO_COLOR='1')
+    # This feature never accepts ambient AudD credentials. Neither model nor extractor inherits them.
+    for name in list(env):
+        if 'AUDD' in name.upper():
+            env.pop(name, None)
     for name in ('CLAUDE_CODE_SIMPLE', 'CLAUDE_CODE_SAFE_MODE', 'CLAUDE_CODE_SKIP_PROMPT_HISTORY'):
         if str(env.get(name, '')).lower() not in ('', '0', 'false'):
             raise ValueError(name + ' hafiza oturumu ile uyumsuz; normal masaustu ortamindan yeniden dene.')
@@ -6522,6 +6533,15 @@ def _agent_prompt(vault, job):
         'icerigini cikar, istegi gerceklestir ve kaynak baglantili sonucu write_note ile kaydet. '
         'Kaynagi/muzigi belirleyemediysen tahmin etme; dogrulanmamis sonucu tamamlandi sayma. '
         'Indirme icin gercek URL, dogru format ve kullanicinin istedigi icerik gerekir; sayfayi mp3 diye kaydetme.\n'
+        'Muzik/ses arastirmasinda once music_info kullan. Orijinal ses etiketi sarki kimligi degildir. '
+        'music_identify yalniz bu kartin videosundan sabit kisa ornek cikarabilir; model URL, dosya yolu, '
+        'komut veya yukleme onayi veremez. Ses isleme ve AudD yukleme izinleri guvenilen CLI tarafindan '
+        'is baslarken ayri kaydedilir; acik ag veya istekte indir sozcugu bu izinleri vermez. '
+        'Eksik izinde aracin bildirdigi CLI seceneklerini complete(status="approval_required") ile belirt. '
+        'Saglayici eslesmesi ile sayfanin iddiasini ayir; yuzde guven uydurma. Mesru dinleme/satin alma '
+        'baglantisi ver. Tespit edilen sarkiyi tam boy indirmeye calisma; servis baglantisi, preview veya '
+        'herkese acik URL tek basina indirme izni degildir. Kaynagin acikca izin verdigi dogrudan dosya '
+        'icin mevcut download araci kullanilabilir; belirsizlikte baglanti ver.\n'
         'En son complete(status="completed"|"approval_required"|"failed", summary=..., notes=[...], '
         'downloads=[...]) cagir. Ham arac loglarini hafizaya kopyalama. Sonuc kaydi kaynak, kanit, uretilen '
         'dosyalar ve acik kalan isi belirtmeli. Bu cagri sonucu guvenilen calisana teslim eder; '
@@ -8370,6 +8390,1017 @@ def _agent_spend_network_call(vault, state, job):
     _agent_json(folder / 'network-budget.json', {'schema': 1, 'job_id': job['id'], 'used': used + 1})
 
 
+# ---------------------------------------------------------------- opt-in music identification
+# Kept in this module: installed desktop listeners intentionally copy this single script.
+_AGENT_MUSIC_PAGE_BYTES = 512 * 1024
+_AGENT_MUSIC_SOURCE_BYTES = 32 * 1024 * 1024
+_AGENT_MUSIC_SAMPLE_SECONDS = 12
+_AGENT_MUSIC_SAMPLE_RATE = 16000
+_AGENT_MUSIC_PROXY_BYTES = 12 * 1024 * 1024
+_AGENT_MUSIC_PROXY_REQUESTS = 24
+_AGENT_MUSIC_DNS_SLOTS = threading.BoundedSemaphore(4)
+_AGENT_MUSIC_HOSTS = {
+    'youtube': ('youtube.com', 'youtu.be', 'googlevideo.com', 'ytimg.com', 'youtubei.googleapis.com'),
+    'instagram': ('instagram.com', 'cdninstagram.com', 'fbcdn.net'),
+    'tiktok': ('tiktok.com', 'tiktokv.com', 'tiktokcdn.com', 'tiktokcdn-us.com',
+               'tiktokcdn-eu.com', 'byteoversea.com', 'ibytedtos.com', 'muscdn.com', 'musical.ly'),
+}
+
+
+def _agent_music_permissions(job):
+    value = job.get('music')
+    if value is None:
+        return {'schema': 1, 'extract': False, 'upload': None}
+    if (not isinstance(value, dict) or set(value) != {'schema', 'extract', 'upload'} or
+            type(value['schema']) is not int or value['schema'] != 1 or type(value['extract']) is not bool or
+            value['upload'] not in (None, 'audd') or (value['upload'] and not value['extract'])):
+        raise ValueError('Muzik izni gecersiz; servis yukleme icin --ses-isle de gerekir.')
+    return dict(value)
+
+
+def _agent_music_source(value):
+    """Only a captured single-video URL, never a model-supplied search, playlist or path."""
+    from urllib.parse import parse_qs
+    if not isinstance(value, str) or len(value) > 8192:
+        raise ValueError('Bu kartta desteklenen tek video baglantisi yok.')
+    _safe_source_url(value)
+    parsed = urlparse(value)
+    host = (parsed.hostname or '').lower()
+    if parsed.scheme != 'https' or parsed.port not in (None, 443) or parsed.username or parsed.password:
+        raise ValueError('Muzik kaynagi kimlik bilgisi icermeyen HTTPS video baglantisi olmali.')
+    if host in ('youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be'):
+        if host == 'youtu.be':
+            identifier = parsed.path.strip('/')
+        elif parsed.path == '/watch':
+            values = parse_qs(parsed.query).get('v', [])
+            identifier = values[0] if len(values) == 1 else ''
+        else:
+            match = re.fullmatch(r'/(?:shorts|embed)/([A-Za-z0-9_-]{11})/?', parsed.path)
+            identifier = match[1] if match else ''
+        if re.fullmatch(r'[A-Za-z0-9_-]{11}', identifier):
+            return 'youtube', 'https://www.youtube.com/watch?v=' + identifier
+    if host in ('instagram.com', 'www.instagram.com'):
+        match = re.fullmatch(r'/(reel|p|tv)/([A-Za-z0-9_-]{3,80})/?', parsed.path)
+        if match:
+            return 'instagram', 'https://www.instagram.com/' + match[1] + '/' + match[2] + '/'
+    if host in ('tiktok.com', 'www.tiktok.com', 'm.tiktok.com'):
+        if re.fullmatch(r'/@[A-Za-z0-9_.-]{1,80}/video/[0-9]{8,30}/?', parsed.path):
+            return 'tiktok', 'https://www.tiktok.com' + parsed.path.rstrip('/')
+        if re.fullmatch(r'/t/[A-Za-z0-9]{3,80}/?', parsed.path):
+            return 'tiktok', 'https://www.tiktok.com' + parsed.path.rstrip('/') + '/'
+    if host in ('vm.tiktok.com', 'vt.tiktok.com') and re.fullmatch(r'/[A-Za-z0-9]{3,80}/?', parsed.path):
+        return 'tiktok', 'https://' + host + parsed.path.rstrip('/') + '/'
+    raise ValueError('Yalniz tek Instagram reel/video, TikTok veya YouTube/Shorts desteklenir.')
+
+
+def _agent_music_allowed_url(url, platform):
+    _safe_source_url(url)
+    parsed = urlparse(url)
+    host = (parsed.hostname or '').lower()
+    if (parsed.scheme != 'https' or parsed.port not in (None, 443) or parsed.username or parsed.password or
+            not any(host == suffix or host.endswith('.' + suffix) for suffix in _AGENT_MUSIC_HOSTS[platform])):
+        raise ValueError('Video istegi izinli HTTPS platform/CDN sinirinin disinda.')
+    return parsed
+
+
+def _agent_music_connect(url, deadline, tls=True):
+    """Reuse the bridge's public-address policy; only numeric validated IPs reach connect()."""
+    import ssl
+    import time
+    parsed, addresses = _agent_music_addresses(url, deadline)
+    for family, address, port in addresses:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('Muzik isteginin sure siniri doldu.')
+        channel = socket.socket(family, socket.SOCK_STREAM)
+        guard = threading.Timer(max(0.001, remaining), lambda: _agent_music_shutdown(channel))
+        guard.daemon = True
+        guard.start()
+        try:
+            channel.settimeout(min(remaining, 4))
+            channel.connect((address, port, 0, 0) if family == socket.AF_INET6 else (address, port))
+            if tls:
+                channel = ssl.create_default_context().wrap_socket(channel, server_hostname=parsed.hostname,
+                                                                    do_handshake_on_connect=False)
+                channel.settimeout(max(0.01, deadline - time.monotonic()))
+                channel.do_handshake()
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Muzik baglantisi son tarihte durduruldu.')
+            channel.settimeout(max(0.01, deadline - time.monotonic()))
+            return channel
+        except (OSError, ValueError):
+            channel.close()
+        finally:
+            guard.cancel()
+    raise OSError('Muzik kaynagina guvenli baglanti kurulamadi.')
+
+
+def _agent_music_shutdown(channel):
+    try:
+        channel.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+def _agent_music_addresses(url, deadline):
+    """A stalled OS resolver cannot stall the tool. At most four lingering DNS threads/process.
+
+    Python cannot cancel getaddrinfo portably. A daemon thread may finish later, but it has no
+    connect side effect; its slot stays occupied until that resolver returns. New calls fail
+    closed when slots are exhausted rather than growing an unbounded executor/thread queue.
+    """
+    import time
+    if deadline <= time.monotonic() or not _AGENT_MUSIC_DNS_SLOTS.acquire(blocking=False):
+        raise TimeoutError('Muzik DNS sure/eszamanlilik siniri doldu.')
+    ready, result = threading.Event(), []
+
+    def resolve():
+        try:
+            result.append((True, _agent_public_addresses(url)))
+        except (OSError, ValueError) as exc:
+            result.append((False, exc))
+        finally:
+            _AGENT_MUSIC_DNS_SLOTS.release()
+            ready.set()
+
+    threading.Thread(target=resolve, daemon=True).start()
+    if not ready.wait(max(0, deadline - time.monotonic())):
+        raise TimeoutError('Muzik DNS sure siniri doldu.')
+    if result[0][0]:
+        return result[0][1]
+    raise result[0][1]
+
+
+def _agent_music_http(url, *, deadline, limit, platform=None, body=None, content_type=None):
+    """Bounded pinned HTTPS. AudD POST never redirects or puts credentials/URL in a query."""
+    import http.client
+    import time
+    from urllib.parse import quote, urljoin
+    for turn in range(4):
+        if platform:
+            parsed = _agent_music_allowed_url(url, platform)
+        else:
+            if url != 'https://api.audd.io/' or body is None:
+                raise ValueError('Muzik servis adresi sabit olmali.')
+            parsed = urlparse(url)
+        if time.monotonic() >= deadline:
+            raise TimeoutError('Muzik ag sure siniri doldu.')
+        connection = http.client.HTTPConnection(parsed.hostname, 443)
+        response, guard = None, None
+        try:
+            connection.sock = _agent_music_connect(url, deadline)
+            transport = connection.sock
+            # A socket timeout alone resets on each trickled header line. A hard watchdog shuts
+            # down the connection at the absolute deadline, including getresponse()/TLS reads.
+            guard = threading.Timer(max(0.001, deadline - time.monotonic()),
+                                    lambda: _agent_music_shutdown(transport))
+            guard.daemon = True
+            guard.start()
+            target = quote(parsed.path or '/', safe="/%:@!$&'()*+,;=-._~")
+            if parsed.query:
+                target += '?' + quote(parsed.query, safe="/%?:@!$&'()*+,;=-._~[]")
+            headers = {'User-Agent': 'avenoxbeyin-yakala/1', 'Accept': '*/*',
+                       'Accept-Encoding': 'identity', 'Connection': 'close'}
+            if body is not None:
+                headers['Content-Type'] = content_type
+            connection.request('POST' if body is not None else 'GET', target, body=body, headers=headers)
+            response = connection.getresponse()
+            if response.status in (301, 302, 303, 307, 308):
+                if body is not None:
+                    raise ValueError('Tani servisi yonlendirmesi reddedildi; anahtar baska adrese gitmedi.')
+                following = response.getheader('Location')
+                if not following or turn == 3:
+                    raise ValueError('Video yonlendirme siniri doldu.')
+                url = urljoin(url, following)
+                _agent_music_allowed_url(url, platform)
+                continue
+            if not 200 <= response.status < 300:
+                raise ValueError('Muzik kaynagi HTTP ' + str(response.status) + ' dondurdu; cookie/giris kullanilmaz.')
+            if response.getheader('Content-Encoding', 'identity').strip().lower() not in ('', 'identity'):
+                raise ValueError('Muzik kaynaginin sikistirilmis aktarimi desteklenmiyor.')
+            length = response.getheader('Content-Length')
+            if length and (not length.isdecimal() or int(length) > limit):
+                raise ValueError('Muzik aktarim boyut siniri asildi.')
+            output, count = [], 0
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('Muzik aktarim sure siniri doldu.')
+                transport.settimeout(remaining)
+                part = response.read1(min(65536, limit + 1 - count))
+                if not part:
+                    break
+                count += len(part)
+                if count > limit:
+                    raise ValueError('Muzik aktarim boyut siniri asildi.')
+                output.append(part)
+            return {'url': url, 'body': b''.join(output),
+                    'content_type': response.getheader('Content-Type', '')[:200]}
+        except http.client.HTTPException as exc:
+            raise ValueError('Muzik kaynaginin HTTP yaniti gecersiz.') from exc
+        finally:
+            if guard is not None:
+                guard.cancel()
+            if response is not None:
+                response.close()
+            connection.close()
+    raise ValueError('Muzik yonlendirme siniri doldu.')
+
+
+class _AgentMusicProxy:
+    """Private authenticated HTTPS CONNECT gateway for the fixed yt-dlp extractors.
+
+    TLS remains end-to-end in yt-dlp, with certificate verification enabled. The gateway pins
+    the requested public address, restricts platform/CDN host suffixes, counts BOTH directions,
+    and kills all tunnels at the shared deadline. It is not a general browser or an OS sandbox
+    against a compromised installed executable; that dependency remains locally trusted.
+    """
+    def __init__(self, platform, deadline):
+        import base64
+        import secrets
+        import threading
+        self.platform, self.deadline = platform, deadline
+        self.secret = secrets.token_hex(24)
+        self.auth = 'Basic ' + base64.b64encode(('yakala:' + self.secret).encode('ascii')).decode('ascii')
+        self.lock = threading.Lock()
+        self.requests = self.bytes = 0
+        self.channels, self.server, self.thread = set(), None, None
+
+    def consume(self, amount=0, request=False):
+        import time
+        with self.lock:
+            if time.monotonic() >= self.deadline:
+                raise TimeoutError('Video aracinin ag suresi doldu.')
+            self.bytes += amount
+            self.requests += int(request)
+            if self.bytes > _AGENT_MUSIC_PROXY_BYTES or self.requests > _AGENT_MUSIC_PROXY_REQUESTS:
+                raise ValueError('Video aracinin ag butcesi doldu.')
+
+    def target(self, authority):
+        if not re.fullmatch(r'[A-Za-z0-9.-]{1,253}:443', authority):
+            raise ValueError('Video vekili yalniz alanadi:443 kabul eder.')
+        url = 'https://' + authority[:-4] + '/'
+        _agent_music_allowed_url(url, self.platform)
+        return url
+
+    def __enter__(self):
+        import select
+        import socketserver
+        import threading
+        import time
+        owner = self
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                remote = None
+                try:
+                    self.request.settimeout(2)
+                    with owner.lock:
+                        owner.channels.add(self.request)
+                    raw = b''
+                    while b'\r\n\r\n' not in raw:
+                        part = self.request.recv(4096)
+                        if not part:
+                            return
+                        raw += part
+                        if len(raw) > 8192:
+                            return
+                    raw, extra = raw.split(b'\r\n\r\n', 1)
+                    lines = raw.decode('ascii', 'strict').split('\r\n')
+                    match = re.fullmatch(r'CONNECT ([^ ]+) HTTP/1\.[01]', lines[0])
+                    headers = {}
+                    for line in lines[1:]:
+                        key, separator, value = line.partition(':')
+                        key = key.lower()
+                        if not separator or key in headers:
+                            return
+                        headers[key] = value.strip()
+                    if not match or headers.get('proxy-authorization') != owner.auth:
+                        self.request.sendall(b'HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n')
+                        return
+                    if 'content-length' in headers or 'transfer-encoding' in headers:
+                        return
+                    owner.consume(request=True)
+                    remote = _agent_music_connect(owner.target(match[1]), owner.deadline, tls=False)
+                    with owner.lock:
+                        owner.channels.add(remote)
+                    self.request.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
+                    if extra:
+                        owner.consume(len(extra))
+                        remote.sendall(extra)
+                    while True:
+                        owner.consume()
+                        ready, _, _ = select.select([self.request, remote], [], [], min(0.2, max(0, owner.deadline - time.monotonic())))
+                        for source in ready:
+                            chunk = source.recv(32768)
+                            if not chunk:
+                                return
+                            owner.consume(len(chunk))
+                            target = remote if source is self.request else self.request
+                            target.settimeout(max(0.01, owner.deadline - time.monotonic()))
+                            target.sendall(chunk)
+                except (OSError, ValueError, UnicodeError):
+                    pass  # no URLs, credentials, request/response bytes or extractor errors in logs
+                finally:
+                    with owner.lock:
+                        owner.channels.discard(self.request)
+                        if remote is not None:
+                            owner.channels.discard(remote)
+                    if remote is not None:
+                        remote.close()
+
+        class Server(socketserver.ThreadingTCPServer):
+            daemon_threads = True
+            block_on_close = False
+            allow_reuse_address = False
+
+            def handle_error(self, *_):
+                pass
+
+        self.server = Server(('127.0.0.1', 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': 0.05}, daemon=True)
+        self.thread.start()
+        self.url = 'http://yakala:' + self.secret + '@127.0.0.1:' + str(self.server.server_address[1])
+        return self
+
+    def __exit__(self, *_):
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+        with self.lock:
+            channels = list(self.channels)
+        for channel in channels:
+            try:
+                channel.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            channel.close()
+        if self.thread is not None:
+            self.thread.join(0.5)
+
+
+def _agent_music_process_env():
+    # No proxy, token, auth, PYTHONPATH, certificate override, cookie or JS-runtime environment.
+    allowed = {'PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'LANG', 'LC_ALL', 'TMP', 'TEMP', 'TMPDIR'}
+    env = {key: value for key, value in os.environ.items() if key.upper() in allowed}
+    env.update(PYTHONIOENCODING='utf-8', PYTHONNOUSERSITE='1', PYTHONDONTWRITEBYTECODE='1',
+               NO_COLOR='1', YTDLP_NO_PLUGINS='1')
+    return env
+
+
+def _agent_music_executable(name, vault, state):
+    found = shutil.which(name)
+    if not found:
+        raise FileNotFoundError('Gerekli yerel arac yok: ' + name)
+    path = Path(found).resolve(strict=True)
+    if (not path.is_file() or path.suffix.lower() in ('.bat', '.cmd', '.ps1') or
+            path.is_relative_to(Path(vault).resolve()) or path.is_relative_to(_agent_root(state))):
+        raise ValueError('Muzik araci vault/dis is verisinden veya kabuk betiginden calistirilamaz.')
+    return str(path)
+
+
+def _agent_music_run(command, folder, timeout, limit, input_bytes=None):
+    """Fixed argv only, bounded captured stdout, no stderr echo and no inherited stdin."""
+    import threading
+    import time
+    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000) if os.name == 'nt' else 0
+    process = subprocess.Popen(command, shell=False, cwd=str(folder), env=_agent_music_process_env(),
+                               stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, close_fds=True, creationflags=flags)
+    exceeded, output = threading.Event(), bytearray()
+
+    def read():
+        try:
+            while True:
+                part = process.stdout.read1(65536)
+                if not part:
+                    return
+                if len(output) + len(part) > limit:
+                    exceeded.set()
+                    return
+                output.extend(part)
+        except (OSError, ValueError):
+            exceeded.set()
+
+    def feed():
+        try:
+            process.stdin.write(input_bytes)
+            process.stdin.close()
+        except (OSError, ValueError):
+            pass
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    feeder = threading.Thread(target=feed, daemon=True) if input_bytes is not None else None
+    if feeder:
+        feeder.start()
+    deadline = time.monotonic() + timeout
+    try:
+        while process.poll() is None:
+            if exceeded.is_set() or time.monotonic() >= deadline:
+                raise TimeoutError('Yerel muzik aracinin cikti/sure siniri doldu.')
+            try:
+                process.wait(timeout=0.05)
+            except subprocess.TimeoutExpired:
+                pass
+        reader.join(1)
+        if reader.is_alive() or exceeded.is_set() or process.returncode:
+            raise ValueError('Yerel muzik araci basarisiz; guvenlik bayraklari kaldirilmadi.')
+        return bytes(output)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=2)
+        if feeder:
+            feeder.join(0.5)
+        reader.join(0.5)
+        process.stdout.close()
+        if process.stdin is not None:
+            process.stdin.close()
+
+
+def _agent_music_ytdlp(vault, state, job, platform, canonical, deadline):
+    import time
+    executable = _agent_music_executable('yt-dlp', vault, state)
+    folder = _agent_job_folder(vault, state, job['id'])
+    cutoff = min(deadline, time.monotonic() + 18)
+    with _AgentMusicProxy(platform, cutoff) as proxy:
+        command = [executable, '--ignore-config', '--no-plugin-dirs', '--no-js-runtimes',
+                   '--no-remote-components', '--no-exec', '--no-playlist', '--simulate',
+                   '--dump-single-json', '--no-warnings', '--no-progress', '--no-cache-dir',
+                   '--no-cookies', '--no-cookies-from-browser', '--no-write-comments',
+                   '--socket-timeout', '4', '--retries', '0', '--extractor-retries', '0',
+                   '--fragment-retries', '0', '--no-check-formats', '--xff', 'never',
+                   '--proxy', proxy.url, '--geo-verification-proxy', proxy.url,
+                   '--use-extractors', {'youtube': 'Youtube', 'instagram': 'Instagram',
+                                         'tiktok': 'TikTok,TikTokVM'}[platform], '--', canonical]
+        data = _agent_music_run(command, folder, max(0.01, cutoff - time.monotonic()), 4 * 1024 * 1024)
+    try:
+        value = json.loads(data.decode('utf-8'))
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise ValueError('Video araci tek ve sinirli JSON dondurmedi.') from exc
+    if not isinstance(value, dict) or value.get('_type') in ('playlist', 'multi_video', 'url', 'url_transparent') or value.get('entries'):
+        raise ValueError('Yalniz tek video sonucu desteklenir; oynatma listesi acilmaz.')
+    return value
+
+
+def _agent_music_clean(value, limit=300):
+    if not isinstance(value, str):
+        return ''
+    return ' '.join(''.join(char for char in value if ord(char) >= 32 and ord(char) != 127).split())[:limit]
+
+
+def _agent_music_metadata(body, content_type, source):
+    """Deterministic metadata hints, explicitly distinct from acoustic recognition."""
+    from html.parser import HTMLParser
+
+    class Page(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.meta, self.scripts, self.parts = {}, [], []
+            self.script = self.title = False
+
+        def handle_starttag(self, tag, attrs):
+            attributes = dict(attrs)
+            if tag == 'meta':
+                name = attributes.get('property') or attributes.get('name') or attributes.get('itemprop')
+                if name in ('og:title', 'og:description', 'description', 'music:song', 'music:musician'):
+                    self.meta[name] = _agent_music_clean(attributes.get('content'), 2000)
+            if tag == 'script':
+                self.script = True
+                self.scripts.append('')
+            if tag == 'title':
+                self.title = True
+
+        def handle_endtag(self, tag):
+            if tag == 'script':
+                self.script = False
+            if tag == 'title':
+                self.title = False
+
+        def handle_data(self, data):
+            if self.script and self.scripts:
+                self.scripts[-1] += data
+            elif self.title:
+                self.parts.append(data)
+
+    text = body.decode('utf-8', 'replace')
+    page = Page()
+    page.feed(text)
+    roots = []
+    if 'json' in content_type:
+        try:
+            roots.append(json.loads(text))
+        except (ValueError, RecursionError):
+            pass
+    for script in page.scripts[:60]:
+        candidate = script.strip()
+        try:
+            if candidate.startswith(('{', '[')):
+                roots.append(json.loads(candidate))
+            else:
+                match = re.search(r'(?:var\s+)?ytInitialPlayerResponse\s*=\s*', candidate)
+                if match:
+                    roots.append(json.JSONDecoder().raw_decode(candidate[match.end():])[0])
+        except (ValueError, RecursionError):
+            continue
+    candidates, descriptions, visited = [], [], 0
+    stack = [(root, '', 0) for root in roots]
+
+    def add(title, artist='', original=False, evidence=''):
+        title, artist = _agent_music_clean(title), _agent_music_clean(artist)
+        if title and len(candidates) < 8:
+            entry = {'title': title, 'artist': artist, 'original_audio': bool(original),
+                     'evidence': evidence, 'source': source, 'verification': 'source_metadata_only'}
+            if entry not in candidates:
+                candidates.append(entry)
+
+    while stack and visited < 5000:
+        value, key, depth = stack.pop()
+        visited += 1
+        if depth > 20:
+            continue
+        if isinstance(value, list):
+            stack.extend((item, key, depth + 1) for item in value[:100])
+        elif isinstance(value, dict):
+            if key in ('music', 'musicInfo', 'music_asset_info', 'music_metadata'):
+                add(value.get('title') or value.get('musicName'),
+                    value.get('authorName') or value.get('display_artist') or value.get('artist'),
+                    value.get('original') is True or value.get('originalSound') is True,
+                    key)
+            if key in ('original_sound_info', 'original_audio'):
+                artist = value.get('ig_artist')
+                add(value.get('original_audio_title') or value.get('title') or 'Orijinal ses',
+                    artist.get('username') if isinstance(artist, dict) else '', True, key)
+            if value.get('@type') == 'MusicRecording':
+                artist = value.get('byArtist')
+                add(value.get('name'), artist.get('name') if isinstance(artist, dict) else artist,
+                    False, 'JSON-LD MusicRecording')
+            description = value.get('shortDescription')
+            if isinstance(description, str) and len(descriptions) < 2:
+                descriptions.append(_agent_music_clean(description, 2000))
+            stack.extend((item, name, depth + 1) for name, item in list(value.items())[:250])
+    return {'status': 'metadata', 'recognized': False, 'source': source, 'source_trust': 'untrusted',
+            'title': page.meta.get('og:title') or _agent_music_clean(' '.join(page.parts)),
+            'description': page.meta.get('og:description') or page.meta.get('description') or
+                           '\n'.join(descriptions), 'candidates': candidates,
+            'message': 'Sayfa meta verisi ipucudur; Orijinal ses etiketi sarki kimligini dogrulamaz.'}
+
+
+def _agent_music_cached(folder, name):
+    path = _agent_no_links(folder / name)
+    if not path.exists():
+        return None
+    value = json.loads(_agent_read_text(path, 64 * 1024))
+    if not isinstance(value, dict):
+        raise ValueError('Muzik sonuc onbellegi gecersiz.')
+    return value
+
+
+def _agent_music_info(vault, state, job, deadline):
+    import time
+    folder = _agent_job_folder(vault, state, job['id'])
+    cached = _agent_music_cached(folder, 'music-info.json')
+    if cached is not None:
+        return dict(cached, cached=True)
+    marker = folder / 'music-info-attempt.json'
+    try:
+        _agent_create_json(marker, {'schema': 1, 'attempted': True})
+    except FileExistsError:
+        return {'status': 'unavailable', 'recognized': False,
+                'message': 'Sayfa onceki denemede kesildi; bu iste ag denemesi tekrarlanmaz.'}
+    try:
+        platform, _ = _agent_music_source(job['url'])
+        fetched = _agent_music_http(job['url'], platform=platform,
+                                   deadline=min(deadline, time.monotonic() + 7), limit=_AGENT_MUSIC_PAGE_BYTES)
+        result = _agent_music_metadata(fetched['body'], fetched['content_type'], fetched['url'])
+    except (OSError, ValueError, RecursionError) as exc:
+        result = {'status': 'unavailable', 'recognized': False,
+                  'message': 'Sayfa meta verisi alinamadi; giris/erisim siniri veya desteklenmeyen kaynak.',
+                  'error_type': type(exc).__name__}
+    _agent_json(folder / 'music-info.json', result)
+    return result
+
+
+def _agent_music_media_url(info, platform):
+    if info.get('is_live') or info.get('live_status') in ('is_live', 'is_upcoming') or info.get('has_drm'):
+        raise ValueError('Canli yayin, gelecek yayin ve DRM icerigi desteklenmez.')
+    choices = []
+    formats = info.get('formats')
+    if formats is not None and (not isinstance(formats, list) or len(formats) > 500):
+        raise ValueError('Video format listesi gecersiz veya siniri asti.')
+    for item in [info, *(formats or [])]:
+        if not isinstance(item, dict) or item.get('has_drm') or item.get('acodec') == 'none':
+            continue
+        if item.get('protocol') not in (None, 'https', 'http') or item.get('fragments') or item.get('manifest_url'):
+            continue
+        url = item.get('url')
+        if not isinstance(url, str) or len(url) > 8192:
+            continue
+        try:
+            parsed = _agent_music_allowed_url(url, platform)
+        except ValueError:
+            continue
+        if parsed.path.lower().endswith(('.m3u8', '.mpd', '.ism', '.m3u')):
+            continue
+        size = item.get('filesize') or item.get('filesize_approx')
+        if size is not None and (type(size) not in (int, float) or not 0 < size <= _AGENT_MUSIC_SOURCE_BYTES):
+            continue
+        # Audio-only first, then smallest estimate; quality is irrelevant to an identification clip.
+        choices.append((item.get('vcodec') != 'none', size or _AGENT_MUSIC_SOURCE_BYTES, url))
+    if not choices:
+        raise ValueError('Izinli dogrudan ses/video dosyasi yok; HLS/DASH/DRM veya cookie yontemine gecilmez.')
+    return min(choices)[2]
+
+
+def _agent_music_demuxer(data):
+    # A suffix/MIME is no evidence. Refuse playlists and XML before a local-only fixed demuxer runs.
+    if len(data) >= 12 and data[4:8] == b'ftyp':
+        return 'mov'
+    if data.startswith(b'\x1aE\xdf\xa3'):
+        return 'matroska'
+    if data.startswith(b'RIFF') and data[8:12] == b'WAVE':
+        return 'wav'
+    if data.startswith(b'OggS'):
+        return 'ogg'
+    if data.startswith(b'fLaC'):
+        return 'flac'
+    if data.startswith(b'ID3') or (len(data) > 2 and data[0] == 255 and data[1] & 0xE0 == 0xE0):
+        return 'aac' if len(data) > 2 and data[0] == 255 and data[1] & 0xF6 == 0xF0 else 'mp3'
+    raise ValueError('Ses kaynagi izinli medya basligi tasimiyor; oynatma listesi veya metin acilmaz.')
+
+
+def _agent_music_sample(vault, state, job, data, deadline):
+    import io
+    import time
+    import wave
+    executable = _agent_music_executable('ffmpeg', vault, state)
+    demuxer = _agent_music_demuxer(data)
+    if demuxer == 'mov':
+        data = _agent_music_streamable_mp4(data)
+    maximum = _AGENT_MUSIC_SAMPLE_SECONDS * _AGENT_MUSIC_SAMPLE_RATE * 2
+    # ONLY pipe, including input. Even an MP4 dref/playlist disguised by a magic prefix cannot open
+    # a local file or network address. No -i URL, file protocol, dref enablement, filter or shell text.
+    command = [executable, '-hide_banner', '-loglevel', 'error', '-nostdin', '-threads', '1',
+               '-max_alloc', '67108864', '-protocol_whitelist', 'pipe',
+               '-format_whitelist', demuxer, '-probesize', '1048576', '-analyzeduration', '2000000',
+               '-f', demuxer, '-i', 'pipe:0', '-map', '0:a:0', '-vn', '-sn', '-dn',
+               '-t', str(_AGENT_MUSIC_SAMPLE_SECONDS), '-ac', '1', '-ar', str(_AGENT_MUSIC_SAMPLE_RATE),
+               '-map_metadata', '-1', '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1']
+    raw = _agent_music_run(command, _agent_job_folder(vault, state, job['id']),
+                           max(0.01, min(5, deadline - time.monotonic())), maximum, input_bytes=data)
+    if len(raw) < _AGENT_MUSIC_SAMPLE_RATE * 2 or len(raw) > maximum or len(raw) % 2:
+        raise ValueError('Tani icin en az bir saniyelik gecerli sinirli ses ornegi gerekir.')
+    output = io.BytesIO()
+    with wave.open(output, 'wb') as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(_AGENT_MUSIC_SAMPLE_RATE)
+        handle.writeframes(raw)
+    return output.getvalue()
+
+
+def _agent_music_streamable_mp4(data):
+    """Move a trailing progressive MP4 moov into RAM before mdat, fixing bounded stco/co64.
+
+    Standard FFmpeg MP4 output places moov at EOF; stdin cannot seek backwards. Reordering
+    this one container avoids a file-capable decoder or an uncontrolled on-disk FFmpeg cache.
+    Fragmented files with moov already first pass untouched. Unsupported/truncated layouts
+    fail closed; this is not a general media repair/conversion tool.
+    """
+    import struct
+    if not 12 <= len(data) <= _AGENT_MUSIC_SOURCE_BYTES:
+        raise ValueError('MP4 boyutu gecersiz.')
+    atoms = []
+
+    def boxes(blob, start, end):
+        position = start
+        while position < end:
+            if position + 8 > end:
+                raise ValueError('MP4 kutusu yarim kalmis.')
+            size, name = struct.unpack_from('>I4s', blob, position)
+            header = 8
+            if size == 1:
+                if position + 16 > end:
+                    raise ValueError('MP4 uzun kutusu yarim kalmis.')
+                size, header = struct.unpack_from('>Q', blob, position + 8)[0], 16
+            elif size == 0:
+                size = end - position
+            if size < header or position + size > end:
+                raise ValueError('MP4 kutu siniri gecersiz.')
+            atoms.append(None)
+            if len(atoms) > 10000:
+                raise ValueError('MP4 kutu sayisi siniri asildi.')
+            yield name, position, size, header
+            position += size
+
+    top = list(boxes(data, 0, len(data)))
+    moovs = [item for item in top if item[0] == b'moov']
+    mdats = [item for item in top if item[0] == b'mdat']
+    if len(moovs) != 1 or not mdats:
+        raise ValueError('Tek moov ve medya kutusu olan MP4 gerekir.')
+    _, old, size, header = moovs[0]
+    if old < mdats[0][1]:
+        return data
+    if len(mdats) != 1 or struct.unpack_from('>I', data, old)[0] == 0:
+        raise ValueError('Moov tasima icin tek mdat ve acik moov boyutu gerekir.')
+    if any(item[0] in (b'moof', b'mfra', b'sidx') for item in top):
+        raise ValueError('Sondan meta verili parcalanmis MP4 desteklenmez.')
+    if top[0][0] != b'ftyp':
+        raise ValueError('MP4 ftyp basligi eksik.')
+    insertion = top[0][1] + top[0][2]
+    moov = bytearray(data[old:old + size])
+    stack = [(header, size, 0)]
+    counts = 0
+    while stack:
+        start, end, depth = stack.pop()
+        if depth > 12:
+            raise ValueError('MP4 kapsayici derinligi siniri asildi.')
+        for name, position, length, width in boxes(moov, start, end):
+            if name in (b'moov', b'trak', b'mdia', b'minf', b'stbl'):
+                stack.append((position + width, position + length, depth + 1))
+            elif name in (b'cmov', b'mvex', b'iloc', b'saio', b'saiz'):
+                raise ValueError('Bu MP4 meta veri/parcalama yapisi tasinmaz.')
+            elif name in (b'stco', b'co64'):
+                offset = position + width
+                if offset + 8 > position + length:
+                    raise ValueError('MP4 parca tablosu yarim kalmis.')
+                count = struct.unpack_from('>I', moov, offset + 4)[0]
+                unit, code = (4, '>I') if name == b'stco' else (8, '>Q')
+                counts += count
+                if counts > 250000 or offset + 8 + count * unit != position + length:
+                    raise ValueError('MP4 parca tablosu boyut siniri asildi.')
+                for index in range(count):
+                    at = offset + 8 + index * unit
+                    original = struct.unpack_from(code, moov, at)[0]
+                    _, media_position, media_size, media_header = mdats[0]
+                    if not media_position + media_header <= original < media_position + media_size:
+                        raise ValueError('MP4 parca adresi bu medyanin disinda.')
+                    updated = original + size if insertion <= original < old else original
+                    if updated >= 1 << (8 * unit):
+                        raise ValueError('MP4 parca adresi sayi sinirini asti.')
+                    struct.pack_into(code, moov, at, updated)
+    return data[:insertion] + bytes(moov) + data[insertion:old] + data[old + size:]
+
+
+def _agent_music_credential_path(vault, state):
+    root = _agent_root(state)
+    if root.is_relative_to(Path(vault).resolve()):
+        raise ValueError('Muzik servis anahtari icin durum klasoru vault disinda olmali.')
+    return _agent_no_links(root / 'credentials' / 'audd.json')
+
+
+def _agent_music_dpapi(data, protect):
+    """Windows CurrentUser DPAPI; ciphertext in state is useless to a different OS account."""
+    import ctypes as C
+    class Blob(C.Structure):
+        _fields_ = [('size', C.c_uint32), ('data', C.POINTER(C.c_ubyte))]
+    raw = (C.c_ubyte * len(data)).from_buffer_copy(data)
+    incoming, outgoing = Blob(len(data), C.cast(raw, C.POINTER(C.c_ubyte))), Blob()
+    crypt = C.WinDLL('crypt32', use_last_error=True)
+    function = crypt.CryptProtectData if protect else crypt.CryptUnprotectData
+    function.argtypes = [C.POINTER(Blob), C.c_void_p, C.POINTER(Blob), C.c_void_p,
+                         C.c_void_p, C.c_uint32, C.POINTER(Blob)]
+    function.restype = C.c_int
+    if not function(C.byref(incoming), None, None, None, None, 1, C.byref(outgoing)):
+        raise ValueError('Windows muzik anahtari kullaniciya ozel korunamadi/acilamadi.')
+    kernel = C.WinDLL('kernel32', use_last_error=True)
+    kernel.LocalFree.argtypes = [C.c_void_p]
+    kernel.LocalFree.restype = C.c_void_p
+    try:
+        return C.string_at(outgoing.data, outgoing.size)
+    finally:
+        kernel.LocalFree(outgoing.data)
+
+
+def _agent_music_key(vault, state):
+    import base64
+    import stat
+    path = _agent_music_credential_path(vault, state)
+    if not path.exists():
+        return None
+    info = path.stat()
+    if os.name != 'nt' and (stat.S_IMODE(info.st_mode) & 0o077 or info.st_uid != os.getuid()):
+        raise ValueError('Muzik anahtar dosyasi yalniz bu kullaniciya okunur olmali (0600).')
+    value = json.loads(_agent_read_text(path, 4096))
+    if (not isinstance(value, dict) or set(value) != {'schema', 'provider', 'protection', 'data'} or
+            value.get('schema') != 1 or value.get('provider') != 'audd'):
+        raise ValueError('Muzik anahtar kaydi gecersiz.')
+    protected = value.get('protection')
+    if protected != ('dpapi-user' if os.name == 'nt' else 'posix-0600'):
+        raise ValueError('Muzik anahtari bu isletim sistemine ait degil; yeniden ayarla.')
+    try:
+        raw = base64.b64decode(value['data'], validate=True)
+        if protected == 'dpapi-user':
+            raw = _agent_music_dpapi(raw, False)
+        token = raw.decode('ascii')
+    except (ValueError, UnicodeError, TypeError) as exc:
+        raise ValueError('Muzik anahtari okunamadi; yeniden ayarla.') from exc
+    if not re.fullmatch(r'[A-Za-z0-9_.:-]{8,512}', token):
+        raise ValueError('Muzik anahtari bicimi gecersiz.')
+    return token
+
+
+def configure_agent_music(vault, state, provider='durum', key_file=None):
+    import base64
+    import getpass
+    if provider not in ('durum', 'audd', 'kapali') or (key_file and provider != 'audd'):
+        raise ValueError('Anahtar yalniz ajan-muzik audd ile verilir.')
+    path = _agent_music_credential_path(vault, state)
+    if provider == 'kapali':
+        with _AgentFileLock(path.parent / 'audd.lock'):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        return {'status': 'muzik_kapali', 'provider': None, 'message': 'Yeni tani yuklemesi yapilmaz; kart izinleri degismez.'}
+    if provider == 'durum':
+        return {'status': 'muzik_durumu', 'provider': 'audd' if path.exists() else None,
+                'per_job_upload_required': True, 'sample_seconds': _AGENT_MUSIC_SAMPLE_SECONDS,
+                'message': 'Servis anahtari tek basina ses isleme/yukleme izni vermez.'}
+    if key_file is not None:
+        source = Path(key_file).expanduser().absolute()
+        _agent_no_links(source)
+        if source.resolve().is_relative_to(Path(vault).resolve()):
+            raise ValueError('Anahtar giris dosyasi vault disinda olmali.')
+        token = _agent_read_text(source, 1024).strip()
+    else:
+        if sys.stdin is None or not sys.stdin.isatty():
+            raise ValueError('Etkilesimsiz giriste vault disi --anahtar-dosyasi kullan; anahtari argv/env icine yazma.')
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', getpass.GetPassWarning)
+            token = getpass.getpass('AudD API anahtari (gizli): ').strip()
+    if not re.fullmatch(r'[A-Za-z0-9_.:-]{8,512}', token):
+        raise ValueError('Muzik anahtari bicimi gecersiz; kayit yapilmadi.')
+    raw = token.encode('ascii')
+    if os.name == 'nt':
+        raw = _agent_music_dpapi(raw, True)
+    with _AgentFileLock(path.parent / 'audd.lock'):
+        _agent_json(path, {'schema': 1, 'provider': 'audd', 'protection': 'dpapi-user' if os.name == 'nt' else 'posix-0600',
+                           'data': base64.b64encode(raw).decode('ascii')})
+    return {'status': 'muzik_ayarlandi', 'provider': 'audd', 'per_job_upload_required': True,
+            'message': 'Anahtar kaydedildi; servisle baglanti kurulmadi.'}
+
+
+def _agent_music_listening_link(value):
+    if not isinstance(value, str) or len(value) > 2048 or any(ord(char) < 32 for char in value):
+        return None
+    try:
+        parsed = urlparse(value)
+        if (parsed.scheme != 'https' or parsed.username or parsed.password or parsed.port not in (None, 443) or
+                parsed.hostname not in ('music.apple.com', 'open.spotify.com', 'lis.tn')):
+            return None
+        query = ''
+        if parsed.hostname == 'music.apple.com':
+            identifiers = parse_qs(parsed.query).get('i', [])
+            if len(identifiers) == 1 and re.fullmatch(r'[0-9]{1,30}', identifiers[0]):
+                query = 'i=' + identifiers[0]  # Apple album URLs need i to point at the matched track
+        return parsed._replace(fragment='', query=query).geturl()
+    except ValueError:
+        return None
+
+
+def _agent_music_audd_result(response, token):
+    # Response/error strings can echo credentials. No raw response or service error is persisted.
+    if not isinstance(response, dict) or response.get('status') != 'success':
+        return {'status': 'unavailable', 'recognized': False, 'provider': 'audd',
+                'message': 'Tani servisi istegi reddetti; tekrar gonderilmedi. Anahtar/kota durumunu kullanici kontrol etmeli.'}
+    found = response.get('result')
+    if found is None:
+        return {'status': 'unmatched', 'recognized': False, 'provider': 'audd',
+                'message': 'Bu 12 sn veya daha kisa ornekte eslesme yok; sarki adi tahmin edilmedi.'}
+    if not isinstance(found, dict):
+        raise ValueError('Tani servisi sonuc bicimi gecersiz.')
+    def cleaned(value):
+        return '' if isinstance(value, str) and token in value else _agent_music_clean(value)
+
+    title, artist = cleaned(found.get('title')), cleaned(found.get('artist'))
+    if not title or not artist:
+        raise ValueError('Tani sonucunun zorunlu alanlari eksik veya guvenli degil.')
+    links = []
+    spotify, apple = found.get('spotify'), found.get('apple_music')
+    external = spotify.get('external_urls') if isinstance(spotify, dict) else None
+    for value in (external.get('spotify') if isinstance(external, dict) else None,
+                  apple.get('url') if isinstance(apple, dict) else None, found.get('song_link')):
+        if isinstance(value, str) and token in value:
+            continue
+        link = _agent_music_listening_link(value)
+        if link and token not in link and link not in links:
+            links.append(link)
+    album = cleaned(found.get('album'))
+    return {'status': 'recognized', 'recognized': True, 'provider': 'audd', 'title': title, 'artist': artist,
+            'album': album if token not in album else '', 'listening_links': links,
+            'verification': 'provider_acoustic_match', 'confidence': None,
+            'message': 'AudD ses ornegini eslestirdi. Baglantilar dinleme icindir; indirme lisansi verilmedi.'}
+
+
+def _agent_music_audd(sample, token, deadline):
+    import uuid
+    boundary = 'yakala' + uuid.uuid4().hex
+    prefix = ('--' + boundary + '\r\nContent-Disposition: form-data; name="api_token"\r\n\r\n' + token +
+              '\r\n--' + boundary + '\r\nContent-Disposition: form-data; name="return"\r\n\r\napple_music,spotify' +
+              '\r\n--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="sample.wav"' +
+              '\r\nContent-Type: audio/wav\r\n\r\n').encode('ascii')
+    body = prefix + sample + ('\r\n--' + boundary + '--\r\n').encode('ascii')
+    fetched = _agent_music_http('https://api.audd.io/', deadline=deadline, limit=64 * 1024, body=body,
+                                content_type='multipart/form-data; boundary=' + boundary)
+    try:
+        response = json.loads(fetched['body'].decode('utf-8'))
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise ValueError('Tani servisi sinirli JSON dondurmedi.') from exc
+    return _agent_music_audd_result(response, token)
+
+
+def _agent_music_identify(vault, state, job, deadline):
+    import time
+    folder = _agent_job_folder(vault, state, job['id'])
+    cached = _agent_music_cached(folder, 'music-result.json')
+    if cached is not None:
+        return dict(cached, cached=True)
+    metadata = _agent_music_info(vault, state, job, deadline)
+    consent = _agent_music_permissions(job)
+    if not consent['extract'] or not _agent_open_network(job.get('config') or {}):
+        return {'status': 'approval_required', 'recognized': False, 'metadata': metadata,
+                'message': 'Yerel ses isleme icin ag acik ve bu ise --ses-isle gerekir. AudD icin ayrica '
+                           '--tani-servise-gonder gerekir. Acik istek metni bu izinlerin yerine gecmez.',
+                'next_cli': 'beyin.py yakala ajan-gonder ' + job['card_id'] +
+                            ' --istek "Sarkiyi tani ve mesru baglanti ver" --ses-isle --tani-servise-gonder'}
+    try:
+        _agent_create_json(folder / 'music-extract-attempt.json', {'schema': 1, 'attempted': True})
+    except FileExistsError:
+        return {'status': 'unavailable', 'recognized': False, 'metadata': metadata,
+                'message': 'Bu iste ses islemesi daha once denendi; kesinti sonrasi otomatik tekrar yok.'}
+    result = None
+    try:
+        token = _agent_music_key(vault, state) if consent['upload'] == 'audd' else None
+        if consent['upload'] == 'audd' and token is None:
+            result = {'status': 'unavailable', 'recognized': False, 'provider': None,
+                      'message': 'Tani servisi kapali/anahtar yok. Kullanici ajan-muzik audd ile ayarlamali; yukleme yapilmadi.'}
+        else:
+            platform, canonical = _agent_music_source(job['url'])
+            info = _agent_music_ytdlp(vault, state, job, platform, canonical, deadline)
+            track, artist = _agent_music_clean(info.get('track')), _agent_music_clean(info.get('artist'))
+            if track:
+                metadata.setdefault('candidates', []).append({'title': track, 'artist': artist,
+                    'evidence': 'yt-dlp track/artist', 'source': canonical, 'verification': 'source_metadata_only'})
+            if info.get('description') and not metadata.get('description'):
+                metadata['description'] = _agent_music_clean(info.get('description'), 2000)
+            media = _agent_music_media_url(info, platform)
+            fetched = _agent_music_http(media, platform=platform, limit=_AGENT_MUSIC_SOURCE_BYTES,
+                                       deadline=min(deadline, time.monotonic() + 10))
+            sample = _agent_music_sample(vault, state, job, fetched['body'], deadline)
+            del fetched, info
+            if not consent['upload']:
+                result = {'status': 'approval_required', 'recognized': False, 'sample_bytes': len(sample),
+                          'message': 'Kisa ses ornegi yalniz yerelde cikarildi ve kalici tutulmadi. Tani icin '
+                                     'yeni ise --ses-isle --tani-servise-gonder ve AudD anahtari gerekir.'}
+            else:
+                # Off/rotation during source extraction revokes this pending upload. Never retain
+                # the earlier token across the slow yt-dlp/download/decode stages as authority.
+                credential = _agent_music_credential_path(vault, state)
+                # Serialize the entire final authorization/debit/POST against user disable/rotation.
+                # Once `ajan-muzik kapali` returns, no authorized-but-not-started POST is left behind.
+                with _AgentFileLock(credential.parent / 'audd.lock'):
+                    current = _agent_load_job(vault, state, job['id'])
+                    current_settings = agent_settings(vault, state)
+                    if (current.get('state') != 'running' or (folder / 'result.json').exists() or
+                            _agent_music_permissions(current) != consent or current_settings['client'] == 'kapali' or
+                            not _agent_open_network(current_settings)):
+                        raise ValueError('Is bitti/izni degisti; ses yuklemesi baslatilmadi.')
+                    fresh_token = _agent_music_key(vault, state)
+                    if not fresh_token or fresh_token != token:
+                        raise ValueError('Tani servisi kapandi veya anahtar degisti; ses yuklemesi baslatilmadi.')
+                    # Durable debit BEFORE sending. Unknown outcome (timeout/crash) is never billed again.
+                    _agent_create_json(folder / 'music-provider-attempt.json', {'schema': 1, 'provider': 'audd',
+                        'attempted': True, 'sample_bytes': len(sample), 'maximum_seconds': _AGENT_MUSIC_SAMPLE_SECONDS})
+                    result = _agent_music_audd(sample, fresh_token, min(deadline, time.monotonic() + 7))
+            del sample
+    except (OSError, ValueError, RecursionError) as exc:
+        result = {'status': 'unavailable', 'recognized': False, 'error_type': type(exc).__name__,
+                  'message': 'Muzik islemi sinirlar icinde tamamlanamadi. Giris/cookie, DRM, HLS/DASH, JS '
+                             'gereksinimi, arac surumu veya ag siniri olabilir; guvenlik siniri gevsetilmedi. '
+                             'Servis denemesi varsa sonuc belirsizdir ve otomatik tekrarlanmaz.'}
+    result['metadata'] = metadata
+    result['sample_max_seconds'] = _AGENT_MUSIC_SAMPLE_SECONDS
+    _agent_json(folder / 'music-result.json', result)
+    return result
+
+
+def _agent_music_tool(vault, state, job, name):
+    import time
+    folder = _agent_job_folder(vault, state, job['id'])
+    with _AgentFileLock(folder / 'music.lock'):
+        job = _agent_load_job(vault, state, job['id'])
+        if job.get('state') != 'running' or (folder / 'result.json').exists():
+            raise ValueError('Bu is artik calismiyor; muzik araclari kapali.')
+        # Maximum stages: page 7 + yt-dlp 18 + media 10 + ffmpeg 5 + AudD 7 seconds (< MCP 60).
+        deadline = time.monotonic() + 50
+        if name == 'music_info':
+            return _agent_music_info(vault, state, job, deadline)
+        return _agent_music_identify(vault, state, job, deadline)
+
+
 def _agent_tool_definitions(config=None):
     string = {'type': 'string'}
     source_rule = ('Public HTTP(S) URLs are allowed. Never put private vault data into a URL.'
@@ -8385,6 +9416,10 @@ def _agent_tool_definitions(config=None):
          {'url': string}, ['url'], True, True),
         ('download', 'Stage create-only media/text/PDF, at most 50 MiB, never execute. ' + source_rule + budget,
          {'url': string, 'filename': string}, ['url', 'filename'], False, True),
+        ('music_info', 'Bu kartin video sayfasindaki muzik meta verisini oku; kimlik kaniti degildir. Parametre almaz.',
+         {}, [], True, True),
+        ('music_identify', 'Yalniz host CLI izniyle 12 sn yerel ornek ve ayri izinle AudD eslesmesi. Parametre almaz.',
+         {}, [], False, True),
         ('write_note', 'Create one new job-owned result note. Cannot edit, overwrite or delete an existing note.',
          {'title': string, 'content': string}, ['title', 'content'], False, False),
         ('complete', 'Submit final result: completed, approval_required or failed. Worker alone updates card/receipt.',
@@ -8451,6 +9486,8 @@ def _agent_dispatch_tool(vault, state, job_id, name, arguments):
     if name == 'download':
         _agent_spend_network_call(vault, state, job)
         return _agent_download(vault, state, job, **arguments)
+    if name in ('music_info', 'music_identify'):
+        return _agent_music_tool(vault, state, job, name)
     if name == 'write_note':
         return _agent_write_note(vault, state, job, **arguments)
     return _agent_complete(vault, state, job, **arguments)
@@ -8742,6 +9779,14 @@ def main(argv=None, vault=None, state=None):
     send = command_parser('ajan-gonder', help='Kayitli tek karti acik istekle ajana ver')
     send.add_argument('id')
     send.add_argument('--istek', required=True)
+    send.add_argument('--ses-isle', action='store_true',
+                      help='Izinli/hak sahibi oldugun videodan bu ise yerel 12 sn ses ornegi izni ver (ag acik)')
+    send.add_argument('--tani-servise-gonder', action='store_true',
+                      help='Bu isin 12 sn ses ornegini AudD servisine gondermeyi acikca onayla; --ses-isle gerekir')
+    music = command_parser('ajan-muzik', help='Istege bagli AudD anahtarini guvenli yerel ayarla veya kapat')
+    music.add_argument('provider', nargs='?', choices=('durum', 'audd', 'kapali'), default='durum')
+    music.add_argument('--anahtar-dosyasi', type=Path,
+                       help='Vault disindaki yerel UTF-8 anahtar dosyasi; yoksa terminalde gizli giris')
     command_parser('ajan-devam', help='Kalici kuyrugu uyandir; kesilen isi otomatik tekrarlamaz')
     release = command_parser('ajan-serbest', help='Incelenmis hata/onay kartini normal islemeye birak')
     release.add_argument('id')
@@ -8777,7 +9822,11 @@ def main(argv=None, vault=None, state=None):
         else:
             result = agent_status(vault, state)
     elif command == 'ajan-gonder':
-        result = enqueue_agent(vault, state, args.id, args.istek)
+        consent = {'schema': 1, 'extract': args.ses_isle, 'upload': 'audd' if args.tani_servise_gonder else None}
+        result = enqueue_agent(vault, state, args.id, args.istek,
+                               music=consent if args.ses_isle or args.tani_servise_gonder else None)
+    elif command == 'ajan-muzik':
+        result = configure_agent_music(vault, state, args.provider, args.anahtar_dosyasi)
     elif command == 'ajan-devam':
         _agent_spawn_worker(vault, state)
         result = agent_status(vault, state)
