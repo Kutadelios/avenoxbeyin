@@ -836,6 +836,10 @@ class SyncEngine:
                     if metadata.get('kind') == 'task' and body.lstrip().startswith('---'):
                         raise ValueError('task has embedded frontmatter; reconcile metadata and body explicitly')
                     if metadata.get('kind') == 'receipt' or metadata.get('generated') is True:
+                        if (metadata.get('generated') is True and metadata.get('kind') == 'receipt-index' and
+                                not is_receipt_view_source(relative) and
+                                is_receipt_view_source(relative, proven=True)):
+                            view_paths.add(relative)
                         continue
                     record = dict(metadata, source=relative, text=body)
                     record.setdefault('id', 'md-' + _hash(relative)[:24])
@@ -1013,7 +1017,7 @@ class SyncEngine:
             # paths are source conflicts, never authority to hide ordinary notes.
             if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_views'").fetchone():
                 view_paths.update(row[0] for row in db.execute('SELECT path FROM receipt_views')
-                                  if is_receipt_view_source(row[0]))
+                                  if is_receipt_view_source(row[0], proven=True))
             canonical_view_paths = set(view_paths)
             # A hard link to an edited view keeps the old inode when recovery
             # atomically replaces the canonical path. Retain only identities

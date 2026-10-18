@@ -493,15 +493,21 @@ RECEIPT_VIEW_REASONS = frozenset((
 ))
 
 
-def is_receipt_view_source(source):
+def is_receipt_view_source(source, *, proven=False):
+    """Legacy reserved paths, or a flat path with independent ownership evidence.
+
+    A flat filename alone is never evidence: ordinary human daily notes use it too.
+    Callers may prove ownership with tracking rows, generated metadata or an archive.
+    """
     return isinstance(source, str) and (source == 'knowledge/v3/outcomes.md' or
-        re.fullmatch(r'daily/v3/[0-9]{4}-[0-9]{2}-[0-9]{2}\.md', source) is not None)
+        re.fullmatch(r'daily/v3/[0-9]{4}-[0-9]{2}-[0-9]{2}\.md', source) is not None or
+        (proven and re.fullmatch(r'daily/[0-9]{4}-[0-9]{2}-[0-9]{2}\.md', source) is not None))
 
 
 def is_receipt_view_conflict(item):
     # Both provenance and diagnosis are required. A source conflict must never
     # become writable merely because its name falls under a generated directory.
-    return (isinstance(item, dict) and is_receipt_view_source(item.get('source')) and
+    return (isinstance(item, dict) and is_receipt_view_source(item.get('source'), proven=True) and
             item.get('reason') in RECEIPT_VIEW_REASONS)
 
 
@@ -574,7 +580,7 @@ def archived_receipt_view_aliases(engine, warnings):
     also accepted; unrelated equal-content files at other paths are not.
     """
     aliases = set()
-    for root in (engine.root / 'knowledge/v3', engine.root / 'daily/v3'):
+    for root in (engine.root / 'knowledge/v3', engine.root / 'daily/v3', engine.root / 'daily'):
         archive_dir = root / '.archive'
         if archive_dir.is_symlink() or not archive_dir.is_dir():
             continue
@@ -594,8 +600,8 @@ def archived_receipt_view_aliases(engine, warnings):
                 archive = sidecar.with_name(sidecar.name[:-len('.provenance.json')])
                 if (not isinstance(data, dict) or data.get('schema') != 1 or
                         data.get('archive') != archive.name or
-                        not is_receipt_view_source(data.get('view')) or
-                        data['view'].split('/')[0:2] != list(root.relative_to(engine.root).parts) or
+                        not is_receipt_view_source(data.get('view'), proven=True) or
+                        Path(data['view']).parent != root.relative_to(engine.root) or
                         not isinstance(data.get('aliases'), list) or archive.is_symlink()):
                     raise ValueError('invalid receipt view provenance')
                 engine._path(archive.relative_to(engine.root).as_posix(), existing=True)
@@ -643,6 +649,11 @@ def receipt_day(created_at, zone=None):
 def _receipt_view_contents(engine, db, warnings=None):
     """Desired views from immutable receipts, without writing files or tracking state."""
     _hash, _, render = engine.projection_helpers()
+    from beyin_v3_preferences import read_daily_layout
+    layout = read_daily_layout(engine.root)
+    tracked = set()
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_views'").fetchone():
+        tracked = {row[0] for row in db.execute('SELECT path FROM receipt_views')}
     migration = engine.state/'v2-migration.json'
     previous = json.loads(migration.read_text(encoding='utf-8')) if migration.exists() else {}
     historical = set(previous.get('historical_receipts', []))
@@ -667,10 +678,29 @@ def _receipt_view_contents(engine, db, warnings=None):
         for _, at, source, summary in sorted(items):
             entries.append(f'## {at}\n\n{summary}\n\nSource: [[{source}]]\n')
             outcomes.append(f'- {day}: {summary}\n  Source: [[{source}]]\n')
-        desired[f'daily/v3/{day}.md'] = render({'generated': True, 'kind': 'receipt-index'}, '# Recorded outcomes\n\nAgent-authored claims, not independently verified facts.\n\n'+'\n'.join(entries))
+        relative = f'daily/{day}.md' if layout == 'flat' else f'daily/v3/{day}.md'
+        # Omit human notes before sync claims desired paths as view provenance.
+        # Outcomes were collected above and remain available in the shared index.
+        if layout != 'flat' or not _human_daily(engine, relative, tracked):
+            desired[relative] = render({'generated': True, 'kind': 'receipt-index'}, '# Recorded outcomes\n\nAgent-authored claims, not independently verified facts.\n\n'+'\n'.join(entries))
     if outcomes:
         desired['knowledge/v3/outcomes.md'] = render({'generated': True, 'kind': 'receipt-index'}, '# Outcome source index\n\nThis index links semantic receipts. It is not an automatic knowledge compiler.\n\n'+''.join(outcomes))
     return desired
+
+
+def _human_daily(engine, relative, tracked):
+    """Unowned flat notes without receipt-index metadata win, including during recovery."""
+    if not relative.startswith('daily/') or relative.startswith('daily/v3/') or relative in tracked:
+        return False
+    path = engine._path(relative)
+    if not path.exists():
+        return False
+    from beyin_v3_sync import parse
+    try:
+        metadata = parse(path.read_text(encoding='utf-8'))[0]
+        return metadata.get('generated') is not True or metadata.get('kind') != 'receipt-index'
+    except (ValueError, UnicodeError):
+        return True
 
 
 def quarantine_receipt_view_history(db, sources):
@@ -682,7 +712,8 @@ def quarantine_receipt_view_history(db, sources):
     # Receipt summaries that referred to a claimed view must not become public
     # merely because that view is retired or an ordinary note reuses its path.
     # Canonical view paths are also recognizable from immutable receipt refs
-    # after a database reset, when prior tracking rows no longer exist. Keep
+    # after a database reset, when prior tracking rows no longer exist. Flat
+    # paths require sources evidence; their names alone also fit human notes. Keep
     # this provenance by immutable event id without rewriting receipt files.
     db.execute('CREATE TABLE IF NOT EXISTS receipt_view_receipts(id TEXT PRIMARY KEY)')
     for ident, payload in db.execute('SELECT id,payload FROM receipts').fetchall():
@@ -710,6 +741,9 @@ def project_receipts(engine, db, warnings=None, recover_views=False, recovered=N
     conflicts = []
     tracked_views = dict(db.execute('SELECT path, hash FROM receipt_views'))
     for relative, content in desired.items():
+        # A note may have appeared since the desired view plan was built.
+        if _human_daily(engine, relative, tracked_views):
+            continue
         path = engine._path(relative)
         old = _hash(path.read_bytes()) if path.exists() else None
         desired_hash = _hash(content)
@@ -753,7 +787,7 @@ def _retire_stale_views(engine, db, desired, _hash, recover_views=False, recover
     for relative, tracked in db.execute('SELECT path, hash FROM receipt_views ORDER BY path').fetchall():
         if relative in desired:
             continue
-        if not is_receipt_view_source(relative):
+        if not is_receipt_view_source(relative, proven=True):
             conflicts.append({'source': relative, 'reason': 'unexpected receipt view path; preserved'})
             continue
         try:

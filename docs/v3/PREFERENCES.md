@@ -8,6 +8,25 @@ Alanlar: `auto_sync` boolean; `interval_minutes` 0–1440 (0 her olay); `context
 
 Ekonomik profil: auto_sync=true, interval_minutes=15, context_mode=session, context_chars=2000. Manuel: auto_sync=false ve context_mode=off. Mevcut ayarların yalnız bir alanını değiştirmek için örneğin `preferences --interval-minutes 30`; profil seçmek otomatik kontrol ve bağlam alanlarını o profile sıfırlar, bağımsız sır süzgeci tercihini korur. Aralık değiştirmek kapalı kontrolü açmaz.
 
+## Günlük receipt düzeni
+
+`python3 beyin.py preferences --daily-layout flat` günlük receipt görünümlerini
+`daily/YYYY-MM-DD.md` yoluna yazar. Varsayılan `v3`, mevcut `daily/v3/YYYY-MM-DD.md`
+düzenini korur; geri dönmek için `--daily-layout v3` kullan. Tercih sonraki `sync` ile
+uygulanır. Ayar vault kökündeki `.beyin-daily-layout.json` dosyasındadır; vault'u Git ile
+eşitliyorsan bu dosyayı da eşitle. Makineye özel değildir, profil değişimleri etkilemez.
+Ayrı dosya eski sürümlerin sıkı `.beyin-preferences.json` şemasıyla uyumluluğu korur;
+eski motorlar bu tercihi uygulamaz, aynı vault'a yazan tüm makineleri güncelle.
+
+Flat hedefinde motorun takip etmediği, generated olmayan bir insan günlüğü varsa dosya
+korunur, görünüm yazılmaz ve çakışma oluşmaz. Receipt'ler `knowledge/v3/outcomes.md`
+içinde kalır; insan günlüğüne referans veren receipt'ler bağlamdan gizlenmez.
+Düzen değişince eski takip edilen görünüm yalnız son yazılan baytlarla aynıysa kaldırılır.
+Elle düzenlenmiş görünüm korunur ve `sync` ile `doctor` görünür uyarı verir.
+`python3 beyin.py sync --recover-views` bu düzenlemeyi yanındaki `.archive/` içine
+kayıpsız arşivleyip görünümü yeniden üretir veya eski görünümü kaldırır. Bu komut da
+takip edilmeyen insan günlüğüne dokunmaz.
+
 ## Hafıza dosyası sınırları
 
 `Last-Session.md` varsayılan olarak 3.000, `Threads.md` 8.000 karakterle sınırlıdır.
