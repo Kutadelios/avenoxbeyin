@@ -264,6 +264,41 @@ class TaskCompletionTest(unittest.TestCase):
         self.assertEqual(self.engine.update_task('legacy-task', 3, {'priority': 'low'})['revision'], 4)
         self.assertEqual(self.engine.completion_health()['strict_issue_count'], 0)
 
+    def test_unicode_determinism(self):
+        import unicodedata
+        self.engine.task_create('tasks/synthetic.md', 'Strict task.', self.metadata)
+
+        nfc_name = unicodedata.normalize('NFC', 'notes/café.md')
+        nfd_name = unicodedata.normalize('NFD', 'notes/café.md')
+
+        path_nfc = self.vault / nfc_name
+        path_nfd = self.vault / nfd_name
+
+        id_nfc = self.engine._source_identity(path_nfc)
+        id_nfd = self.engine._source_identity(path_nfd)
+
+        self.assertEqual(id_nfc, id_nfd)
+
+    def test_circular_evidence_references_do_not_cause_recursion(self):
+        self.engine.task_create('tasks/synthetic.md', 'Strict task.', self.metadata)
+        (self.vault / 'notes').mkdir()
+
+        a = self.vault / 'notes/a.md'
+        b = self.vault / 'notes/b.md'
+        try:
+            os.symlink(b, a)
+            os.symlink(a, b)
+        except OSError:
+            self.skipTest('symlinks not supported in this environment')
+
+        task = self.vault / 'tasks/synthetic.md'
+        before = task.read_bytes()
+
+        with self.assertRaisesRegex(ValueError, 'existing vault source'):
+            self.engine.update_task('synthetic-task', 1, {'status': 'done', 'evidence_refs': ['notes/a.md']})
+
+        self.assertEqual(task.read_bytes(), before)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -635,7 +635,9 @@ def _windows_safe_command(command):
 def _run(command, timeout, cwd=None):
     if os.name == 'nt':
         command = _windows_safe_command(command)
-    env = dict(os.environ, PYTHONIOENCODING='utf-8', NO_COLOR='1')
+    env = dict(os.environ, PYTHONIOENCODING='utf-8', NO_COLOR='1',
+               HTTP_PROXY='', HTTPS_PROXY='', ALL_PROXY='',
+               http_proxy='', https_proxy='', all_proxy='')
     if os.name == 'nt' and sys.platform == 'win32':
         return _windows_run(command, timeout, cwd, env)
     result = subprocess.run(command, capture_output=True, timeout=timeout, cwd=cwd, env=env,
@@ -1015,7 +1017,7 @@ def via_youtube(url, found, allow_audio=True, info=None):
 def via_stdlib(url):
     """No helper installed: plain HTTP fetch and a rough HTML-to-text."""
     from html.parser import HTMLParser
-    from urllib.request import HTTPRedirectHandler, Request, build_opener
+    from urllib.request import HTTPRedirectHandler, Request, build_opener, ProxyHandler
 
     class PublicRedirects(HTTPRedirectHandler):
         def redirect_request(self, request, fp, code, msg, headers, new_url):
@@ -1052,7 +1054,7 @@ def via_stdlib(url):
     _safe_network_url(url)
     try:
         request = Request(url, headers={'User-Agent': 'Mozilla/5.0 (beyin-yakala)'})
-        with build_opener(PublicRedirects()).open(request, timeout=30) as response:
+        with build_opener(PublicRedirects(), ProxyHandler({})).open(request, timeout=30) as response:
             if 'html' not in response.headers.get('Content-Type', 'text/html'):
                 return None
             html = response.read(5_000_000).decode(response.headers.get_content_charset() or 'utf-8', 'replace')
