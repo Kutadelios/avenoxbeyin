@@ -2731,7 +2731,8 @@ class AgentBridgeFilesTest(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         self.assertEqual(rows[0]['result']['protocolVersion'], '2025-06-18')
         names = [tool['name'] for tool in rows[1]['result']['tools']]
-        self.assertEqual(names, ['read_note', 'search_notes', 'fetch_source', 'download', 'write_note', 'complete'])
+        self.assertEqual(names, ['read_note', 'search_notes', 'fetch_source', 'download',
+                                 'music_info', 'music_identify', 'write_note', 'complete'])
         self.assertEqual(rows[2]['result'], {})
 
     def test_protocol_refuses_uninitialized_unknown_method_and_bad_tool(self):

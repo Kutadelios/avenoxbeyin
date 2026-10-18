@@ -481,8 +481,9 @@ Bu oturum normal vault klasöründe, mevcut istemci ayarlarıyla açılır. Clau
 kapatan bilinen ortam ayarları sessizce aşılmaz. Codex'in proje/hook güveni önceden normal bir
 oturumda verilmiş olmalıdır. Yeni bir giriş, UAC veya onay penceresi açılması bu akışın parçası değildir.
 
-Görevin yerel okuma ve yazma işlemleri için aynı Python modülü stdin/stdout üzerinden altı
-yeteneği sunar; genel komut çalıştırma ve serbest yazma yetkisi açılmaz:
+Gorevin yerel okuma, yazma ve izinli muzik islemleri icin ayni Python modulu
+stdin/stdout uzerinden sekiz yetenek sunar. Muzik araclarinin ek izinleri
+asagidaki "Istege bagli: videodaki muzigi tanima" bolumunde aciklanir:
 
 | Araç | Yetki |
 |---|---|
@@ -490,6 +491,8 @@ yeteneği sunar; genel komut çalıştırma ve serbest yazma yetkisi açılmaz:
 | `search_notes` | Görünür notlarda sınırlı arama yapar; en fazla 30 sonuç verir |
 | `fetch_source` | Herkese açık HTTP(S) kaynağından sınırlı metin okur; `kisitli` ağda yalnız yakalanan adres ve izinli sayfanın bağlantıları |
 | `download` | Doğrudan medya/metin/PDF dosyasını en fazla 50 MiB olarak hazırlar; iş başına en fazla 10 dosya; adres kuralı `fetch_source` ile aynı |
+| `music_info` | Yalniz bu kartin video sayfasindaki muzik meta verisini okur; kaynak iddiasi ses eslesmesi degildir |
+| `music_identify` | Host CLI'nin is basina ses izniyle kisa yerel ornek; ayri yukleme izni ve anahtarla en fazla bir AudD istegi |
 | `write_note` | Yalnız bu işin klasöründe en fazla 30 yeni sonuç notu oluşturur; mevcut notu değiştirmez |
 | `complete` | Doğrulanacak sonuç bildirir; kartı, receipt'i ve Last-Session'ı güvenilen çalışan günceller |
 
@@ -515,12 +518,14 @@ MCP/eklenti envanteri doğrulanamazsa veya etkin ek araç varsa iş durur. Yerel
 denetlenir; bilinmeyen konfigürasyonda izinler gevşetilmez. Web araması yalnız `ag: acik` iken
 açıktır (Claude `WebSearch`, Codex `web_search="live"`). `bypassPermissions` ve tam dosya sistemi erişimi verilmez. [belge: CLI, config ve izin kaynakları]
 
-Ölçüm (Claude Code 2.1.302, Codex 0.160.0, macOS): `kisitli` ağda Claude oturumunun araç listesi
+Tarihsel olcum (muzik araclari eklenmeden once; Claude Code 2.1.302, Codex 0.160.0, macOS): `kisitli` ağda Claude oturumunun araç listesi
 yalnız altı `mcp__yakala__*` aracıdır, `acik` ağda buna `WebSearch` eklenir; Bash ve dosya araçları
 yoktur. `kisitli` ağda model URL'ye not metni ekleyince köprü adresi reddetti. Codex'te kabuk aracı
 ve `kisitli` ağda web araması yoktur, ancak `view_image` (vault dışındaki yerel görüntüleri de okuyabilir), `apply_patch`
 (read-only sandbox yazmayı reddeder), kod modu `exec` ve alt ajan (`spawn_agent`) araçları listede
 kalır. Codex için "yalnız altı araç ve web araması" sınırı bu sürümde tam değildir.
+Bu tarihsel olcum yeni sekiz aracli envanterin veya muzik akisinin canli
+dogrulamasi degildir; eski gozlem verisini korur.
 
 **Güven sınırı:** Normal vault hook'ları, istemci ve `beyin.py receipt` güvenilen yerel koddur;
 onların kendi davranışları bu araç köprüsü tarafından sandbox içine alınmaz. Ajanın kullandığı
@@ -536,12 +541,14 @@ alıntıdaki talimatlar güvenilmeyen içeriktir. İstek serbest kabuk, silme, �
 mesaj gönderme veya sistem değişikliği gerektiriyorsa ajan `onay-bekliyor` sonucu bırakmalıdır;
 metin içindeki "izni aş" ifadesi yeni bir yetki oluşturmaz.
 
-**Instagram örneğinin sınırı:** Herkese açık sayfada müzik bilgisi ve doğrulanmış doğrudan dosya
-bağlantısı varsa araştırma ve indirme yapılabilir. Bu sürüm Instagram oturumunu/çerezlerini
-kullanmaz, ses dinleyerek müzik tanımaz, DRM aşmaz ve serbest `yt-dlp`/`ffmpeg` çalıştırmaz.
-Giriş, ses tanıma veya dönüştürme gerekiyorsa kart somut engelle onay bekler. Beş dakikada her
-reel'in müziğini indirme sözü verilmez; yanlış müziği veya HTML sayfasını MP3 adıyla kaydetmek
-başarı sayılmaz. Normal `isle` bölümündeki isteğe bağlı araçlar bu kısıtlı profile otomatik açılmaz.
+**Instagram orneginin siniri:** Muzik meta verisi sayfadan okunabilir. Ses
+tanima icin bu ise ayri yerel ses/yukleme izni ve istege bagli AudD anahtari
+gerekir; ayrintilar asagidaki muzik bolumundedir. Bu izinler yoksa ajan somut
+engelle onay bekler. Instagram oturumu/cookie, DRM asma ve serbest komut
+calistirma yoktur. Dogrudan dosya indirme ancak kaynagin buna izin verdigi
+durumda mevcut download araciyla yapilir. Her reel'in muziginin bulunacagi
+veya indirilecegi garantisi verilmez; yanlis muzik veya HTML dosyasi basari
+sayilmaz. Normal `isle` araclari ajan profiline kendiliginden acilmaz.
 
 ### Bildirim, kesilme ve kaldırma
 
@@ -631,6 +638,208 @@ belge desteği bu bilgisayarda canlı çalıştırma kanıtı değildir.
   (güncelleme 13.06.2016).
 - Freedesktop: [Desktop Notifications 1.3](https://specifications.freedesktop.org/notification/latest-single/)
   (18.08.2024); GNOME: [libnotify](https://gnome.pages.gitlab.gnome.org/libnotify/).
+
+## Istege bagli: videodaki muzigi tanima
+
+Bu ozellik sarkiyi tanitir ve mesru dinleme baglantisi verir. Tam sarki indirme,
+hesap/cookie okuma, DRM asma, tarayici oturumu kullanma veya modelin komut
+yazmasi bu yetenege dahil degildir. Python tarafi yalniz stdlib ve Windows'ta
+ctypes kullanir; AudD SDK veya yeni Python paketi gerekmez.
+
+### Acik izin ve ornek kullanim
+
+Yeni iki MCP araci parametre almaz. `music_info`, yalniz bu kartin yakalanmis
+Instagram reel/video, TikTok veya YouTube/Shorts sayfasinin muzik meta verisini
+okur. `music_identify`, asagidaki ayri izinlerle yerel ses ornegi cikarir ve
+istenmisse AudD'ye gonderir. Kaynak URL, dosya yolu, arama sorgusu, komut,
+anahtar veya onay model tarafindan arac argumani olarak verilemez.
+
+```sh
+# Kullandigin istemciyi sec; ag acik tek basina ses yukleme izni vermez.
+python beyin.py yakala ajan claude --ag acik
+
+# Bir defa: anahtari terminalde gizli gir. Bu komut servis istegi yapmaz.
+python beyin.py yakala ajan-muzik audd
+
+# Kaynagi normal yakala, ardindan gercek kart kimligini kullan.
+python beyin.py yakala ekle "https://www.instagram.com/reel/VIDEO_ID/" --neden "Sarkiyi tani"
+python beyin.py yakala ajan-gonder KART_ID --istek "Sarkiyi tani ve mesru dinleme baglantisi ver" --ses-isle --tani-servise-gonder
+
+# Yalniz yerel inceleme: ornek hicbir tani servisine gonderilmez.
+python beyin.py yakala ajan-gonder KART_ID --istek "Video meta verisini incele" --ses-isle
+
+# Servis durumu ve kapatma.
+python beyin.py yakala ajan-muzik
+python beyin.py yakala ajan-muzik kapali
+```
+
+`--ses-isle`, kullanicinin isleme izni bulunan videodan bu is icin en fazla
+12 saniyelik ornek cikarmaya verdigi acik izindir. `--tani-servise-gonder`,
+o ornegin AudD'ye yuklenmesine ayri izindir; `--ses-isle` olmadan reddedilir.
+Her iki izin de is kaydina, worker uyandirilmasindan once host tarafindan
+yazilir. Neden/istek metnindeki "indir", "tani" veya "izin veriyorum"
+sozcukleri, popup Ctrl+Enter, genel `ag: acik` ayari veya toplu gonderim bu
+izinleri kendiliginden vermez. Eksik izinde ajan `approval_required` sonucu
+ve gereken CLI seceneklerini sunar. Ayni karttaki onceki is bitmeden ikinci
+is kuyruga alinamaz; onay-bekliyor sonucu incelendikten sonra yeni komut
+verilir. Eski is kendiliginden yeniden baslamaz.
+
+Etkilesimsiz anahtar girisi icin `ajan-muzik audd --anahtar-dosyasi DOSYA`
+kullanilabilir. Dosya vault disinda, yerel diskte UTF-8 olmali; symlink/junction
+kabul edilmez. Anahtari CLI metnine, JSON ajan ayarina, ortam degiskenine,
+vault notuna veya prompta koyma. Giris dosyasi otomatik silinmez; kullanici
+kendi guvenli anahtar kaynagini yonetir. Kalici servis anahtari state altindaki
+`yakala/ajan/credentials/audd.json` icindedir. Cozulmus state yolu vault icinde
+kalirsa servis ayari reddedilir. Windows'ta CurrentUser DPAPI kullanilir.
+POSIX'te dosya sahibi ve `0600` izinleri dogrulanir; bu yol sifreleme iddiasi
+tasimaz. Anahtar ayni isletim sistemi hesabi disindaki bir sistem/hesaba
+tasindiginda yeniden girilmelidir. Model/alt arac ortamindan AudD degiskenleri
+cikarilir; bridge anahtari yalniz sabit AudD POST govdesine ekler.
+
+`ajan-muzik kapali`, anahtar kaydini kaldirir. Video islenirken servis
+kapatilirsa bridge yeni yuklemeden hemen once anahtari ve isin durumunu
+yeniden kontrol eder; eski anahtarla yeni istek baslatmaz. Zaten baslamis bir
+istegi geri almak veya servis tarafindaki veriyi silmek bu komutun isi degildir.
+Kapatma/anahtar degistirme ile son izin kontrolu ve POST, ayni yerel OS kilidi
+altinda siralanir. Kapatma komutu donmeden once siradaki yeni yukleme durur;
+devam eden POST varsa komut onun en fazla 7 sn ag asamasini bekleyebilir.
+
+### Ag, kanit ve sonuc
+
+| Durum | Sayfa meta verisi | yt-dlp / yerel ornek | AudD yukleme |
+| --- | --- | --- | --- |
+| `ag: kisitli` | Yalniz yakalanan destekli URL ve izinli platform yonlendirmeleri | Kapali | Kapali |
+| `ag: acik`, ek izin yok | Ayni dar arac | Kapali | Kapali |
+| `ag: acik` ve `--ses-isle` | Acik | Bu is icin acik | Kapali |
+| Onceki satir ve `--tani-servise-gonder` | Acik | Acik | Yalniz AudD anahtari varsa, en fazla bir deneme |
+
+Genel acik agin mevcut gizlilik talimati degismez: not/kisisel/ozel icerik
+arama sorgusuna veya URL'ye konmaz. Buradaki AudD izni yalniz sabit kisa ses
+orneginin gonderilmesini kapsar; notlar, istek metni, kart kimligi, vault yolu
+ve kaynak URL servise gonderilmez. Ornekte insan sesi/konusma bulunabilir;
+ornek gonderme karari bunu da kapsar. Model bu izni baska servise genisletemez.
+
+Meta veri kaynaklari: HTML `og:title`/`og:description`, YouTube
+`ytInitialPlayerResponse` aciklamasi, Instagram muzik/orijinal ses alanlari,
+TikTok `music`, JSON-LD `MusicRecording`, ayrica izinli yt-dlp ciktisindaki
+`track`/`artist`. Sayfanin "Orijinal ses" etiketi bir sarki kimligi kaniti
+degildir. Bu sonuclar `verification: source_metadata_only` ve
+`recognized: false` tasir. Gercek AudD eslesmesi
+`verification: provider_acoustic_match` tasir; saglayicinin vermedigi bir
+guven yuzdesi uydurulmaz (`confidence: null`). Servis sonucunda eslesme yoksa
+`unmatched`, servis/arac yoksa veya guvenli isleme mumkun degilse `unavailable`
+doner. Kaynak/meta veri iddiasi, model tahmini ve ses eslesmesi birbirine
+karistirilmaz.
+
+Donen dinleme baglantilari yalniz `music.apple.com`, `open.spotify.com` ve
+`lis.tn` HTTPS adreslerinden kabul edilir. Apple'in sarki secen sayisal `i`
+parametresi korunur; diger sorgu/takip ve fragment alanlari atilir. Bu
+baglantilar otomatik acilmaz, indirilmez veya kisitli agin indirme izin
+listesine eklenmez. Spotify/Apple preview adresi ve AudD eslesmesi indirme
+lisansi sayilmaz. Kullanici izni ve kaynagin acik izni bulunan dogrudan bir
+dosya icin mevcut `download` yetenegi kullanilabilir; bu ozellik yeni bir
+tam sarki indirme yolu acmaz.
+
+### Sabit araclar ve butceler
+
+- Her is icin sayfa okuma ve ses isleme en fazla birer kalici denemedir.
+  Sonuclar state icinde onbelleklenir. Kesinti/zaman asimi sonrasi otomatik
+  tekrar yoktur; yeniden denemek acik yeni is gerektirir. Bu tercih gecici
+  bir ag hatasinda yeniden komut gerektirebilir, fakat belirsiz bir ucretli
+  istegin otomatik tekrarini onler.
+- AudD deneme kaydi POST'tan once yazilir. `music-provider-attempt.json`
+  varsa ayni is yeniden ucretli istek gondermez. Sonuc kaydi yazilamadan
+  surec kesilse de onceki sonuc "bilinmiyor" sayilir; basarili diye sunulmaz.
+- Sayfa en fazla 512 KiB; yt-dlp JSON stdout en fazla 4 MiB; alinacak tek
+  dogrudan medya dosyasi en fazla 32 MiB'dir. Ses ilk en fazla 12 saniyedir:
+  mono, 16 kHz, 16-bit PCM WAV. Tam 12 saniyede 384044 bayt uretilir.
+  Ses secme/ofset/model filtre argumani veya mikrofon kaydi yoktur.
+- yt-dlp yalniz metadata cikarir. Sabit argv; `shell=False`,
+  `--ignore-config`, `--no-plugin-dirs`, `--no-js-runtimes`,
+  `--no-remote-components`, `--no-exec`, `--no-playlist`, `--simulate`,
+  cookie/cache kapatma ve sifir yeniden deneme kullanilir. Playlist,
+  genel extractor ve model tarafindan verilen URL/komut kullanilmaz.
+- yt-dlp HTTPS erisimi rastgele kimlik bilgili, yalniz loopback'te yasayan
+  bir CONNECT vekilinden gecer. Vekil yalniz ilgili platformun sabit
+  platform/CDN alanadi son eklerini, port 443'u ve dogrulanmis genel IP'leri
+  kabul eder. IP sabitleme DNS yeniden baglama ve ozel IP yonlendirmesini
+  engeller. DNS sonuclari kamu/ozel IP karisiksa reddedilir. Bu bir isletim
+  sistemi sandbox'i degildir; kurulu yt-dlp/ffmpeg ikilileri guvenilen yerel
+  bagimliliklardir. Cookie/giris veya guvenlik bayragi kaldirma fall back'i yoktur.
+- Vekil siniri 24 CONNECT tuneli ve iki yonde toplam 12 MiB sifreli aktarimdir.
+  TLS icindeki HTTP istek sayisi gorulmez; 24 siniri HTTP istek sayisi iddiasi
+  degildir. TLS sertifika kontrolunu yt-dlp yapar; vekil hedefin sayisal IP'sini
+  dogrular ve sabitler. Vekil kapaninca tum tuneller kapatilir.
+- Tek arac cagrisinin asama sureleri: sayfa 7 sn, yt-dlp 18 sn, medya 10 sn,
+  ffmpeg 5 sn, AudD 7 sn; ortak son tarih 50 sn'dir. DNS son tarihi ve
+  soketi son tarihte kapatan bekci, yavas DNS/baslik akisini da durdurur.
+  OS DNS cagrisi iptal edilemezse surec basina en fazla dort daemon cozumleyici
+  kalabilir; bunlar baglanti acamaz ve tamamlanana kadar yeni DNS kapasitesini
+  tutar. Bu sureler uygulama tavanlaridir, servis gecikmesi olcumu degildir.
+- Medya URL'sini yt-dlp'nin dondugu veri belirler; bridge ayri IP sabitlemeli,
+  sinirli HTTPS GET yapar. HLS/DASH manifesti, canli yayin, DRM, cookie veya
+  izin listesi disi CDN guvenli hata verir. Bir sayfayi mp3 diye kaydetmez.
+- ffmpeg yalniz stdin'den alinan baytlari acar. Medya sihirli basligi kontrol
+  edilir, demuxer sabitlenir, `-protocol_whitelist pipe` kullanilir. Dosya,
+  HTTP, concat veya baska bir protokolle ek girdi okuyamaz. PCM stdout ayri
+  boyut siniriyla okunur ve WAV basligini stdlib yazar. Ham medya ve ses
+  ornegi RAM'de kalir; Downloads'a veya vault'a dosya cikmaz.
+- Normal MP4 dosyalarinin sonda duran `moov` kutusu, yalniz tek `moov` ve
+  tek `mdat` iceren destekli progressive duzende RAM icinde one tasinir;
+  `stco`/`co64` adresleri dogrulanip duzeltilir. Kutu/derinlik/tablo boyut
+  sinirlari, gercek `mdat` payload adresleri ve sayi tasmalari kontrol edilir.
+  Sifir uzunluklu sona-acik `moov`, bu duzendeki fragment/index kutulari veya
+  desteklenmeyen konum bilgisi reddedilir. Bu genel bir MP4 onarma araci
+  degildir. `moov` zaten bastaysa dosya degismez.
+
+### Servis tercihi ve Windows kabul testi
+
+AudD, stdlib HTTP ile tek sabit endpoint ve kisa ses ornegini destekledigi
+icin bu surumun istege bagli saglayicisidir. Anahtar yokken servis kapali
+kalir, kullanici anahtari eklese bile is basina yukleme izni gerekir. AcoustID/
+Chromaprint, ACRCloud ve Shazam ekleri bu yamada uygulanmadi; alternatiflerin
+maliyet, girdi/lisans ve gizlilik kosullari ayrica degerlendirilmelidir.
+
+19.10.2026 kontrolu: AudD ana sayfasi ilk 300 istegi ucretsiz, devamini
+1000 istek icin 5 USD olarak listeler. API belgesi standart endpoint icin
+10 MB dosya tavani; ana sayfa yaklasik ilk 12 saniyeyi isleme bilgisini verir.
+Buradaki 384044 bayt/12 sn uygulama tavanidir; fiyat veya dogruluk garantisi
+degildir. Kullanmadan once guncel fiyat/kota ve kosullari kontrol et:
+
+- https://audd.io/
+- https://docs.audd.io/
+- https://audd.io/terms/index.php (kosul surumu 07.07.2026)
+- https://audd.io/privacy/index.php
+- https://github.com/yt-dlp/yt-dlp#usage-and-options
+- https://ffmpeg.org/ffmpeg-protocols.html
+
+AudD'nin sozlesmesi kimliksizlestirilmis/toplulastirilmis musteri icerigiyle
+hizmeti gelistirme hakkini sakli tutar; genel bir "veri tutulmaz/egitimde
+kullanilmaz" garantisi verilmez. Tani, kaynak platformunun kosullarini veya
+telif sahibinin izin gereksinimini ortadan kaldirmaz.
+
+Otomatik testler gercek ucretli servise veya kullanici hesabina baglanmaz.
+Gercek yerel loopback vekili, yavas HTTP basligi/DNS sure sonu, anonim WAV,
+normal ve faststart AAC MP4 ile ayni 12 sn ffmpeg cikisi, sonuclari tekrar
+ucretlendirmeme, iptal edilen servis izni, token redaksiyonu ve negatif
+yetki/URL/medya senaryolari denetlenir:
+
+```sh
+python -m unittest discover -s tests -p "v3_yakala_muzik_test.py"
+python -m unittest discover -s tests -p "v3_yakala*_test.py"
+```
+
+Windows 11'de kendi makinenizde dogrulanacaklar: PATH'teki gercek yt-dlp/ffmpeg
+surumlerinin tum sabit guvenlik seceneklerini desteklemesi, Turkce/bosluklu
+yollar, DPAPI saklama/acma ve farkli hesabin acamamasi, gercek izinli reel/
+TikTok/YouTube orneklerinde metadata ve ses erisimi, servis izni verilmeden
+hicbir yukleme olmamasi, AudD ile izinli bir ornegin gercek eslesmesi,
+baglantinin dogru parcayi acmasi, zaman asimi/servis kapatma ve islemin bellege
+tam teslimi. Canli platformlar giris, bolge, CDN veya JS gerektirebilir.
+Ozellikle yeni YouTube akislari JS runtime gerektirdiginde bu surum bunu
+acmaz ve guvenli `unavailable` doner. Bu durumlarda kullanicinin resmi
+platform/manuel tanima yoluna gecmesi gerekir. Otomatik hesap girisi,
+browser cookie alma veya protokol izni genisletme onerilmez.
 
 ## İşleme nasıl çalışır
 
