@@ -518,6 +518,10 @@ def hook_reconcile(vault: Path, state: Path, force: bool = False) -> dict:
     launchers_stale = False
     planned_launchers = {}
     launcher_script = vault / ".claude/scripts/beyin_v3_launchers.py"
+    if not launcher_script.is_file():
+        launcher_script = Path(__file__).resolve().parent / "beyin_v3_launchers.py"
+        if not launcher_script.is_file():
+            launcher_script = Path(__file__).resolve().parents[1] / "template/.claude/scripts/beyin_v3_launchers.py"
     if launcher_script.is_file():
         try:
             import importlib.util
@@ -757,9 +761,19 @@ def hook_reconcile(vault: Path, state: Path, force: bool = False) -> dict:
                     baseline = base64.b64decode(files[name].get("installed_content") or "")
                     original = reconciled_originals.get(name, b"")
                     # Never adopt user edits as installer-owned content.
-                    adopt = (baseline.replace(b"\r\n", b"\n") == original.replace(b"\r\n", b"\n")
-                             or name == ".beyin-runtime.json"
-                             or name in planned_launchers)
+                    adopt = False
+                    if baseline.replace(b"\r\n", b"\n") == original.replace(b"\r\n", b"\n"):
+                        adopt = True
+                    elif name == ".beyin-runtime.json":
+                        try:
+                            orig_json = json.loads(original.decode("utf-8"))
+                            base_json = json.loads(baseline.decode("utf-8"))
+                            if isinstance(orig_json, dict) and isinstance(base_json, dict) and dict(orig_json, state=None) == dict(base_json, state=None):
+                                adopt = True
+                        except Exception:
+                            pass
+                    elif name in planned_launchers:
+                        adopt = True
                     if file_path.is_file() and adopt:
                         file_bytes = file_path.read_bytes()
                         files[name]["installed_hash"] = hashlib.sha256(file_bytes).hexdigest()
@@ -1059,8 +1073,10 @@ def main(argv=None, return_result=False):
                 bridge_args = ["--vault", str(vault), "--state", str(state), "--harness", args.harness,
                                "--context-chars", str(args.context_chars), "--print-config"]
                 for r in roots: bridge_args.extend(["--project-root", str(r)])
-                for e in events: bridge_args.extend(["--event", e])
-                return bridge_mod.main(bridge_args)
+                code = bridge_mod.main(bridge_args)
+                if return_result:
+                    return None, code
+                return code
             else:
                 argument_parser.error("specify one of --install, --uninstall, or --print-config")
             if return_result:

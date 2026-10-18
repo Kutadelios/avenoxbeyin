@@ -397,7 +397,10 @@ def install_bridge(vault, state, harness, roots, events=None, context_chars=1500
                     else:
                         cleaned_groups.extend(rem)
             timeout = 3 if event == 'SessionEnd' else (20 if os.name == 'nt' else 5)
-            cleaned_groups.append({'hooks': [{'type': 'command', 'command': shell, 'timeout': timeout}]})
+            handler = {'type': 'command', 'command': shell, 'timeout': timeout}
+            if harness == 'codex' and os.name == 'nt':
+                handler['commandWindows'] = shell
+            cleaned_groups.append({'hooks': [handler]})
             hooks_map[event] = cleaned_groups
 
     new_bytes = (json.dumps(data, indent=2, ensure_ascii=False) + '\n').encode('utf-8')
@@ -452,7 +455,9 @@ def uninstall_bridge(harness, home=None):
                             rem = []
                             for h in handlers:
                                 cmd = h.get('command', '') if isinstance(h, dict) else ''
-                                if 'beyin_v3_bridge.py' in cmd or 'beyin_v3_bridge.py' in _decoded_command(cmd):
+                                cmd_win = h.get('commandWindows', '') if isinstance(h, dict) else ''
+                                if ('beyin_v3_bridge.py' in cmd or 'beyin_v3_bridge.py' in _decoded_command(cmd)
+                                        or 'beyin_v3_bridge.py' in cmd_win or 'beyin_v3_bridge.py' in _decoded_command(cmd_win)):
                                     removed_count += 1
                                     modified = True
                                 else:

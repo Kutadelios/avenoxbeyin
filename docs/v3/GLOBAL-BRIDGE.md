@@ -33,7 +33,7 @@ Otomatik kurulum (`--install`):
   - Codex: `$CODEX_HOME/hooks.json` (varsayılan `~/.codex/hooks.json`).
   - Antigravity: `~/.gemini/config/hooks.json`.
 - **Otomatik `.bak` yedeği**: Var olan herhangi bir konfigürasyon dosyası değiştirilmeden önce yanına `.bak` uzantılı yedeği kaydedilir (örn. `hooks.json.bak`, `settings.json.bak`).
-- **Antigravity `GEMINI.md` işaretçisi**: `--harness antigravity --install` çalıştırıldığında, hook kaydına ek olarak kullanıcı ana dizinindeki `~/.gemini/GEMINI.md` dosyasına vault konumunu ve temel yönergeleri işaret eden idempotent bir blok (`<!-- beyin-v3:start --> ... <!-- beyin-v3:end -->`) eklenir veya güncellenir. Mevcut dosya varsa önce `GEMINI.md.bak` olarak yedeklenir.
+- **Antigravity `GEMINI.md` işaretçisi**: `--harness antigravity --install` çalıştırıldığında, hook kaydına ek olarak kullanıcı ana dizinindeki `~/.gemini/config/GEMINI.md` dosyasına vault konumunu ve temel yönergeleri işaret eden idempotent bir blok (`<!-- beyin-v3-bridge:start --> ... <!-- beyin-v3-bridge:end -->`) eklenir veya güncellenir. Mevcut dosya varsa önce `GEMINI.md.bak` olarak yedeklenir.
 
 ### 2. Manuel İnceleme ve Yazdırma (`--print-config`)
 
@@ -157,7 +157,7 @@ python3 beyin.py bridge --harness codex --uninstall
 Otomatik kaldırma (`--uninstall`):
 - İlgili global ayar dosyasını (`hooks.json` veya `settings.json`) bularak yalnızca `beyin_v3_bridge` ile ilgili hook tanımlarını siler; diğer tüm kullanıcı ayarlarını ve özel hook'larını korur.
 - Değişiklik öncesinde var olan dosyanın `.bak` yedeğini alır.
-- Antigravity için `~/.gemini/GEMINI.md` içerisindeki köprü bloğunu (`<!-- beyin-v3:start --> ... <!-- beyin-v3:end -->`) güvenle temizler; dosya başka metin içermiyorsa dosyayı da siler.
+- Antigravity için `~/.gemini/config/GEMINI.md` içerisindeki köprü bloğunu (`<!-- beyin-v3-bridge:start --> ... <!-- beyin-v3-bridge:end -->`) güvenle temizler; dosya başka metin içermiyorsa dosyayı da siler.
 
 Manuel kaldırma durumunda, global ayardan yalnız eklenen köprü handler'larını kaldırıp yeni oturum açın;
 diğer handler'ları koruyun. Geçici susturma için manual profil kullanılabilir;

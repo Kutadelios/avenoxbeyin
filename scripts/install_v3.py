@@ -255,7 +255,7 @@ def semantic_unchanged(name, baseline, current, previous, kept=(), user_excluded
             def _is_default_layout(s):
                 portable = str(s).replace("\\", "/").rstrip("/")
                 return bool(re.search(r"/beyin-v3/[0-9a-fA-F]{16}$", portable))
-            if _is_default_layout(cur_state) or _is_default_layout(bef_state):
+            if _is_default_layout(cur_state) and _is_default_layout(bef_state):
                 return True
             try:
                 p_cur = Path(cur_state).expanduser().resolve()

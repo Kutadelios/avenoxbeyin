@@ -632,7 +632,7 @@ def load_cli(directory):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    force_json = '--json' in argv
+    force_json = '--json' in argv or '--print-config' in argv
     human = ('--human' in argv or sys.stdout.isatty()) and not force_json
     argv = [arg for arg in argv if arg not in ('--human', '--json')]
     if human:

@@ -20,9 +20,16 @@ from beyin_v3_sync import SyncEngine
 
 
 class BridgeTest(unittest.TestCase):
+    def cleanup_tmp(self):
+        try:
+            self.tmp.cleanup()
+        except OSError:
+            pass
+
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
+        kwargs = {'ignore_cleanup_errors': True} if sys.version_info >= (3, 10) else {}
+        self.tmp = tempfile.TemporaryDirectory(**kwargs)
+        self.addCleanup(self.cleanup_tmp)
         self.root = Path(self.tmp.name).resolve()
         self.vault = self.root / 'Brain Space'; self.vault.mkdir()
         self.state = self.root / 'state'
@@ -599,6 +606,40 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(res_uninst.returncode, 0, res_uninst.stderr)
         data_un = json.loads(res_uninst.stdout)
         self.assertEqual(data_un['status'], 'uninstalled')
+
+    def test_bridge_print_config_cli_and_human_mode(self):
+        import shutil
+        vault_entry = self.vault / 'beyin.py'
+        shutil.copy(str(ROOT / 'scripts/beyin_entry.py'), str(vault_entry))
+        (self.vault / '.beyin-version').write_text('3.9.1', encoding='utf-8')
+        (self.vault / '.beyin-runtime.json').write_text(json.dumps({'state': str(self.state)}), encoding='utf-8')
+        vault_scripts = self.vault / '.claude/scripts'
+        vault_scripts.mkdir(parents=True, exist_ok=True)
+        shutil.copy(str(ROOT / 'scripts/beyin_v3.py'), str(vault_scripts / 'beyin_v3_cli.py'))
+        shutil.copy(str(SCRIPTS / 'beyin_v3_bridge.py'), str(vault_scripts / 'beyin_v3_bridge.py'))
+
+        # Run with --human to test interactive terminal code path
+        res_human = subprocess.run(
+            [sys.executable, str(vault_entry), '--human', 'bridge', '--harness', 'claude',
+             '--project-root', str(self.project), '--print-config'],
+            capture_output=True, text=True, env=self.env, cwd=self.project, timeout=20,
+        )
+        self.assertEqual(res_human.returncode, 0, res_human.stderr)
+        self.assertNotIn('cannot unpack non-iterable', res_human.stderr)
+        config_data = json.loads(res_human.stdout)
+        self.assertIn('hooks', config_data)
+        self.assertIn('SessionStart', config_data['hooks'])
+
+        # Antigravity print-config
+        res_ag = subprocess.run(
+            [sys.executable, str(vault_entry), 'bridge', '--harness', 'antigravity',
+             '--project-root', str(self.project), '--print-config'],
+            capture_output=True, text=True, env=self.env, cwd=self.project, timeout=20,
+        )
+        self.assertEqual(res_ag.returncode, 0, res_ag.stderr)
+        ag_data = json.loads(res_ag.stdout)
+        self.assertIn('beyin-v3-bridge', ag_data)
+        self.assertIn('PreInvocation', ag_data['beyin-v3-bridge'])
 
 
 if __name__ == '__main__':
