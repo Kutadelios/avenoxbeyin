@@ -291,6 +291,14 @@ py -3 beyin.py yakala kur --ajan claude
 py -3 beyin.py yakala ajan
 ```
 
+Otomatik seçim için `kur --ajan otomatik` veya `ajan otomatik` kullan. Önce kurulumu yapan
+Claude Code ya da Codex oturumu, oturum işareti yoksa kurulu tek CLI seçilir. İkisi de kuruluysa
+terminalde `1) claude / 2) codex` sorulur; JSON çıktıda veya etkileşimsiz kullanımda açıkça
+`claude` ya da `codex` seçmen gerekir. Hiçbiri bulunamazsa hata verilir. Ayara somut istemci
+yazılır; çıktının `secim` alanı `kurulum-ajani`, `tek-kurulu` veya `kullanici` yolunu gösterir.
+Kurulumu yapan ajan, başka bir istemci istemediysen `--ajan otomatik` kullanır.
+`--ajan` verilmezse varsayılan kapalı davranışı değişmez.
+
 Codex seçmek için `--ajan codex` kullan. Yakala zaten kuruluysa `py -3 beyin.py yakala ajan claude`
 veya `py -3 beyin.py yakala ajan codex` yeterlidir. Mac/Linux'ta `py -3` yerine `python3` yaz.
 Bu Windows sürümüne ilk geçişte `kur` komutunu yeniden çalıştır: state'teki dinleyici kopyası da
@@ -339,8 +347,8 @@ py -3 beyin.py yakala kur --ajan claude --ajan-gorunum pencere
 py -3 beyin.py yakala ajan claude --gorunum gizli
 ```
 
-`kur --ajan claude` bir terminalde `--ajan-gorunum` olmadan çalıştırılırsa hangisini istediğini
-sorar. Kurulumu bir ajana yaptırıyorsan ajan bu seçimi sana sormalıdır.
+`kur --ajan claude` (veya `otomatik` ile Claude seçimi) bir terminalde `--ajan-gorunum` olmadan
+çalıştırılırsa hangisini istediğini sorar. Kurulumu bir ajana yaptırıyorsan ajan bu seçimi sana sormalıdır.
 
 1. Kısayola bas, kaynağı seç ve **Neden** alanına yapılacak işi yaz. Özellik açıkken altta
    `Ctrl+Enter · Kaydet ve ajana ver (claude)` veya `(codex)` görünür. Kapalıyken bu satır

@@ -4947,6 +4947,7 @@ bir videodaki sarkiyi bulmak). Kullanicinin notlarindan, kisisel bilgilerinden v
 kendi yukledigi icerikten hicbir metni arama sorgusuna, URL'ye veya dosya adina koyma; bunu
 gerektiren is kullanicinin izni icin `approval_required` ile durur.
 
+Ajani kuran ajan, kullanici baska istemedikce `--ajan otomatik` kullanir; kurulum istemcisi kendisi secilir.
 Ajani kullanici icin kurarken (Windows + Claude) gorunumu kullaniciya sor ve cevabini
 `--ajan-gorunum` ile ver: `gizli` arka planda calisir ve bildirimle haber verir; `pencere`
 ekranda Claude Code penceresi acar, kullanici canli izler ve araya girebilir.
@@ -6659,6 +6660,41 @@ def _agent_worker(vault, state):
         return 1
 
 
+def _agent_select_client(client, as_json):
+    """Resolve opt-in automatic selection without starting either CLI."""
+    if client != 'otomatik':
+        return client, None
+    if os.environ.get('CLAUDECODE') == '1' or os.environ.get('CLAUDE_CODE_ENTRYPOINT'):
+        return 'claude', 'kurulum-ajani'
+    # Codex exports the current thread ID to tool subprocesses; CODEX_HOME is only a location.
+    if os.environ.get('CODEX_THREAD_ID'):
+        return 'codex', 'kurulum-ajani'
+    installed = []
+    for candidate in ('claude', 'codex'):
+        try:
+            _agent_executable(candidate)
+        except FileNotFoundError:
+            continue
+        installed.append(candidate)
+    if len(installed) == 1:
+        return installed[0], 'tek-kurulu'
+    if not installed:
+        raise ValueError('Ajan istemcisi bulunamadi; Claude Code veya Codex CLI kur.')
+    if as_json or not sys.stdin or not sys.stdin.isatty():
+        raise ValueError('Iki istemci de kurulu; --ajan claude veya --ajan codex sec.')
+    try:
+        answer = input('Ctrl+Enter ajani hangi istemciyi kullansin?\n'
+                       '  1) claude\n'
+                       '  2) codex\n'
+                       'Secim: ').strip().lower()
+    except EOFError:
+        raise ValueError('Istemci secilemedi; --ajan claude veya --ajan codex sec.') from None
+    selected = {'1': 'claude', 'claude': 'claude', '2': 'codex', 'codex': 'codex'}.get(answer)
+    if not selected:
+        raise ValueError('Gecersiz secim; 1 (claude) veya 2 (codex) sec.')
+    return selected, 'kullanici'
+
+
 def _agent_ask_view(client, as_json):
     """At a person's terminal, kur asks how the agent should look; agents pass --ajan-gorunum."""
     if client != 'claude' or not _agent_window_supported() or as_json or not sys.stdin or not sys.stdin.isatty():
@@ -7941,6 +7977,8 @@ def human(result, command):
                          '); tasinmadi. Islenmeleri icin yeni klasore tasi: ' + result['klasor'])
         if result.get('ajan'):
             lines.append('Arka plan ajani: ' + result['ajan']['ajan'])
+            if result['ajan'].get('secim'):
+                lines.append('Ajan secimi: ' + result['ajan']['secim'])
         if result.get('gonder_menusu'):
             lines.append('Dosyalar icin: sag tik > Gonder > Beyne At.')
         lines.append('Tarayici icin Obsidian Web Clipper eklentisini kur, Ayarlar > Sablonlar > Ice aktar ile su dosyayi sec:')
@@ -8029,11 +8067,11 @@ def main(argv=None, vault=None, state=None):
     setup.add_argument('--kisayol-yok', action='store_true', help='Yalniz sablon, skill ve bildirim; kisayol kurulmaz')
     setup.add_argument('--tus', help='Kisayol, ornek: ctrl+alt+b (varsayilan) ya da cmd+"')
     setup.add_argument('--klasor', help='Kartlarin yazilacagi klasor, vault icinde (ornek: 000-Inbox/Yakala)')
-    setup.add_argument('--ajan', choices=('claude', 'codex', 'kapali'), help='Ctrl+Enter ajanini sec (varsayilan kapali)')
+    setup.add_argument('--ajan', choices=('claude', 'codex', 'kapali', 'otomatik'), help='Ctrl+Enter ajanini sec (varsayilan kapali)')
     setup.add_argument('--ajan-gorunum', choices=AGENT_VIEWS,
                        help='gizli: arka planda, bildirimle; pencere: ekranda Claude Code penceresi (Windows)')
     agent = command_parser('ajan', help='Arka plan ajanini goster veya sec')
-    agent.add_argument('client', nargs='?', choices=('claude', 'codex', 'kapali'))
+    agent.add_argument('client', nargs='?', choices=('claude', 'codex', 'kapali', 'otomatik'))
     agent.add_argument('--ayar', type=Path, help='Ileri kullanici JSON ayarlari')
     agent.add_argument('--gorunum', choices=AGENT_VIEWS, help='gizli (arka plan) ya da pencere (canli izlenen Claude Code)')
     agent.add_argument('--ag', choices=AGENT_NETWORK,
@@ -8068,8 +8106,13 @@ def main(argv=None, vault=None, state=None):
     if command == 'ajan':
         if (args.ayar or args.gorunum or args.ag) and not args.client:
             raise ValueError('--ayar/--gorunum/--ag icin istemci sec.')
-        result = (configure_agent(vault, state, args.client, args.ayar, args.gorunum, args.ag) if args.client
-                  else agent_status(vault, state))
+        if args.client:
+            client, selection = _agent_select_client(args.client, as_json)
+            result = configure_agent(vault, state, client, args.ayar, args.gorunum, args.ag)
+            if selection:
+                result['secim'] = selection
+        else:
+            result = agent_status(vault, state)
     elif command == 'ajan-gonder':
         result = enqueue_agent(vault, state, args.id, args.istek)
     elif command == 'ajan-devam':
@@ -8113,11 +8156,14 @@ def main(argv=None, vault=None, state=None):
         result = listing(vault, args.durum, state)
     elif command == 'kur':
         if args.ajan:
-            _agent_validate_settings(dict(agent_settings(vault, state), client=args.ajan), vault)
+            client, selection = _agent_select_client(args.ajan, as_json)
+            _agent_validate_settings(dict(agent_settings(vault, state), client=client), vault)
         result = install(vault, state, hotkey=not args.kisayol_yok, spec=args.tus, folder_spec=args.klasor)
         if args.ajan:
-            view = args.ajan_gorunum or _agent_ask_view(args.ajan, as_json)
-            result['ajan'] = configure_agent(vault, state, args.ajan, view=view)
+            view = args.ajan_gorunum or _agent_ask_view(client, as_json)
+            result['ajan'] = configure_agent(vault, state, client, view=view)
+            if selection:
+                result['ajan']['secim'] = selection
     elif command == 'kisayol':
         if args.tus:
             result = install(vault, state, spec=args.tus)
