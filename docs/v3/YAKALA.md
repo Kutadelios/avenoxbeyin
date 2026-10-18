@@ -632,6 +632,162 @@ belge desteği bu bilgisayarda canlı çalıştırma kanıtı değildir.
 - Freedesktop: [Desktop Notifications 1.3](https://specifications.freedesktop.org/notification/latest-single/)
   (18.08.2024); GNOME: [libnotify](https://gnome.pages.gitlab.gnome.org/libnotify/).
 
+## Bekleyen kartlari toplu ajana verme
+
+Bu ozellik yalniz acik CLI talimatiyla calisir. Duz Enter, SessionStart bildirimi,
+`liste`, `ajan-devam` veya gelen kutusuna yeni kart eklenmesi toplu gonderim yapmaz.
+`ajan-toplu` varsayilan olarak onizlemedir; is kaydi olusturmaz, ayar degistirmez,
+ag kullanmaz ve bir ajan sureci acmaz. Gonderim icin ajan ayarinin `claude` veya
+`codex` olmasi ve ayni komutta `--gonder` bulunmasi gerekir. Yeni surumu kurduktan
+sonra eski dinleyici kopyasini da guncellemek icin normal `yakala kur` akisini kullan.
+
+```text
+py -3 beyin.py yakala ajan claude
+py -3 beyin.py yakala ajan-toplu --neden --limit 5
+py -3 beyin.py yakala ajan-toplu --neden --limit 5 --gonder
+```
+
+Ilk komut mevcut ajan ayarini acar. Ikinci komut kart kimliklerini, her karta
+verilecek TAM istegi, ag modunu ve bos kuyruk kapasitesini gosterir. Ucuncu komut,
+o anda filtreye uyan en eski bes karta acik gonderim izni verir. Sonradan gelen
+kartlar bu toplu isin parcasi olmaz. Basarili gonderim bir `batch_id` dondurur;
+bu yalniz kuyruga kabul anlamina gelir, islerin tamamlandigi anlamina gelmez.
+
+### Secim ve istek kaynagi
+
+Yalniz secili Yakala gelen kutusundaki `tur: yakala`, `durum: bekliyor` kartlari
+adaydir. Alt klasorler, arsivler ve baska vault'lar taranmaz. `ajanda`,
+`onay-bekliyor`, `islendi`, `cikarildi` ve `hata` kartlari toplu gonderime alinmaz.
+Kullanici kart durumunu elle `bekliyor` yapsa bile mevcut aktif is sahipligi
+ikinci bir is olusturulmasini engeller. Tekli `ajan-gonder` da ayni kuyruk kilidini
+kullanir; `KART_ID` ve `KART_ID.md` ayni kart olarak denetlenir.
+
+| Secenek | Davranis |
+|---|---|
+| `--neden` | Her kartin ilk `## Neden` bolumunu o kartin istegi olarak kullanir |
+| `--istek "..."` | Secilen her karta ayni acik istegi verir; Neden ile birlestirmez |
+| `KART_ID ...` | Adaylari bu kimliklere daraltir; `.md` dosya adi da kabul edilir |
+| `--tur youtube` | `kaynak_turu` alanina gore filtreler; birden cok kez verilebilir |
+| `--alan instagram.com` | URL'nin tam sunucu adina gore filtreler; `www.` ve `m.` normalizasyonu vardir |
+| `--limit 5` | En eski bes adayi secer; varsayilan 10, izin verilen aralik 1 ile 32 |
+| `--gonder` | Bu cagrida secilen kartlari kalici kuyruga gonderir |
+| `--plan OZET` | Onizlemedeki 64 karakterli plan ozetini dogrular; secim, kart veya ayar degismisse reddeder |
+| `--json` | Onizleme, toplu kimlik ve durumlari makine tarafindan okunabilir JSON olarak dondurur |
+
+`--neden` ve `--istek` birbirini dislar; birini acikca secmek zorunludur.
+Bos Neden, `_(not yok)_` yer tutucusu, NUL veya 16000 karakterden uzun bir istek
+gonderimi engeller. Secilen kartlardan birinin istegi gecersizse digerleri de
+gonderilmez. Yeniden yakalama ile eklenen `Yeniden yakalandi` metni ve kaynak
+secimi, ilk Neden yerine otomatik talimata cevrilmez. Son istegi kullanmak
+istiyorsan `--istek` ver veya kartin Neden bolumunu duzenle.
+
+```text
+py -3 beyin.py yakala ajan-toplu --alan instagram.com --istek "Bu kaynagi incele ve kaynakli bir not yaz" --limit 3
+py -3 beyin.py yakala ajan-toplu KART_ID_1 KART_ID_2 --neden --gonder
+py -3 beyin.py yakala ajan-toplu --tur youtube --tur makale --istek "Ana bulgulari ozetle" --limit 4 --gonder --json
+```
+
+Filtreler kesisir; alan adi eslesmesi alt dize veya rastgele alt alan eslesmesi
+degildir. Mevcut kart turu siniflandirmasinda Instagram ve TikTok linkleri
+`makale` olabilir; bu kaynaklar icin `--alan` kullan. Onizleme ile gonderim
+arasindaki secimi sabitlemek icin onizlemenin `plan` degerini kopyalayip ayni
+seceneklere `--gonder --plan DEGER` ekle. Bu ozet yetkilendirme anahtari degildir;
+kart/istek/ayar degisikligini fark eden bir tutarlilik denetimidir. `--plan`
+verilmezse gonderim anindaki guncel secim kullanilir.
+
+Gecerli saat dilimli `yakalandi` degeri olan kartlar gercek yakalanma zamanina,
+esitlikte kart kimligine gore siralanir. Eksik veya gecersiz zaman damgalari sona
+alinir ve kart kimligiyle siralanir. Mevcut kuyruktaki isler once gelir. Toplu
+isin uyeleri bu secim sirasiyla eklenir; sistem saati geri alinsa veya ayni
+zaman damgasini uretse de monoton is sirasi korunur.
+
+### Kapasite, kalicilik ve sonuc ozeti
+
+Her kart ayri bir is ve ayri bir ajan oturumudur. Mevcut tek worker, tekli ve
+toplu isleri sirayla calistirir. `max_queue` siniri, `preparing`, `queued` ve
+`running` islerin TAM toplamina uygulanir; varsayilan ve ust sinir 32'dir.
+Secim bos kapasiteye sigmazsa hicbir kart kuyruga eklenmez; limiti dusur veya
+mevcut islerin bitmesini bekle. Zaman/butce sinirlari her is icin mevcut ayarlardan
+kopyalanir; yeni bir toplu toplam harcama siniri eklenmez.
+
+Gonderim, ayni kuyruk ve kart kilitleri altinda guncel ayar, tum secili kartlar,
+istekler, sahiplik ve kapasiteyi denetler. Ardindan
+`<state>/yakala/ajan/batches/<toplu-UUID>.json` dosyasina tum uye kimliklerini
+ve acik isteklerini yazar; her uyenin isi mevcut `jobs/<is-UUID>/job.json`
+duzeninde kalir. Son asamada tek worker uyandirma cagrisi yapilir. Manifest,
+kartlar ve isler yerel dosyalardir; istekler vault disindaki mevcut makine
+durumunda saklanir. Manifest okuma siniri 4 MiB, tek kart okuma siniri 200 KiB'dir.
+Sembolik baglar ve Windows junction/reparse yollarina izin verilmez. Okunamayan
+bir is kaydi varsa kapasite bilinmiyor sayilir ve yeni toplu gonderim reddedilir;
+once ilgili kaydi ve kartin konumunu incele. Eski bir kartin tasinmasi da bu
+denetimi gerektirebilir.
+
+```text
+py -3 beyin.py yakala ajan-toplu-durum TOPLU_ID
+py -3 beyin.py yakala ajan-toplu-durum TOPLU_ID --json
+```
+
+Ozet her sorguda gercek is kayitlarindan hesaplanir: hazirlanan, siradaki,
+calisan, tamamlanan, hata, onay bekleyen ve iptal edilmis uyeler ayri sayilir.
+Her uyenin sonuc ozeti, olusan not yolu ve receipt yolu varsa gosterilir.
+Modelin `complete` demesi veya kuyruga kabul edilmesi tek basina tamamlanma
+degildir; mevcut worker'in hafiza/receipt/Last-Session dogrulamasi sonrasi terminal
+sonucu kullanilir. `bitti`, tum uyelerin terminal durumda ve kart uzlastirmalarinin
+tamamlanmis oldugunu; `hepsi_basarili`, hepsinin `completed` oldugunu belirtir.
+Iptal veya hata ile biten bir toplu is basarili sayilmaz.
+
+Dosya yazimi ortada kesilirse onceden kalici yazilan uye kimlikleri korunur;
+kismen gonderim `toplu_kismi` olarak raporlanir. Zorla surec sonlandirmada ilk
+manifest `preparing` kalabilir. Sonraki cagrida tum secim kendiliginden yeniden
+gonderilmez. Mevcut worker gecerliligi tamamlanmis siradaki uyeleri calistirabilir;
+belirsiz hazirlik isleri mevcut kurtarma kuraliyla insan incelemesine birakilir.
+Manifest veya is kayitlarini incele, gerekirse `ajan-devam` kullan. Kaydi eksik
+veya bozulan uye `kayit_yok` / `kayit_gecersiz` sayilir; sonuc varsayilmaz ve
+bu belirsizlik cozulmeden `bitti` dogru olmaz. Worker uyandirmasi basarisizsa
+siradaki isler korunur, hata/onay durumuna otomatik cevrilmez.
+
+### Baslamamis uyeleri geri alma
+
+```text
+py -3 beyin.py yakala ajan-toplu-iptal TOPLU_ID
+```
+
+Bu komut yalniz halen baslamamis, sahipligi dogrulanan toplu uyeleri iptal eder
+ve kartlarini `bekliyor` yapar. Kuyrugu sahiplenmis bir worker ile ayni kilidi
+kullanir: worker once `running` durumuna gectiyse o uye korunur; iptal once
+kalici yazildiysa worker o uyeyi calistirmaz. Calisan, tamamlanmis, hata veya onay
+durumundaki isler degistirilmez. Calisma izi, sahiplik uyusmazligi veya bozuk
+kayit varsa guvenli iptal varsayilmaz; o uye atlanir ve raporlanir.
+
+Iptal durumu once is kaydina `cancelled` ve kart uzlastirma istegi olarak yazilir,
+sonra kart guncellenir. Arada kesilirse `ajan-devam` karti uzlastirabilir; yeni
+bir model isi acmaz. Kullanici icerigi, sonradan eklenen alanlar, sonuc notlari,
+receipt'ler ve indirmeler silinmez. Ayni iptal komutu tekrar calistirilabilir.
+Eksik manifest uyeleri iptal sirasinda yeniden olusturulmaz; durumlari belirsiz
+kalmaya devam eder. Bu, calisan ajanin etkilerini geri alma veya biten isleri
+silme komutu degildir. Daha sonra karti tekrar ajana vermek yeni, acik bir
+`--gonder` veya `ajan-gonder` talimati gerektirir.
+
+Toplu is ayni ag ve arac sinirlarini korur. `ag: kisitli` her uyenin kendi
+yakalanan URL'si ve izinli sayfalardan donen baglantilarla sinirlidir;
+`ag: acik` mevcut gizlilik talimatini korur.
+Neden veya ortak istekte "sesi indir" yazmasi dis servise ses yukleme ya da ek
+arac izni vermez. Toplu is bu tur izinleri otomatik uretmez.
+
+Testler, gercek yerel kart/is/manifest dosyalari ve kuyruk kilitleriyle; ag,
+model, masaustu bildirimi ve gercek istemci acmadan calisir:
+
+```text
+py -3 -m unittest discover -s tests -p v3_yakala_toplu_ajan_test.py -v
+py -3 -m unittest discover -s tests -p "v3_yakala*_test.py"
+```
+
+Windows 11 canli kontrolunde: iki ayri terminalden tekli ve toplu gonderimi
+yaristir; kuyruk limitinin asilmayisini ve kopya is cikmayisini kontrol et.
+Ilk uye calisirken toplu iptali dene; yalniz baslamayan kartlarin geri geldigini
+ve gorunur/gizli istemci seciminin mevcut ayara uydugunu dogrula. UTF-8 dosyalari,
+Turkce karakterli vault/state yollarini ve terminaldeki JSON ciktilarini kontrol et.
+
 ## İşleme nasıl çalışır
 
 `python3 beyin.py yakala isle` bekleyen kartların metnini çıkarır, sonra ajan dersleri
