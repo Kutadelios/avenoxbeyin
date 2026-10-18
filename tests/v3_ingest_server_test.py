@@ -159,7 +159,10 @@ class IngestServerTest(unittest.TestCase):
     def test_symlink_default_inbox_cannot_create_external_file(self):
         outside = Path(self.tmp.name) / 'outside'
         outside.mkdir()
-        (self.vault / '000-Inbox').symlink_to(outside, target_is_directory=True)
+        try:
+            (self.vault / '000-Inbox').symlink_to(outside, target_is_directory=True)
+        except OSError:
+            self.skipTest('Symlink creation not permitted')
         with self.assertRaises(ValueError):
             ingest_server.save_capture(self.vault, 'capture')
         self.assertEqual(list(outside.iterdir()), [])
@@ -237,6 +240,52 @@ class IngestServerTest(unittest.TestCase):
         self.assertIn("--host", proc.stdout)
         self.assertIn("--port", proc.stdout)
         self.assertIn("--token", proc.stdout)
+
+    def test_stress_http_socket_resilience(self):
+        import socket
+        import threading
+        import time
+        server = ingest_server.create_server(self.vault, port=0)
+        port = server.server_address[1]
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        self.addCleanup(lambda: (server.shutdown(), server.server_close(), t.join(2)))
+
+        # 1. Connection reset during read
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect(("127.0.0.1", port))
+        s.sendall(b"POST /ingest HTTP/1.1\r\nContent-Length: 100\r\n\r\n")
+        s.sendall(b"half data")
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b'\x01\x00\x00\x00\x00\x00\x00\x00')
+        s.close()
+        time.sleep(0.05)
+
+        # 2. Connection closed immediately after connect
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect(("127.0.0.1", port))
+        s.close()
+        time.sleep(0.05)
+
+        # 3. Connection reset during OPTIONS
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect(("127.0.0.1", port))
+        s.sendall(b"OPTIONS /ingest HTTP/1.1\r\n\r\n")
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b'\x01\x00\x00\x00\x00\x00\x00\x00')
+        s.close()
+        time.sleep(0.05)
+
+        # 4. Connection reset during GET
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect(("127.0.0.1", port))
+        s.sendall(b"GET /health HTTP/1.1\r\n\r\n")
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b'\x01\x00\x00\x00\x00\x00\x00\x00')
+        s.close()
+        time.sleep(0.05)
+
+        # 5. Server remains healthy and accepts new normal requests
+        import urllib.request
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health") as resp:
+            self.assertEqual(resp.status, 200)
 
 
 if __name__ == '__main__':

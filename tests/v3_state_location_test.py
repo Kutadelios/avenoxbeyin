@@ -184,6 +184,30 @@ class StateLocationTest(unittest.TestCase):
         self.assertEqual(report["pin_status"], "unreadable")
         self.assertEqual(report["warnings"], [])
 
+    def test_foreign_paths_in_state_location(self):
+        paths = [
+            r"C:\Users\User\AppData\Local\beyin-v3\1234567890abcdef",
+            r"/home/user/.local/state/beyin-v3/1234567890abcdef",
+            r"\\server\share\state",
+            r"//server/share/state",
+            r"C:\Path with spaces\state",
+            r"/path with spaces\state",
+            r"\\?\C:\state",
+            r"relative/path",
+            r"C:",
+            r"state",
+            r" ",
+            r"",
+        ]
+        for path in paths:
+            self.pin(path)
+            try:
+                report = self.report()
+                self.assertIn("pin_status", report)
+                CLI.resolve_state(self.vault, Path(path))
+            except Exception as e:
+                self.fail(f"Path {path!r} caused a crash: {e}")
+
     def doctor(self, driver):
         home = self.state.parent / "home"
         result = subprocess.run([sys.executable, "-c", driver, str(ROOT / "scripts/beyin_v3.py"),

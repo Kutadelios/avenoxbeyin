@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import sys
 import unicodedata
 
@@ -128,6 +129,12 @@ class IngestHandler(BaseHTTPRequestHandler):
     def setup(self):
         super().setup()
         self.connection.settimeout(5)
+
+    def handle(self):
+        try:
+            super().handle()
+        except (ConnectionError, socket.timeout):
+            pass
 
     def _send_json(self, status_code: int, data: dict):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")

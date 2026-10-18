@@ -54,14 +54,25 @@ def mark_session_edit(state: Path) -> None:
         pass
 
 
+def _is_absolute_cross_platform(raw: str) -> bool:
+    """True if a path is absolute on any supported platform (Windows or POSIX)."""
+    return bool(re.match(r"^([A-Za-z]:[/\\]|[/\\])", raw))
+
+
 def resolve_state(vault: Path, pinned: Path) -> Path:
     """Resolve a foreign OS/user's conventional default; preserve custom and local pins."""
     expected = default_state(vault).resolve()
     raw = str(pinned)
-    if not raw:
+    if not raw or not raw.strip():
         return expected
     if _in_package_container(raw):
-        return Path(pinned).expanduser().resolve()
+        try:
+            resolved = Path(pinned).expanduser().resolve()
+            if _is_absolute_cross_platform(str(resolved)):
+                return resolved
+        except (OSError, ValueError, RuntimeError):
+            pass
+        return expected
     portable = raw.replace("\\", "/")
     # Match complete standard layouts, rather than a generic /state/ or /local/ suffix.
     # A copied vault normally changes its absolute path and therefore its hash.
@@ -72,10 +83,15 @@ def resolve_state(vault: Path, pinned: Path) -> Path:
     local_parent = str(expected.parent).replace("\\", "/").casefold()
     if conventional and portable.rsplit("/", 1)[0].casefold() != local_parent:
         return expected
+    try:
+        resolved = Path(pinned).expanduser().resolve()
+    except (OSError, ValueError, RuntimeError):
+        return expected
+
     if not Path(pinned).expanduser().is_absolute():
         if re.match(r"^[A-Za-z]:[/\\]", raw) or (sys.platform == "win32" and raw.startswith(("/", "\\"))):
             return expected
-    return Path(pinned).expanduser().resolve()
+    return resolved
 
 
 def _in_package_container(pinned: str) -> bool:

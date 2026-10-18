@@ -601,7 +601,11 @@ class SyncEngine:
         if not isinstance(relative, str) or Path(relative).is_absolute() or '..' in Path(relative).parts:
             raise ValueError('relative source required')
         path = self.root / relative
-        if not path.resolve().is_relative_to(self.root):
+        try:
+            resolved = path.resolve()
+        except (RuntimeError, OSError):
+            raise ValueError('invalid source path')
+        if not resolved.is_relative_to(self.root):
             raise ValueError('source outside vault')
         cursor = path
         while cursor != self.root:
