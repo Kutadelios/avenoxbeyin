@@ -533,8 +533,11 @@ başarı sayılmaz. Normal `isle` bölümündeki isteğe bağlı araçlar bu kı
 
 Windows'ta özellik açılırken Başlat menüsüne `Beyin Yakala Ajan.lnk` ve
 `AvenoxBeyin.Yakala.Agent` bildirim kimliği kaydedilir. Toast bu kimlikle gönderilir; kısayolun
-sahipliği doğrulanamıyorsa başka bir kısayolun üzerine yazılmaz. Mac'te `osascript display notification`,
-Linux'ta varsa `notify-send` kullanılır. Sabit bildirim metninde kullanıcı isteği, URL veya not
+sahipliği doğrulanamıyorsa başka bir kısayolun üzerine yazılmaz.
+Windows'ta bildirime tıklayınca sonuç notu varsayılan uygulamayla açılır; başlangıç, onay ve hata
+bildirimleri kartı açar. Sonuç yolu kaydedilmemişse tamamlanma bildirimi de kartı açar.
+Mac'te `osascript display notification`, Linux'ta varsa `notify-send` kullanılır.
+Sabit bildirim metninde kullanıcı isteği, URL veya not
 başlığı yoktur. İşletim sistemi bildirim ayarı, odak modu veya eksik araç bildirimi gizleyebilir;
 bildirim başarısızlığı kartın sonucunu değiştirmez, yalnız günlüğe yazılır. [belge: bildirim kaynakları]
 

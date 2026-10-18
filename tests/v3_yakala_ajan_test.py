@@ -331,7 +331,7 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import beyin_v3_yakala as y
 vault, state, trace, active = map(Path, sys.argv[2:])
-y._agent_notify = lambda *args: None
+y._agent_notify = lambda *args, **kwargs: None
 def run(vault, state, job):
     fd = os.open(active, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     os.close(fd)
@@ -471,6 +471,25 @@ class AgentLinkedRootTest(unittest.TestCase):
 
 
 class AgentLifecycleTest(AgentFiles):
+    def test_end_notification_routes_only_host_paths_and_ignores_model_text(self):
+        self.configure()
+        _, original, _ = self.queued()
+        model_text = 'file:///outside/model.md </toast> $(bad)'
+        for status, outcome, reconcile, event in (
+                ('completed', 'Ajan/host-result.md', False, 'completed'),
+                ('completed', None, False, 'completed'),
+                ('approval_required', 'Ajan/host-result.md', False, 'approval'),
+                ('failed', 'Ajan/host-result.md', False, 'failed'),
+                ('completed', 'Ajan/host-result.md', True, 'approval')):
+            with self.subTest(status=status, outcome=outcome, reconcile=reconcile):
+                job = dict(original, outcome=outcome, request=model_text)
+                with patch.object(yakala, '_agent_update_card', side_effect=ValueError('pending') if reconcile else None), \
+                        patch.object(yakala, '_agent_notify') as notify:
+                    yakala._agent_end(self.vault, self.state, job, status, model_text)
+                target = outcome if event == 'completed' and outcome else job['card_path']
+                notify.assert_called_once_with(self.state, job['card_id'], event, target, vault=self.vault)
+                self.assertNotIn(model_text, str(notify.call_args))
+
     def set_status(self, card, status):
         meta = dict(card['meta'])
         meta['durum'] = status
@@ -722,7 +741,9 @@ class AgentWindowViewTest(AgentFiles):
         return outcome, process, popen, finalize, job
 
     def test_window_job_finalizes_on_the_manifest_and_leaves_the_console_open(self):
-        outcome, process, popen, finalize, job = self.run_window(poll=None, manifest=True)
+        with patch.object(yakala, '_agent_notify') as notify:
+            outcome, process, popen, finalize, job = self.run_window(poll=None, manifest=True)
+        notify.assert_called_once_with(self.state, job['card_id'], 'started', job['card_path'], vault=self.vault)
         self.assertEqual(outcome, ('completed', 'tamam'))
         finalize.assert_called_once()
         process.kill.assert_not_called()
@@ -1232,6 +1253,9 @@ class AgentFinalizationTest(AgentFiles):
         self.assertEqual(card['meta']['durum'], 'onay-bekliyor')
         self.assertEqual(card['body'], fixture.card['body'])
         self.assertNotIn('completed', [call.args[2] for call in notify.call_args_list])
+        self.assertEqual(notify.call_args_list, [
+            mock.call(self.state, fixture.job['card_id'], 'started', fixture.job['card_path'], vault=self.vault),
+            mock.call(self.state, fixture.job['card_id'], 'approval', fixture.job['card_path'], vault=self.vault)])
         self.assertEqual(fixture.last.read_bytes(), fixture.last_before)
         self.assertEqual(fixture.target.read_bytes(), self.TRACK)
 
@@ -1596,6 +1620,61 @@ class AgentPlatformTest(unittest.TestCase):
                 mock.patch.object(yakala.subprocess, 'run') as run, mock.patch.object(yakala, '_agent_log', create=True):
             self.assertFalse(yakala._agent_notify(self.root, 'card-123', 'started'))
             run.assert_not_called()
+
+    def windows_notification(self, vault, target):
+        self.file('Windows/System32/WindowsPowerShell/v1.0/powershell.exe')
+        with mock.patch.object(yakala.sys, 'platform', 'win32'), \
+                mock.patch.dict(yakala.os.environ, {'SystemRoot': str(self.root / 'Windows')}), \
+                mock.patch.object(yakala, '_agent_toast_registered', return_value=True), \
+                mock.patch.object(yakala.subprocess, 'run') as run, mock.patch.object(yakala, '_agent_log'):
+            self.assertTrue(yakala._agent_notify(self.root, 'card-123', 'completed', target, vault=vault))
+        command, options = run.call_args.args[0], run.call_args.kwargs
+        self.assertNotIn('shell', options)
+        self.assertNotIn('stdin', options)
+        return command, json.loads(options['input'])
+
+    def test_windows_launch_is_encoded_file_uri_in_stdin_and_xml_attributes(self):
+        target = 'Notlar/sonu\u00e7 & #100% +.md'
+        path = self.file('vault/' + target)
+        command, payload = self.windows_notification(self.root / 'vault', target)
+        script = base64.b64decode(command[-1]).decode('utf-16le')
+        self.assertEqual(payload['launch'], path.resolve().as_uri())
+        self.assertTrue(payload['launch'].startswith('file:///'))
+        self.assertTrue(payload['launch'].endswith('/Notlar/sonu%C3%A7%20%26%20%23100%25%20%2B.md'))
+        self.assertIn('ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd())', script)
+        self.assertIn("if ($payload.launch) {", script)
+        self.assertIn("$xml.DocumentElement.SetAttribute('activationType', 'protocol')", script)
+        self.assertIn("$xml.DocumentElement.SetAttribute('launch', [string]$payload.launch)", script)
+        self.assertNotIn(payload['launch'], script)
+        self.assertNotIn('LoadXml', script)
+        other = self.file('vault/other.md')
+        other_command, other_payload = self.windows_notification(self.root / 'vault', 'other.md')
+        self.assertEqual(command, other_command)
+        self.assertEqual(other_payload['launch'], other.resolve().as_uri())
+        self.assertEqual(set(payload), {'title', 'body', 'launch'})
+
+    def test_windows_bad_target_keeps_notification_without_launch(self):
+        self.file('vault/card.md')
+        outside = self.file('outside.md')
+        for target in ('../outside.md', 'nested/../card.md', str(outside), outside.as_uri(),
+                       'C:/outside.md', '//server/share/note.md', 'missing.md',
+                       'folder', 'bad\x00.md', {'path': 'card.md'}):
+            with self.subTest(target=target):
+                _, payload = self.windows_notification(self.root / 'vault', target)
+                self.assertEqual(payload['launch'], '')
+        _, payload = self.windows_notification(None, 'card.md')
+        self.assertEqual(payload['launch'], '')
+
+    def test_windows_link_outside_vault_keeps_notification_without_launch(self):
+        self.file('vault/card.md')
+        outside = self.file('outside.md')
+        link = self.root / 'vault/link.md'
+        try:
+            link.symlink_to(outside)
+        except OSError:
+            self.skipTest('Symlink creation is unavailable on this host.')
+        _, payload = self.windows_notification(self.root / 'vault', 'link.md')
+        self.assertEqual(payload['launch'], '')
 
     def test_toast_setup_registers_only_owned_shortcut_and_detects_tampering(self):
         state, vault, link = self.root / 'state', self.root / 'vault', self.root / 'StartMenu' / yakala.AGENT_TOAST_LINK

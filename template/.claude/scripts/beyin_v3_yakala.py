@@ -6460,8 +6460,10 @@ def _agent_end(vault, state, job, status, reason):
     except (OSError, ValueError) as exc:
         _agent_log(state, job['card_id'], 'Son kart guncellemesi bekliyor: ' + str(exc))
     _agent_log(state, job['card_id'], status + ': ' + reason)
-    _agent_notify(state, job['card_id'], 'approval' if job['card_reconcile'] else
-                  {'completed': 'completed', 'failed': 'failed', 'approval_required': 'approval'}[status])
+    event = 'approval' if job['card_reconcile'] else {
+        'completed': 'completed', 'failed': 'failed', 'approval_required': 'approval'}[status]
+    target = (job.get('outcome') or job['card_path']) if event == 'completed' else job['card_path']
+    _agent_notify(state, job['card_id'], event, target, vault=vault)
 
 
 def _agent_kill(owned):
@@ -6502,7 +6504,7 @@ def _agent_run_job(vault, state, job):
             job.update(agent_pid=owned.process.pid, worker_pid=os.getpid(), started=now().isoformat(timespec='seconds'))
             _agent_json(folder / 'job.json', job)
             _agent_log(state, job['card_id'], 'Basladi: ' + job['id'] + ' (' + job['client'] + ')')
-            _agent_notify(state, job['card_id'], 'started')
+            _agent_notify(state, job['card_id'], 'started', job['card_path'], vault=vault)
             observed_session = False
             while owned.process.poll() is None:
                 if time.monotonic() - started >= config['timeout_seconds']:
@@ -6572,7 +6574,7 @@ def _agent_run_window(vault, state, job, command):
     _agent_json(folder / 'job.json', job)
     _agent_update_card(vault, job, 'ajanda', ajan_oturum=job['session_id'], ajan_asama='calisiyor')
     _agent_log(state, job['card_id'], 'Pencerede basladi: ' + job['id'] + ' (' + job['client'] + ')')
-    _agent_notify(state, job['card_id'], 'started')
+    _agent_notify(state, job['card_id'], 'started', job['card_path'], vault=vault)
     started = time.monotonic()
     while not result.is_file():
         if process.poll() is not None:
@@ -6906,8 +6908,16 @@ def _agent_register_toast(state, vault=None):
                     pass
 
 
-def _agent_notify(state, card_id, event):
-    """Only fixed status text leaves the worker; failure never changes job status.
+def _agent_notification_uri(vault, target):
+    """Open only an existing vault note through its default file association."""
+    path = _agent_checked_path(Path(vault).resolve(), _agent_parts(target))
+    if not path.is_file() or path.suffix.lower() not in ('.md', '.txt'):
+        raise ValueError('Bildirim hedefi mevcut bir not olmali.')
+    return path.resolve().as_uri()
+
+
+def _agent_notify(state, card_id, event, target=None, *, vault=None):
+    """Send fixed status text and a checked note URI; failure never changes job status.
 
     True means the notification API accepted the call, not that the user saw it.
     Quiet hours, OS permissions, and desktop policy can suppress presentation.
@@ -6951,8 +6961,14 @@ def _agent_notify(state, card_id, event):
             if not powershell.is_file():
                 log('notification=log-only reason=powershell-unavailable event=' + event)
                 return False
-            # This script is constant. Text is JSON over stdin and becomes XML
-            # text nodes, never PowerShell source, XML markup, or a shell command.
+            launch = ''
+            if target is not None and vault is not None:
+                try:
+                    launch = _agent_notification_uri(vault, target)
+                except (OSError, ValueError, TypeError):
+                    log('notification=target-rejected event=' + event)
+            # This script is constant. JSON stdin becomes XML text nodes and
+            # attributes, never PowerShell source, XML markup, or a shell command.
             script = r'''$ErrorActionPreference = 'Stop'
 $payload = ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd())
 $null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]
@@ -6961,6 +6977,10 @@ $xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([
 $nodes = $xml.GetElementsByTagName('text')
 $null = $nodes.Item(0).AppendChild($xml.CreateTextNode([string]$payload.title))
 $null = $nodes.Item(1).AppendChild($xml.CreateTextNode([string]$payload.body))
+if ($payload.launch) {
+    $xml.DocumentElement.SetAttribute('activationType', 'protocol')
+    $xml.DocumentElement.SetAttribute('launch', [string]$payload.launch)
+}
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('AvenoxBeyin.Yakala.Agent')
 $setting = $notifier.Setting  # Windows PowerShell 5.1 projects this WinRT enum as null
@@ -6970,7 +6990,7 @@ $notifier.Show($toast)
             encoded = base64.b64encode(script.encode('utf-16le')).decode('ascii')
             command = [str(powershell), '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded]
             options.pop('stdin')
-            options['input'] = json.dumps({'title': title, 'body': body}, ensure_ascii=True).encode('ascii')
+            options['input'] = json.dumps({'title': title, 'body': body, 'launch': launch}, ensure_ascii=True).encode('ascii')
             options['creationflags'] = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
         elif sys.platform == 'darwin':
             executable = '/usr/bin/osascript'
