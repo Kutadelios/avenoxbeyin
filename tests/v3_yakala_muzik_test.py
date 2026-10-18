@@ -48,7 +48,10 @@ class MusicFiles(AgentFiles):
         sent = yakala.enqueue_agent(self.vault, self.state, saved['id'], 'Sarkiyi bul ve mesru baglanti ver',
                                     delivery_id=delivery, music=consent if extract or upload else None)
         job = yakala._agent_load_job(self.vault, self.state, sent['job_id'])
-        job['state'] = 'running'
+        # A running job's tools need the live worker identity and deadline (#384 review).
+        job.update(state='running', worker_pid=os.getpid(),
+                   worker_identity=yakala._agent_process_identity(os.getpid()),
+                   runtime_deadline_ns=time.monotonic_ns() + 900 * 1000000000)
         yakala._agent_json(yakala._agent_job_dir(self.vault, self.state, job['id']) / 'job.json', job)
         return job
 
