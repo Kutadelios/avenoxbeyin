@@ -18,6 +18,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -622,7 +623,7 @@ class AgentLinkedRootTest(unittest.TestCase):
         queued = yakala.enqueue_agent(self.vault, self.state, saved['id'], 'Find the music')
         job = yakala._agent_load_job(self.vault, self.state, queued['job_id'])
         job['state'] = 'running'
-        yakala._agent_json(yakala._agent_job_dir(self.vault, self.state, job['id']) / 'job.json', job)
+        yakala._agent_prepare_runtime(self.vault, self.state, job)
         body = b'ID3\x04\0\0\0\0\0\0a test track'
 
         def fetch(url, byte_limit, output):
@@ -811,7 +812,7 @@ class AgentNetworkOptionTest(AgentFiles):
         yakala.configure_agent(self.vault, self.state, 'claude', network='acik')
         result, job, card = self.queued(url='https://example.com/post')
         job['state'] = 'running'
-        yakala._agent_json(yakala._agent_job_dir(self.vault, self.state, job['id']) / 'job.json', job)
+        yakala._agent_prepare_runtime(self.vault, self.state, job)
         fetched = {'url': 'https://other.example/x', 'links': []}
         with patch.object(yakala, '_agent_fetch_source', return_value=fetched) as fetch:
             yakala._agent_tool_call(self.vault, self.state, job['id'], 'fetch_source', {'url': 'https://other.example/x'})
@@ -1128,13 +1129,16 @@ class AgentPreflightTest(AgentFiles):
         def run(argv, **kwargs):
             calls.append((argv, kwargs))
             if '--version' in argv:
-                stdout = '2.1.296 (Claude Code)' if help_text is None else help_text
+                stdout = ('2.1.296 (Claude Code)' if client == 'claude' else 'codex-cli 0.155.1')
+                if help_text is not None:
+                    stdout = help_text
             elif 'mcp' in argv and 'list' in argv:
                 stdout = mcp
             elif 'plugin' in argv and 'list' in argv:
                 stdout = plugins
             elif 'features' in argv and 'list' in argv:
-                stdout = 'shell_tool stable true\napps stable true\nhooks stable true\nmulti_agent stable true\n'
+                value = 'false' if '--disable' in argv else 'true'
+                stdout = ''.join(name + ' stable ' + value + '\n' for name in yakala.CODEX_DISABLED)
             else:
                 stdout = self.HELP if help_text is None else help_text
             return subprocess.CompletedProcess(argv, 0, stdout.encode('utf-8'), b'')
@@ -1183,6 +1187,11 @@ class AgentPreflightTest(AgentFiles):
                 stdout = off if 'mcp_servers.node_repl.enabled=false' in argv else enabled
             elif 'plugin' in argv and 'list' in argv:
                 stdout = '{"installed": [], "available": []}'
+            elif '--version' in argv:
+                stdout = 'codex-cli 0.155.1'
+            elif 'features' in argv and 'list' in argv:
+                value = 'false' if '--disable' in argv else 'true'
+                stdout = ''.join(name + ' stable ' + value + '\n' for name in yakala.CODEX_DISABLED)
             else:
                 stdout = self.HELP
             return subprocess.CompletedProcess(argv, 0, stdout.encode('utf-8'), b'')
@@ -1190,7 +1199,7 @@ class AgentPreflightTest(AgentFiles):
         system = types.SimpleNamespace(**{**vars(os), 'name': 'posix'})
         with patch.object(yakala, 'os', system), patch.object(yakala.subprocess, 'run', side_effect=run):
             self.assertEqual(yakala._agent_preflight('codex', ['codex'], self.vault), ('node_repl',))
-        listing = [argv for argv in calls if 'list' in argv]
+        listing = [argv for argv in calls if 'list' in argv and 'features' not in argv]
         for feature in ('plugins', 'unified_exec', 'computer_use'):
             self.assertTrue(all(feature in argv for argv in listing), feature)
 
@@ -1305,7 +1314,7 @@ class AgentRecoveryTest(AgentFiles):
             return owned
 
         with patch.object(yakala, '_agent_executable', return_value=['fake-claude']), \
-                patch.object(yakala, '_agent_preflight'), patch.object(yakala, '_OwnedProcess', side_effect=launch), \
+                patch.object(yakala, '_agent_preflight'), patch.object(yakala, '_agent_owned_process', side_effect=launch), \
                 patch.object(yakala, '_agent_kill') as kill, \
                 patch.object(yakala, '_agent_finalize', return_value=('completed', 'must not happen')) as finalize:
             yakala._agent_run_job(self.vault, self.state, job)
@@ -1345,7 +1354,7 @@ class AgentCompleteNotesTest(AgentFiles):
         result, job, card = self.queued(request='Kısa bir not yaz.')
         job['state'] = 'running'
         folder = yakala._agent_job_dir(self.vault, self.state, job['id'])
-        yakala._agent_json(folder / 'job.json', job)
+        yakala._agent_prepare_runtime(self.vault, self.state, job)
         note = yakala._agent_tool_call(self.vault, self.state, job['id'], 'write_note',
                                       {'title': 'Sonuç', 'content': 'Özet metni.'})
         return job, folder, note['path']
@@ -1407,7 +1416,7 @@ class AgentFinalizationTest(AgentFiles):
         result, job, card = self.queued(request='Bu parçayı indir ve kaynağını hatırla.',
                                          url='https://example.com/music', why='Kullanıcının kaynak notu.')
         job['state'] = 'running'
-        yakala._agent_json(yakala._agent_job_dir(self.vault, self.state, job['id']) / 'job.json', job)
+        yakala._agent_prepare_runtime(self.vault, self.state, job)
         note = yakala._agent_tool_call(self.vault, self.state, job['id'], 'write_note',
                                       {'title': 'Verified music', 'content': 'Public track: https://example.com/track.mp3'})
 
@@ -1591,7 +1600,7 @@ class AgentFinalizationTest(AgentFiles):
         fixture = self.prepared()
         owned, launch = self.successful_cli(fixture)
         with patch.object(yakala, '_agent_executable', return_value=['fake-claude']), \
-                patch.object(yakala, '_agent_preflight'), patch.object(yakala, '_OwnedProcess', side_effect=launch), \
+                patch.object(yakala, '_agent_preflight'), patch.object(yakala, '_agent_owned_process', side_effect=launch), \
                 patch.object(yakala, '_agent_kill') as kill, patch.object(yakala, '_agent_notify') as notify, \
                 self.receipt_process(fixture, source='missing'):
             yakala._agent_run_job(self.vault, self.state, fixture.job)
@@ -1624,9 +1633,11 @@ class AgentFinalizationTest(AgentFiles):
         # Model the Windows job's close boundary, without loading Win32 or signalling a real PID.
         system = types.SimpleNamespace(**{**vars(os), 'name': 'nt'})
         platform = types.SimpleNamespace(**{**vars(sys), 'platform': 'unit-test'})
+        worker_identity = yakala._agent_process_identity(os.getpid())
         with patch.object(yakala, 'os', system), patch.object(yakala, 'sys', platform), \
                 patch.object(yakala, '_agent_executable', return_value=['fake-claude']), \
-                patch.object(yakala, '_agent_preflight'), patch.object(yakala, '_OwnedProcess', return_value=owned), \
+                patch.object(yakala, '_agent_process_identity', return_value=worker_identity), \
+                patch.object(yakala, '_agent_preflight'), patch.object(yakala, '_agent_owned_process', return_value=owned), \
                 patch('time.monotonic', side_effect=[0, 31]), patch.object(yakala, '_agent_end', side_effect=record_end):
             yakala._agent_run_job(self.vault, self.state, job)
         self.assertEqual(observed, ['tree-closed', 'terminal-recorded'])
@@ -2153,7 +2164,9 @@ class AgentBridgeFilesTest(unittest.TestCase):
         result = yakala.capture(self.vault, url='https://example.com/music', why='Find the music', state=self.state)
         self.job = {'id': str(uuid.uuid4()), 'card_id': result['id'], 'card_path': result['path'],
                     'request': 'Find the music', 'url': 'https://example.com/music', 'client': 'claude',
-                    'session_id': str(uuid.uuid4()), 'state': 'running'}
+                    'session_id': str(uuid.uuid4()), 'state': 'running', 'worker_pid': os.getpid(),
+                    'worker_identity': yakala._agent_process_identity(os.getpid()),
+                    'runtime_deadline_ns': time.monotonic_ns() + 900 * 1000000000}
         self.job_folder = self.state / 'yakala' / 'ajan' / self.job['id']
         self.job_folder.mkdir(parents=True)
         for name, value in (('_agent_job_dir', lambda vault, state, job_id: self.job_folder),
@@ -2440,7 +2453,7 @@ class AgentBridgeFilesTest(unittest.TestCase):
     def test_search_excludes_hidden_sensitive_and_attachment_folders(self):
         self.note('.cache/needle.md', 'needle')
         self.note('passwords/needle.md', 'needle')
-        self.note('dosyalar/needle.md', 'needle')
+        self.note((Path(self.job['card_path']).parent / 'dosyalar/needle.md').as_posix(), 'needle')
         self.note('knowledge/needle.md', 'needle')
         result = self.call('search_notes', query='needle')
         self.assertEqual([item['path'] for item in result['matches']], ['knowledge/needle.md'])
@@ -2598,8 +2611,9 @@ class AgentBridgeFilesTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.call('read_note', path=(parent / 'DOSYALAR' / 'foreign.txt').as_posix())
 
-    def test_search_never_walks_case_variants_of_attachment_store(self):
-        self.note('knowledge/DOSYALAR/foreign.md', 'ATTACHMENT_SEARCH_CANARY')
+    def test_search_never_walks_case_variants_of_actual_attachment_store(self):
+        parent = Path(self.job['card_path']).parent
+        self.note((parent / 'DOSYALAR' / 'foreign.md').as_posix(), 'ATTACHMENT_SEARCH_CANARY')
         self.assertEqual(self.call('search_notes', query='ATTACHMENT_SEARCH_CANARY')['matches'], [])
 
     def test_canonical_long_name_is_checked_after_an_alias_lookup(self):

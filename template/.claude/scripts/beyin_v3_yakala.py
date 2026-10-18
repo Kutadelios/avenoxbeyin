@@ -402,6 +402,20 @@ def _unique(path):
 _CAPTURE_LOCK = threading.RLock()
 
 
+def _capture_lock_path(vault):
+    """One machine-local lock for a vault directory, regardless of its path spelling.
+
+    Capture and the worker must not switch lock domains when the optional agent is
+    enabled, disabled or moved to another state folder. Never create a lock in the vault.
+    POSIX realpath preserves case aliases on macOS, so use the same device/inode identity
+    as samefile and keep the lock above the path-hashed per-vault state directories.
+    """
+    vault = Path(vault).resolve()
+    info = vault.stat()
+    return (Path(default_state(vault)).resolve().parent / 'yakala-card-locks' /
+            ('vault-%x-%x.lock' % (info.st_dev, info.st_ino)))
+
+
 class _WindowsCommitLock:
     """Serialise local card commits; never hold this lock during browser/network/model work."""
 
@@ -425,7 +439,10 @@ class _WindowsCommitLock:
                     raise OSError('Baska bir yakalama kaydi tamamlanamadi; yeniden deneyin.')
                 self.acquired = True
             elif os.name != 'nt':
-                self.file_lock = _AgentFileLock(Path(self.vault).resolve() / '.beyin-yakala-card.lock')
+                # POSIX capture can create a new vault. Establish its directory identity
+                # before choosing the lock, so a second process cannot use another key.
+                Path(self.vault).mkdir(parents=True, exist_ok=True)
+                self.file_lock = _AgentFileLock(_capture_lock_path(self.vault))
                 self.file_lock.__enter__()
             return self
         except BaseException:
@@ -1562,9 +1579,14 @@ def _post_title(post, article, link=''):
     text = re.sub(r'\s+', ' ', article or '').strip()
     link = re.sub(r'\s+', ' ', link or '').strip()
     handle = re.match(r'^https://x\.com/([A-Za-z0-9_]{1,15})/status/', post or '')
-    if handle and link and link in text:
-        body = text.split(link, 1)[1].strip()
-        text = '@%s: %s' % (handle.group(1), body) if body else '@' + handle.group(1)
+    if handle and link:
+        mention = re.search(r'@' + re.escape(handle.group(1)) + r'(?![A-Za-z0-9_])', text, re.I)
+        # A display name or handle can itself contain the timestamp (for example @abc2h).
+        # Keep the existing fallback for accessibility text that omits the handle entirely.
+        at = text.find(link, mention.end() if mention else 0)
+        if at >= 0:
+            body = text[at + len(link):].strip()
+            text = '@%s: %s' % (handle.group(1), body) if body else '@' + handle.group(1)
     return text[:200]
 
 
@@ -2371,13 +2393,31 @@ def _win_escape_guard(root, popup, source, dismiss):
     user32.CallNextHookEx.argtypes, user32.CallNextHookEx.restype = [handle, ctypes.c_int, ctypes.c_size_t, ctypes.c_ssize_t], ctypes.c_ssize_t
     user32.UnhookWindowsHookEx.argtypes = [handle]
     user32.GetForegroundWindow.restype = handle
+    user32.GetAsyncKeyState.argtypes, user32.GetAsyncKeyState.restype = [ctypes.c_int], ctypes.c_short
     pressed, hook = threading.Event(), None
     active = {'on': True}
+    modifiers = set()
+    modifier_groups = ((0x10, 0xA0, 0xA1), (0x11, 0xA2, 0xA3), (0x12, 0xA4, 0xA5), (0x5B, 0x5C))
+    modifier_keys = {key for group in modifier_groups for key in group}
 
     @callback_type
     def callback(code, message, data):
-        if code >= 0 and active['on'] and message in (0x100, 0x104):  # WM_KEYDOWN / WM_SYSKEYDOWN
-            if ctypes.cast(data, ctypes.POINTER(ctypes.c_uint32))[0] == 0x1B:
+        if code >= 0 and active['on'] and message in (0x100, 0x101, 0x104, 0x105):
+            event = ctypes.cast(data, ctypes.POINTER(ctypes.c_uint32))  # KBDLLHOOKSTRUCT DWORD fields
+            key, down = event[0], message in (0x100, 0x104)
+            if key in modifier_keys:
+                if down:
+                    modifiers.add(key)
+                else:
+                    modifiers.discard(key)
+                    for group in modifier_groups[:3]:
+                        if key == group[0]:
+                            modifiers.difference_update(group)
+                        elif key in group:
+                            modifiers.discard(group[0])
+            # LLKHF_ALTDOWN also protects an Alt held before this hook was installed.
+            # Never poll asynchronous key state inside a low-level keyboard callback.
+            if key == 0x1B and down and not modifiers and not event[2] & 0x20:
                 scope = _escape_scope(user32.GetForegroundWindow(), source, popup)
                 if scope:
                     pressed.set()
@@ -2388,6 +2428,12 @@ def _win_escape_guard(root, popup, source, dismiss):
     kernel32 = ctypes.WinDLL('kernel32')
     kernel32.GetModuleHandleW.argtypes, kernel32.GetModuleHandleW.restype = [ctypes.c_wchar_p], handle
     hook = user32.SetWindowsHookExW(13, callback, kernel32.GetModuleHandleW(None), 0)  # WH_KEYBOARD_LL
+    if hook:
+        # One snapshot outside the callback covers modifiers already held at installation;
+        # subsequent key down/up events maintain the state (left and right independently).
+        for key in (0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C):
+            if user32.GetAsyncKeyState(key) & 0x8000:
+                modifiers.add(key)
 
     def stop():
         nonlocal hook
@@ -5534,6 +5580,257 @@ AGENT_MAX_REQUEST = 16000
 AGENT_OUTPUT_LIMIT = 16 * 1024 * 1024
 
 
+def _agent_process_identity(pid):
+    """Return one live process generation, None if absent, and raise on ambiguity.
+
+    A numeric PID or executable name is never evidence of ownership. These birth
+    values come from the OS; persisted identities are only compared, never killed.
+    """
+    if type(pid) is not int or not 0 < pid < 2 ** 31:
+        return None
+    if os.name == 'nt' and sys.platform == 'win32':
+        import ctypes as C
+        kernel = C.WinDLL('kernel32', use_last_error=True)
+        kernel.OpenProcess.argtypes, kernel.OpenProcess.restype = [C.c_uint32, C.c_int, C.c_uint32], C.c_void_p
+        kernel.WaitForSingleObject.argtypes, kernel.WaitForSingleObject.restype = [C.c_void_p, C.c_uint32], C.c_uint32
+        kernel.GetProcessTimes.argtypes = [C.c_void_p, *([C.POINTER(C.c_uint64)] * 4)]
+        kernel.GetProcessTimes.restype = C.c_int
+        kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [C.c_void_p], C.c_int
+        handle = kernel.OpenProcess(0x101000, False, pid)  # QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+        if not handle:
+            code = C.get_last_error()
+            if code == 87:  # ERROR_INVALID_PARAMETER: no such PID
+                return None
+            raise OSError(code, 'Ajan surec kimligi okunamadi.')
+        try:
+            state = kernel.WaitForSingleObject(handle, 0)
+            if state == 0:
+                return None
+            if state != 258:  # WAIT_TIMEOUT: live, including a process that may later exit with code 259
+                raise OSError(C.get_last_error(), 'Ajan surec durumu okunamadi.')
+            created, ended, system, user = (C.c_uint64() for _ in range(4))
+            if not kernel.GetProcessTimes(handle, C.byref(created), C.byref(ended), C.byref(system), C.byref(user)):
+                raise OSError(C.get_last_error(), 'Ajan surec baslangici okunamadi.')
+            return {'pid': pid, 'kind': 'windows-filetime', 'birth': str(created.value)}
+        finally:
+            kernel.CloseHandle(handle)
+    if sys.platform.startswith('linux'):
+        try:
+            # comm can itself contain spaces, parentheses and line breaks. Field 22
+            # is index 19 only after the final closing parenthesis of field 2.
+            raw = Path('/proc', str(pid), 'stat').read_text(encoding='ascii', errors='replace')
+            if raw.split(' ', 1)[0] != str(pid):
+                raise OSError('Ajan /proc PID ad alani eslesmiyor.')
+            if pid == os.getpid() and Path('/proc/self/stat').read_text(encoding='ascii').split(' ', 1)[0] != str(pid):
+                raise OSError('Ajan /proc kendi PID ad alani eslesmiyor.')
+            fields = raw.rsplit(')', 1)[1].split()
+            if fields[0] in ('Z', 'X', 'x'):
+                return None
+            birth = str(int(fields[19]))
+            boot = _agent_uuid(Path('/proc/sys/kernel/random/boot_id').read_text(encoding='ascii').strip())
+        except FileNotFoundError:
+            return None
+        except (IndexError, ValueError) as exc:
+            raise OSError('Ajan /proc surec kimligi gecersiz.') from exc
+        return {'pid': pid, 'kind': 'linux-starttime', 'birth': birth, 'boot': boot}
+    if sys.platform == 'darwin':
+        import ctypes as C
+
+        class BsdInfo(C.Structure):
+            _fields_ = [('flags', C.c_uint32), ('status', C.c_uint32), ('xstatus', C.c_uint32),
+                        ('pid', C.c_uint32), ('ppid', C.c_uint32), ('ids', C.c_uint32 * 7),
+                        ('comm', C.c_char * 16), ('name', C.c_char * 32), ('nfiles', C.c_uint32),
+                        ('pgid', C.c_uint32), ('jobc', C.c_uint32), ('tdev', C.c_uint32),
+                        ('tpgid', C.c_uint32), ('nice', C.c_int32),
+                        ('start_sec', C.c_uint64), ('start_usec', C.c_uint64)]
+
+        library = C.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+        library.proc_pidinfo.argtypes = [C.c_int, C.c_int, C.c_uint64, C.c_void_p, C.c_int]
+        library.proc_pidinfo.restype = C.c_int
+        info = BsdInfo()
+        C.set_errno(0)
+        count = library.proc_pidinfo(pid, 3, 0, C.byref(info), C.sizeof(info))  # PROC_PIDTBSDINFO
+        if count != C.sizeof(info):
+            import errno
+            code = C.get_errno()
+            if code == errno.ESRCH:
+                return None
+            raise OSError(code, 'Ajan macOS surec kimligi okunamadi.')
+        if info.status == 5:  # SZOMB
+            return None
+        if info.pid != pid or not info.start_sec or info.start_usec >= 1000000:
+            raise OSError('Ajan macOS surec kimligi gecersiz.')
+        return {'pid': pid, 'kind': 'darwin-starttime', 'birth': '%d:%d' % (info.start_sec, info.start_usec)}
+    raise OSError('Bu sistemde guvenilir ajan surec kimligi desteklenmiyor.')
+
+
+def _agent_same_process(identity):
+    if (not isinstance(identity, dict) or type(identity.get('pid')) is not int or
+            identity.get('kind') not in ('linux-starttime', 'windows-filetime', 'darwin-starttime') or
+            not isinstance(identity.get('birth'), str) or not identity['birth']):
+        return False
+    current = _agent_process_identity(identity['pid'])
+    return current is not None and current == identity
+
+
+def _agent_require_live_job(job):
+    """Bridge authority expires independently of the worker's final status write."""
+    import time
+    if job.get('state') != 'running':
+        raise ValueError('This job is not running; its tools are no longer available.')
+    identity, deadline = job.get('worker_identity'), job.get('runtime_deadline_ns')
+    if (not isinstance(identity, dict) or identity.get('pid') != job.get('worker_pid') or
+            type(deadline) is not int or time.monotonic_ns() >= deadline):
+        raise ValueError('Ajan isinin calisan kimligi veya suresi gecersiz; araclar kapatildi.')
+    try:
+        live = _agent_same_process(identity)
+    except OSError:
+        live = False
+    if not live:
+        raise ValueError('Ajan calisani artik dogrulanamiyor; araclar kapatildi, otomatik tekrar yok.')
+
+
+def _agent_prepare_runtime(vault, state, job):
+    import time
+    identity = _agent_process_identity(os.getpid())
+    if identity is None:
+        raise ValueError('Ajan calisaninin surec kimligi dogrulanamadi.')
+    job.update(worker_pid=os.getpid(), worker_identity=identity,
+               runtime_deadline_ns=time.monotonic_ns() + job['config']['timeout_seconds'] * 1000000000,
+               started=now().isoformat(timespec='seconds'))
+    _agent_json(_agent_job_dir(vault, state, job['id']) / 'job.json', job)
+
+
+class _AgentPosixProcess:
+    """An independent guardian owns a process group, a deadline and a worker pipe.
+
+    Closing the worker's unique write end revokes the whole group. Only the living
+    group leader calls killpg on its own group, so cleanup never signals a PID
+    recovered from disk or a process group whose leader we already reaped.
+    """
+
+    def __init__(self, command, *, deadline_ns, **options):
+        self.process, self.control, self.result = None, None, None
+        reader, result_writer = None, None
+        try:
+            reader, self.control = os.pipe()
+            self.result, result_writer = os.pipe()
+            helper = [_windows_python(), str(Path(__file__).resolve()), '_ajan-guard', str(reader), str(result_writer)]
+            self.process = subprocess.Popen(helper, pass_fds=(reader, result_writer),
+                                            start_new_session=True, **options)
+            payload = json.dumps({'command': command, 'deadline_ns': deadline_ns}, ensure_ascii=True).encode('ascii') + b'\n'
+            if len(payload) > 256 * 1024:
+                raise ValueError('Ajan baslatma komutu boyut sinirini asti.')
+            while payload:
+                count = os.write(self.control, payload)
+                payload = payload[count:]
+        except BaseException:
+            self.close()
+            raise
+        finally:
+            for fd in (reader, result_writer):
+                if fd is not None:
+                    os.close(fd)
+
+    def result_code(self):
+        raw = os.read(self.result, 4097)
+        try:
+            result = json.loads(raw)
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError('Ajan gozeticisi dogrulanabilir bitis kaydi birakmadi.') from exc
+        if result.get('status') == 'deadline':
+            raise TimeoutError('Ajan zaman asimina ugradi; surec grubu kapatildi.')
+        if result.get('status') != 'exit' or type(result.get('returncode')) is not int:
+            raise ValueError('Ajan gozeticisi isi durdurdu: ' + str(result.get('status', 'bilinmiyor'))[:100])
+        return result['returncode']
+
+    def close(self):
+        if self.control is not None:
+            os.close(self.control)
+            self.control = None
+        try:
+            if self.process is not None:
+                self.process.wait(timeout=3)
+        finally:
+            if self.result is not None:
+                os.close(self.result)
+                self.result = None
+
+
+def _agent_guard_main(control, result_fd):
+    """POSIX-only internal guardian. The CLI never inherits the lifetime/status pipes."""
+    import select
+    import signal
+    import stat
+    import time
+    if (os.name == 'nt' or control < 3 or result_fd < 3 or control == result_fd or
+            os.getpgrp() != os.getpid() or
+            not all(stat.S_ISFIFO(os.fstat(fd).st_mode) for fd in (control, result_fd))):
+        return 1
+    result = {'status': 'error'}
+
+    def stopped(*_):
+        raise RuntimeError('Ajan gozeticisi durduruldu.')
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, stopped)
+    try:
+        raw, startup_deadline = b'', time.monotonic() + 5
+        while b'\n' not in raw:
+            remaining = startup_deadline - time.monotonic()
+            if remaining <= 0 or not select.select([control], [], [], remaining)[0]:
+                raise TimeoutError('Ajan gozeticisi baslatma istegini alamadi.')
+            block = os.read(control, 65536)
+            if not block:
+                result = {'status': 'orphan'}
+                return 1
+            raw += block
+            if len(raw) > 256 * 1024:
+                raise ValueError('Ajan gozeticisi istegi cok buyuk.')
+        request = json.loads(raw)
+        command, deadline = request['command'], request['deadline_ns']
+        if (not isinstance(command, list) or not command or
+                not all(isinstance(part, str) and '\0' not in part for part in command) or
+                type(deadline) is not int or deadline > time.monotonic_ns() + 3600 * 1000000000):
+            raise ValueError('Ajan gozeticisi istegi gecersiz.')
+        if time.monotonic_ns() >= deadline:
+            result = {'status': 'deadline'}
+            return 1
+        if select.select([control], [], [], 0)[0]:
+            result = {'status': 'orphan'}
+            return 1
+        # This guardian remains the process-group leader throughout child wait/reap.
+        # Descendants inherit the group, but no pipe capability survives this exec.
+        child = subprocess.Popen(command, close_fds=True)
+        while True:
+            remaining = (deadline - time.monotonic_ns()) / 1000000000
+            if remaining <= 0:
+                result = {'status': 'deadline'}
+                break
+            if select.select([control], [], [], min(remaining, 0.1))[0]:
+                result = {'status': 'orphan'}
+                break
+            returncode = child.poll()
+            if returncode is not None:
+                result = {'status': 'exit', 'returncode': returncode}
+                break
+    except BaseException as exc:
+        result = {'status': 'error', 'reason': type(exc).__name__}
+    finally:
+        try:
+            os.write(result_fd, json.dumps(result, ensure_ascii=True).encode('ascii'))
+        finally:
+            # Including ourselves: this group cannot have been reused while we are alive.
+            os.killpg(os.getpgrp(), signal.SIGKILL)
+    return 1
+
+
+def _agent_owned_process(command, *, deadline_ns, **options):
+    if os.name == 'nt':
+        return _OwnedProcess(command, **options)
+    return _AgentPosixProcess(command, deadline_ns=deadline_ns, **options)
+
+
 class _AgentFileLock:
     """A local, OS-owned lock. Never unlink a lock file while another process may wait on it."""
 
@@ -5844,6 +6141,11 @@ def configure_agent(vault, state, client, config_file=None, view=None, network=N
         config = _agent_defaults(vault)
     if not (_agent_root(state) / 'config.json').exists():
         config['downloads_dir'] = _agent_downloads()
+    if client != 'kapali' and client != config['client']:
+        # Models, effort values and executable paths belong to one CLI. Explicit updates below
+        # may set new values, but a Claude model/binary must never become a Codex option. An old
+        # `kapali` configuration has no reliable owner either, so re-enabling starts with defaults.
+        config.update(extra_args=[], executable=None)
     if config_file:
         path = Path(config_file)
         if path.stat().st_size > 16384:
@@ -6004,21 +6306,64 @@ def _agent_spawn_worker(vault, state):
 
 # Codex features that give a model a way past the bridge: shell and unified exec, app connectors
 # and plugins (bundled ones include computer use, a browser, Gmail and Drive), sub-agents, goals
-# and image generation. Disabled per run; the user's config is untouched. The code-mode host
+# and local image reads/image generation. Disabled per run; the user's config is untouched. The code-mode host
 # stays on: Codex 0.155.1 calls MCP tools through it, and its JS has no fs, child_process or
 # fetch (measured 18.10.2026: 'unsupported import in exec', 'fetch is not defined').
-CODEX_DISABLED = ('shell_tool', 'unified_exec', 'apps', 'multi_agent', 'plugins',
+CODEX_MIN_VERSION = (0, 155, 1)
+CODEX_DISABLED = ('shell_tool', 'unified_exec', 'view_image', 'apps', 'multi_agent', 'multi_agent_v2', 'plugins',
                   'remote_plugin', 'computer_use', 'browser_use', 'browser_use_external', 'in_app_browser',
                   'image_generation', 'goals')
 
 
 def _agent_codex_flags(mcp_off=()):
-    flags = ['-a', 'never']
+    # Disable the V2 selector and the model-selected agent surface too. In 0.155.1,
+    # --disable multi_agent alone still allows V2 tools chosen by config or model metadata.
+    flags = ['-a', 'never', '-c', 'agents.enabled=false']
     for feature in CODEX_DISABLED:
         flags += ['--disable', feature]
     for name in mcp_off:  # names checked by _agent_preflight; TOML bare keys
         flags += ['-c', 'mcp_servers.' + name + '.enabled=false']
     return flags
+
+
+def _agent_codex_features(prefix, vault, *, restricted=False):
+    """Validate the plain feature table before using any feature name in --disable.
+
+    No --json: Codex's feature list is a padded name/stage/bool table, including the
+    two-word stage `under development`. Removed flags can be accepted but do nothing.
+    """
+    flags = _agent_codex_flags() if restricted else []
+    rc, output, error = _run([*prefix, *flags, 'features', 'list'], 15,
+                             cwd=str(vault) if vault else None)
+    if rc or not output.strip() or len(output) > 128 * 1024:
+        raise ValueError('Codex ozellik listesi dogrulanamadi; codex features list ciktisini incele.')
+    features = {}
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        match = re.fullmatch(r'\s*([a-z][a-z0-9_.]*)\s+'
+                             r'(under development|experimental|stable|deprecated|removed)\s+'
+                             r'(true|false)\s*', line)
+        if not match or match[1] in features:
+            raise ValueError('Codex ozellik tablosu bilinmeyen veya yinelenen satir iceriyor.')
+        features[match[1]] = (match[2], match[3] == 'true')
+    missing = [name for name in CODEX_DISABLED if name not in features]
+    if missing:
+        raise ValueError('Codex guvenlik ozellikleri eksik: ' + ', '.join(missing) +
+                         '. Codex 0.155.1 veya sonrasi ve uyumlu ozellik tablosu gerekli.')
+    removed = [name for name in CODEX_DISABLED if features[name][0] == 'removed']
+    if removed:
+        raise ValueError('Codex guvenlik ozellikleri kaldirilmis: ' + ', '.join(removed) +
+                         '; bu CLI surumu icin Yakala uyumlulugunu incele.')
+    if restricted:
+        # 0.155.1/0.160 may force unified_exec on unless managed requirements prohibit it.
+        # Its handlers still require shell_tool, which must be off. Do not mistake an accepted
+        # --disable for effective enforcement, or reject this known, gated selector as a tool.
+        enabled = [name for name in CODEX_DISABLED if features[name][1] and not
+                   (name == 'unified_exec' and not features['shell_tool'][1])]
+        if enabled:
+            raise ValueError('Codex guvenlik ozellikleri kapatilamadi: ' + ', '.join(enabled))
+    return features
 
 
 def _agent_codex_inventory(prefix, vault, noun, mcp_off=()):
@@ -6053,6 +6398,14 @@ def _agent_preflight(client, prefix, vault=None):
     if rc or any(flag not in output for flag in required):
         raise ValueError('Ajan CLI gerekli guvenlik bayraklarini desteklemiyor: ' + client)
     if client == 'codex':
+        rc, output, error = _run([*prefix, '--version'], 15, cwd=str(vault) if vault else None)
+        match = re.fullmatch(r'codex-cli (\d+)\.(\d+)\.(\d+)', output.strip())
+        if rc or not match or tuple(map(int, match.groups())) < CODEX_MIN_VERSION:
+            raise ValueError('Codex 0.155.1 veya sonrasi gerekli; yerel surum dogrulanamadi.')
+        # First discover names without --disable, then verify their effective false state with
+        # exactly the run's flags. A renamed/removed/ignored flag never silently widens the tools.
+        _agent_codex_features(prefix, vault)
+        _agent_codex_features(prefix, vault, restricted=True)
         rc, output, error = _run([*prefix, 'exec', '--help'], 15, cwd=str(vault) if vault else None)
         if rc or any(flag not in output for flag in ('--ignore-rules', '--json', '--sandbox', '--skip-git-repo-check')):
             raise ValueError('Codex exec guvenlik bayraklari dogrulanamadi.')
@@ -6270,21 +6623,37 @@ def _agent_receipt(vault, state, job, summary, refs):
 
 
 def _agent_last_session(vault, config):
+    """Use the explicit path or the companion identity, never a recursive vault scan.
+
+    The top-level selection mirrors beyin_v3_companion.directory: named Companion/Echo
+    folders outrank folders containing Core.md/Soul.md; multiple identities are ambiguous.
+    This module also runs alone from state, so keep this small resolver self-contained.
+    """
     if config.get('last_session_path'):
         return _agent_vault_file(vault, config['last_session_path'])
-    matches, examined = [], 0
-    for directory, subdirs, files in os.walk(vault, followlinks=False):
-        subdirs[:] = [name for name in subdirs if not name.startswith('.') and name not in ('node_modules', '__pycache__')
-                      and not _agent_reparse(Path(directory) / name)]
-        examined += len(files)
-        if examined > 10000:
-            raise ValueError('Last-Session aramasi sinira ulasti; last_session_path ayarla.')
-        for name in files:
-            if name.casefold() == 'last-session.md':
-                matches.append(_agent_vault_file(vault, (Path(directory) / name).relative_to(vault).as_posix()))
-    if len(matches) != 1:
-        raise ValueError('Tek bir Last-Session.md bulunamadi; last_session_path ile mevcut notu belirt.')
-    return matches[0]
+    vault = Path(vault).resolve()
+    default = '\U0001f52e 850-Companion'
+    named, identified = [], []
+    with os.scandir(vault) as entries:
+        for count, entry in enumerate(entries, 1):
+            if count > 2048:
+                raise ValueError('Companion klasor aramasi sinira ulasti; last_session_path ayarla.')
+            path = Path(entry.path)
+            if (entry.name.startswith('.') or re.search(r'(?i)(archive|arşiv|arsiv)', entry.name) or
+                    not entry.is_dir(follow_symlinks=False) or _agent_reparse(path)):
+                continue
+            if entry.name == default or entry.name.casefold().endswith(('companion', 'echo')):
+                named.append(path)
+            elif any((path / name).is_file() and not _agent_reparse(path / name) for name in ('Core.md', 'Soul.md')):
+                identified.append(path)
+    candidates = named or identified
+    if len(candidates) > 1:
+        raise ValueError('Birden fazla companion kimligi var; last_session_path ile mevcut notu belirt.')
+    folder = candidates[0] if candidates else vault / default
+    try:
+        return _agent_vault_file(vault, (folder / 'Last-Session.md').relative_to(vault).as_posix())
+    except (OSError, ValueError) as exc:
+        raise ValueError('Companion Last-Session.md bulunamadi veya guvensiz; last_session_path ile mevcut notu belirt.') from exc
 
 
 def _agent_publish_downloads(vault, state, job, manifest):
@@ -6306,9 +6675,9 @@ def _agent_publish_downloads(vault, state, job, manifest):
             raise ValueError('Indirme dosyasi degismis.')
         # A Downloads folder the user moved behind a link is accepted; links below it are not.
         destination = _agent_private_dir(Path(job['config']['downloads_dir']).resolve())
-        # Publish by a same-filesystem hard link: atomic, and never replaces a user's file.
+        # Publish one complete same-filesystem snapshot, never replacing a user's file.
         # Record each intent before copying, and each effect immediately after publication.
-        # On unsupported filesystems or interrupted copies, the explicit .part file is kept.
+        # If neither hard links nor exclusive rename are supported, keep the explicit .part.
         target = destination / (Path(name).stem + '-yakala-' + job['id'][:8] + Path(name).suffix)
         partial = target.with_name(target.name + '.part')
         intent = {'target': str(target), 'partial': str(partial), 'state': 'copying', 'sha256': item['sha256']}
@@ -6328,7 +6697,7 @@ def _agent_publish_downloads(vault, state, job, manifest):
             os.fsync(outgoing.fileno())
         if copied != item['bytes'] or digest.hexdigest() != item['sha256']:
             raise ValueError('Indirme kopyasi hash/boyut dogrulamasi basarisiz; .part korundu.')
-        os.link(partial, target, follow_symlinks=False)
+        _agent_publish_file(partial, target, identity)
         published.append({'path': str(target), 'sha256': item['sha256'], 'bytes': item['bytes'], 'source_url': item['source_url']})
         intent['state'] = 'published'
         _agent_json(folder / 'job.json', job)
@@ -6336,6 +6705,8 @@ def _agent_publish_downloads(vault, state, job, manifest):
             info = partial.lstat()
             if not _agent_reparse(partial) and identity == (info.st_dev, info.st_ino):
                 partial.unlink()  # Only the private temporary alias created in this operation.
+        except FileNotFoundError:
+            pass  # Exclusive rename already consumed this operation's .part file.
         except OSError as exc:
             _agent_log(state, job['card_id'], 'Gecici indirme kopyasi korundu: ' + str(exc))
     return published
@@ -6475,12 +6846,8 @@ def _agent_end(vault, state, job, status, reason):
 
 def _agent_kill(owned):
     """Kill the owned CLI tree before recording a timeout/cancellation result."""
-    if os.name != 'nt' and owned.process is not None:
-        import signal
-        try:
-            os.killpg(owned.process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    # POSIX closes its lifetime pipe. Its still-living guardian kills its own
+    # group; a persisted or already-reaped PID is never a signalling target.
     owned.close()
 
 
@@ -6499,16 +6866,17 @@ def _agent_run_job(vault, state, job):
         command = _agent_command(vault, state, job, config)
         prompt_path = folder / 'prompt.txt'
         _atomic_text(prompt_path, _agent_prompt(vault, job))
+        _agent_prepare_runtime(vault, state, job)
         if _agent_windowed(config):
             terminal, reason = _agent_run_window(vault, state, job, command)
             return _agent_end(vault, state, job, terminal, reason)
         started = time.monotonic()
         with prompt_path.open('rb') as incoming, (folder / 'events.jsonl').open('wb') as outgoing, \
                 (folder / 'stderr.log').open('wb') as error:
-            owned = _OwnedProcess(command, stdin=incoming, stdout=outgoing, stderr=error, cwd=str(vault),
-                                  env=_agent_env(state, job['id']), close_fds=True,
-                                  **({} if os.name == 'nt' else {'start_new_session': True}))
-            job.update(agent_pid=owned.process.pid, worker_pid=os.getpid(), started=now().isoformat(timespec='seconds'))
+            owned = _agent_owned_process(command, deadline_ns=job['runtime_deadline_ns'], stdin=incoming,
+                                         stdout=outgoing, stderr=error, cwd=str(vault),
+                                         env=_agent_env(state, job['id']), close_fds=True)
+            job.update(agent_pid=owned.process.pid, agent_identity=_agent_process_identity(owned.process.pid))
             _agent_json(folder / 'job.json', job)
             _agent_log(state, job['card_id'], 'Basladi: ' + job['id'] + ' (' + job['client'] + ')')
             _agent_notify(state, job['card_id'], 'started', job['card_path'], vault=vault)
@@ -6530,6 +6898,8 @@ def _agent_run_job(vault, state, job):
                 observed_session = observed_session or bool(events['session_id'])
                 time.sleep(0.1)
             returncode = owned.process.wait(timeout=5)
+            if isinstance(owned, _AgentPosixProcess):
+                returncode = owned.result_code()
         events = _agent_events(folder / 'events.jsonl', job['client'])
         if events['session_id']:
             if job.get('session_id') and job['session_id'] != events['session_id']:
@@ -6625,11 +6995,13 @@ def _agent_run_window(vault, state, job, command):
     import time
     folder = _agent_job_dir(vault, state, job['id'])
     config = job['config']
+    if not job.get('worker_identity'):
+        _agent_prepare_runtime(vault, state, job)
     result = folder / 'result.json'
     session_started_ns = time.time_ns()
     process = subprocess.Popen(command, cwd=str(vault), env=_agent_env(state, job['id']), close_fds=True,
                                creationflags=getattr(subprocess, 'CREATE_NEW_CONSOLE', 0x10))
-    job.update(agent_pid=process.pid, worker_pid=os.getpid(), started=now().isoformat(timespec='seconds'), gorunum='pencere')
+    job.update(agent_pid=process.pid, agent_identity=_agent_process_identity(process.pid), gorunum='pencere')
     _agent_json(folder / 'job.json', job)
     _agent_update_card(vault, job, 'ajanda', ajan_oturum=job.get('session_id'), ajan_asama='calisiyor')
     _agent_log(state, job['card_id'], 'Pencerede basladi: ' + job['id'] + ' (' + job['client'] + ')')
@@ -6661,32 +7033,6 @@ def _agent_run_window(vault, state, job, command):
     return _agent_finalize(vault, state, job)
 
 
-def _agent_pid_alive(pid):
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    if os.name == 'nt' and sys.platform == 'win32':
-        import ctypes as C
-        kernel = C.WinDLL('kernel32', use_last_error=True)
-        kernel.OpenProcess.argtypes, kernel.OpenProcess.restype = [C.c_uint32, C.c_int, C.c_uint32], C.c_void_p
-        kernel.GetExitCodeProcess.argtypes = [C.c_void_p, C.POINTER(C.c_uint32)]
-        kernel.CloseHandle.argtypes = [C.c_void_p]
-        handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            return C.get_last_error() != 87  # ERROR_INVALID_PARAMETER: PID is absent
-        try:
-            code = C.c_uint32()
-            return not kernel.GetExitCodeProcess(handle, C.byref(code)) or code.value == 259
-        finally:
-            kernel.CloseHandle(handle)
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except (OSError, PermissionError):
-        return True  # ambiguity is not permission to rerun effects or kill a reused PID
-
-
 def _agent_worker(vault, state):
     """Every submission starts a waiter. Holding the OS lock through the final scan avoids a lost wake-up."""
     try:
@@ -6708,11 +7054,32 @@ def _agent_worker(vault, state):
                                 pass
                     stale = [item for item in jobs if item['state'] in ('running', 'preparing')]
                     for job in stale:
-                        if job['state'] == 'running' and _agent_pid_alive(job.get('agent_pid')):
-                            _agent_log(state, job['card_id'], 'Onceki ajan sureci hala var; kuyruk guvenle durduruldu.')
-                            return 1
+                        reason = 'Onceki calisan kesildi veya surec kimligi eski; '
+                        if job['state'] == 'running' and not _agent_windowed(job['config']):
+                            import time
+                            # A replacement worker may acquire worker.lock a few milliseconds
+                            # before the orphan guardian observes EOF. Wait only for that owned
+                            # generation, never for an unrelated process reusing its PID.
+                            until = time.monotonic() + 3
+                            while True:
+                                try:
+                                    same = _agent_same_process(job.get('agent_identity'))
+                                except OSError:
+                                    # Holding worker.lock proves the old worker no longer owns it.
+                                    # An unreadable PID may now belong to a protected process:
+                                    # quarantine the old job without signalling or rerunning it.
+                                    reason = 'Onceki ajan surec kimligi dogrulanamadi; '
+                                    break
+                                if not same:
+                                    break
+                                if time.monotonic() >= until:
+                                    _agent_log(state, job['card_id'],
+                                               'Onceki ajan surec nesli hala var; kuyruk guvenle durduruldu.')
+                                    return 1
+                                time.sleep(0.1)
                         _agent_end(vault, state, job, 'approval_required',
-                                   'Onceki calisan kesildi; kismi etkiler bilinmiyor. Otomatik tekrar yapilmadi.')
+                                   reason + 'kismi etkiler bilinmiyor. '
+                                   'Araclar kapatildi, otomatik tekrar yapilmadi.')
                     queued = [item for item in jobs if item['state'] == 'queued']
                     if not queued:
                         return 0
@@ -7195,16 +7562,110 @@ def _agent_job_notes(vault, state, job):
     return _agent_checked_path(vault, parts, create=True)
 
 
-def _agent_own_note(parts, job):
-    """This job's card, its raw text, its attached files and the result notes it created."""
+def _agent_note_origin(vault, path, job):
+    """Classify an authorized note by filesystem identity, never case-folded spelling.
+
+    Path.resolve preserves POSIX case aliases. The path guard already checked any
+    captured attachment against this card's links; recognize that same store here so
+    its bytes cannot acquire the stronger vault-data label through another spelling.
+    Missing optional raw/output folders are normal; other identity errors fail closed.
+    """
     if not job:
-        return False
+        return 'vault'
+    path = Path(path)
     card = _agent_parts(job['card_path'])
-    return (parts == card or parts == card[:-1] + [RAW, job['card_id'] + '.md'] or
-            parts[:-1] in (card[:-1] + [FILES], card[:-1] + ['Ajan', job['id']]))
+    candidates = (('source', card, path),
+                  ('source', card[:-1] + [RAW, job['card_id'] + '.md'], path),
+                  ('source', card[:-1] + [FILES], path.parent),
+                  ('result', card[:-1] + ['Ajan', job['id']], path.parent))
+    for origin, parts, actual in candidates:
+        try:
+            expected = _agent_checked_path(vault, parts)
+        except FileNotFoundError:
+            continue
+        first, second = actual.stat(), expected.stat()
+        # Python guarantees an inode/file index identifies a file only when nonzero.
+        # A filesystem without identities must not give every private note own access.
+        if not first.st_ino or not second.st_ino:
+            raise ValueError('Dosya kimligi dogrulanamadi; kaynak guveni belirlenemedi.')
+        if os.path.samestat(first, second):
+            return origin
+    return 'vault'
 
 
-def _agent_safe_note(vault, path, job=None):
+def _agent_local_capture_store(path):
+    """Recognize the existing local-only marker even after cards were moved elsewhere."""
+    import stat
+    marker = Path(path) / '.gitignore'
+    try:
+        if _agent_reparse(marker):
+            return True  # Never follow a substituted privacy marker to authorize reading.
+        if not stat.S_ISREG(marker.lstat().st_mode):
+            return True
+        descriptor = os.open(marker, os.O_RDONLY | getattr(os, 'O_BINARY', 0) |
+                             getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+        with os.fdopen(descriptor, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            return stat.S_ISREG(info.st_mode) and info.st_size <= 16 and stream.read(17).strip() == b'*'
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # An unreadable existing marker cannot widen access to captured bytes.
+
+
+def _agent_capture_folder(vault, folder, job=None, state=None, cache=None, store_name=FILES):
+    """Identify a capture store by its parent, not by the ordinary word 'Dosyalar'.
+
+    Current configured/job folders are known even during a capture. Historical or moved
+    folders retain their card headers (`tur: yakala`) or existing local-only .gitignore,
+    so they stay private after the inbox setting/cards move. Inspect only bounded headers
+    in that immediate directory. No new marker is written for this classification.
+    """
+    vault, folder = Path(vault).resolve(), Path(folder)
+    if _agent_local_capture_store(folder / store_name):
+        return True
+    cache = {} if cache is None else cache
+    if folder in cache:
+        return cache[folder]
+    if 'configured' not in cache:
+        cache['configured'] = inbox(vault, state)
+    configured = cache['configured']
+    if (_same_folder(folder, configured) or
+            (job and _same_folder(folder, vault.joinpath(*_agent_parts(job['card_path'])[:-1])))):
+        cache[folder] = True
+        return True
+    import stat
+    with os.scandir(folder) as entries:
+        for count, entry in enumerate(entries, 1):
+            if count > 2048:
+                raise ValueError('Ek deposu kimligi tarama sinirinda dogrulanamadi.')
+            if (entry.name.startswith('.') or Path(entry.name).suffix.lower() != '.md' or
+                    not entry.is_file(follow_symlinks=False) or _agent_reparse(entry.path)):
+                continue
+            descriptor = os.open(entry.path, os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0))
+            with os.fdopen(descriptor, 'rb') as source:
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                    continue
+                head = source.read(4096).decode('utf-8-sig', 'replace')
+            if head.startswith(('---\n', '---\r\n')):
+                header = head.split('\n---', 1)[0]
+                if re.search(r'^tur:[ \t]*(?:"yakala"|\'yakala\'|yakala)[ \t]*\r?$', header, re.M):
+                    cache[folder] = True
+                    return True
+    cache[folder] = False
+    return False
+
+
+def _agent_attachment_store(vault, parts, job=None, state=None, cache=None):
+    for index, name in enumerate(parts[:-1]):
+        if name.casefold() == FILES.casefold():
+            folder = Path(vault).joinpath(*parts[:index])
+            if _agent_capture_folder(vault, folder, job, state, cache, store_name=name):
+                return folder / name
+    return None
+
+
+def _agent_safe_note(vault, path, job=None, *, state=None, store_cache=None):
     parts = _agent_parts(path)
     controls = ('AGENTS.md', 'CLAUDE.md', '.agents/skills/beyin-yakala/SKILL.md',
                 '.claude/skills/beyin-yakala/SKILL.md')
@@ -7233,12 +7694,14 @@ def _agent_safe_note(vault, path, job=None):
     raw = check_names(canonical) or raw
     if raw:
         _agent_read_note(_agent_checked_path(vault, card_parts), own=True)
-    # Store names are case-insensitive for policy even on case-sensitive hosts.
-    # Windows/macOS aliases such as DOSYALAR must not bypass the per-card check.
-    if any(part.casefold() == FILES.casefold() for part in (*parts, *canonical)):
+    # Check the resolved store, including Windows 8.3/case aliases, while allowing an
+    # unrelated projects/Dosyalar directory. Historical capture stores stay private.
+    store = _agent_attachment_store(vault, canonical, job, state, store_cache)
+    if store is not None:
         if not job:
             raise ValueError('Captured attachment stores are unavailable to general note search.')
-        if [part.casefold() for part in parts[:-1]] != [part.casefold() for part in card_parts[:-1] + [FILES]]:
+        if (not _same_folder(store, Path(vault).joinpath(*card_parts[:-1], FILES)) or
+                target.parent != store):
             raise ValueError('Only this card\'s attached text files are available.')
         card = _agent_checked_path(vault, card_parts)
         body = _agent_read_note(card, own=True)
@@ -7357,19 +7820,24 @@ def _agent_read_note(path, own=False):
     return text
 
 
-def _agent_note_search(vault, query):
+def _agent_note_search(vault, query, state=None):
     """Bound the scan itself, not just its answer; os.walk never follows a symlink/junction."""
     if not isinstance(query, str) or not 2 <= len(query.strip()) <= 200:
         raise ValueError('Search query must contain 2 to 200 characters.')
     needle, matches, scanned, byte_count = query.casefold().strip(), [], 0, 0
     vault = Path(vault).resolve()
+    store_cache = {}
     for directory, folders, files in os.walk(vault, followlinks=False):
         kept = []
         for name in sorted(folders):
             try:
-                if name.casefold() != FILES.casefold() and not name.startswith('.') and not _agent_private_name(name) and not _agent_reparse(Path(directory) / name):
+                if (not name.startswith('.') and not _agent_private_name(name) and
+                        not _agent_reparse(Path(directory) / name) and
+                        not (name.casefold() == FILES.casefold() and
+                             _agent_capture_folder(vault, directory, state=state, cache=store_cache,
+                                                   store_name=name))):
                     kept.append(name)
-            except OSError:
+            except (OSError, ValueError):
                 pass
         folders[:] = kept
         for name in sorted(files):
@@ -7380,7 +7848,8 @@ def _agent_note_search(vault, query):
                 return {'matches': matches, 'truncated': True, 'scanned': scanned - 1}
             path = Path(directory) / name
             try:
-                text = _agent_read_note(_agent_safe_note(vault, path.relative_to(vault).as_posix()))
+                text = _agent_read_note(_agent_safe_note(vault, path.relative_to(vault).as_posix(),
+                                                       state=state, store_cache=store_cache))
             except (OSError, ValueError, UnicodeError):
                 continue
             byte_count += len(text.encode('utf-8'))
@@ -7587,29 +8056,102 @@ def _agent_create_binary(path):
     return os.fdopen(os.open(str(path), flags, 0o600), 'wb')
 
 
+def _agent_rename_noreplace(source, target):
+    """OS-exclusive, same-directory rename; no check-then-replace or copy fallback.
+
+    Windows os.rename refuses every existing destination. Linux renameat2 uses
+    RENAME_NOREPLACE; macOS renamex_np uses RENAME_EXCL. A kernel/filesystem lacking
+    this operation must report failure, leaving the staged bytes unpublished.
+    """
+    import errno
+    if sys.platform == 'win32' and os.name == 'nt':
+        os.rename(source, target)
+        return
+    import ctypes as C
+    libc = C.CDLL(None, use_errno=True)
+    if sys.platform.startswith('linux'):
+        rename = getattr(libc, 'renameat2', None)
+        if rename is not None:
+            rename.argtypes = [C.c_int, C.c_char_p, C.c_int, C.c_char_p, C.c_uint]
+            rename.restype = C.c_int
+            result = rename(-100, os.fsencode(source), -100, os.fsencode(target), 1)
+    elif sys.platform == 'darwin':
+        rename = getattr(libc, 'renamex_np', None)
+        if rename is not None:
+            rename.argtypes = [C.c_char_p, C.c_char_p, C.c_uint]
+            rename.restype = C.c_int
+            result = rename(os.fsencode(source), os.fsencode(target), 0x4)
+    else:
+        rename = None
+    if rename is None:
+        raise OSError(errno.ENOTSUP, 'Dosya sistemi atomik, uzerine yazmadan yayini desteklemiyor.', str(target))
+    if result:
+        code = C.get_errno() or errno.EIO
+        raise OSError(code, os.strerror(code), str(target))
+
+
+def _agent_publish_file(source, target, identity):
+    """Publish a fully flushed private file atomically, without replacing any destination.
+
+    Hard links remain the portable first choice. Filesystems such as FAT/exFAT use
+    their OS's exclusive rename instead. Permission, quota and disk errors do not
+    silently become a second write strategy. Callers retain/clean only their own source.
+    """
+    import errno
+    import stat
+    source, target = Path(source), Path(target)
+    _agent_no_links(source)
+    _agent_no_links(target)
+    if source.parent != target.parent:
+        raise ValueError('Atomik yayin ayni klasordeki gecici dosyayi gerektirir.')
+    info = source.lstat()
+    if not stat.S_ISREG(info.st_mode) or identity != (info.st_dev, info.st_ino):
+        raise ValueError('Gecici yayin dosyasi degisti; sonuc yayimlanmadi.')
+    unsupported = {errno.ENOSYS, errno.EINVAL, errno.EPERM, errno.EXDEV,
+                   errno.ENOTSUP, getattr(errno, 'EOPNOTSUPP', errno.ENOTSUP)}
+    try:
+        os.link(source, target, follow_symlinks=False)
+    except (OSError, NotImplementedError) as exc:
+        if isinstance(exc, OSError) and exc.errno not in unsupported and getattr(exc, 'winerror', None) not in (1, 50):
+            raise
+        # Revalidate after the failed link; both rename variants reject an existing
+        # destination in the operation itself, including one created concurrently.
+        _agent_no_links(source)
+        _agent_no_links(target)
+        info = source.lstat()
+        if identity != (info.st_dev, info.st_ino) or not stat.S_ISREG(info.st_mode):
+            raise ValueError('Gecici yayin dosyasi degisti; sonuc yayimlanmadi.')
+        _agent_rename_noreplace(source, target)
+    if os.name != 'nt':
+        directory = os.open(target.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
 def _agent_create_bytes(path, data):
     """Publish one complete, durable snapshot without ever replacing an existing name.
 
-    The same-directory hard link is the commit point. If the filesystem cannot provide
-    create-only publication, fail closed instead of exposing a partial result.json.
+    The hard link or OS-exclusive rename is the commit point. If neither is supported,
+    fail closed instead of exposing a partial result.json or replacing another writer.
     """
-    path = Path(path)
+    path = _agent_no_links(Path(path))
     descriptor, temporary = tempfile.mkstemp(prefix='.ajan-new-', dir=path.parent)
+    identity = None
     try:
         with os.fdopen(descriptor, 'wb') as handle:
+            info = os.fstat(handle.fileno())
+            identity = (info.st_dev, info.st_ino)
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        os.link(temporary, path, follow_symlinks=False)
-        if os.name != 'nt':
-            directory = os.open(path.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+        _agent_publish_file(temporary, path, identity)
     finally:
         try:
-            os.unlink(temporary)
+            info = Path(temporary).lstat()
+            if identity == (info.st_dev, info.st_ino) and not _agent_reparse(temporary):
+                os.unlink(temporary)
         except FileNotFoundError:
             pass
 
@@ -7807,16 +8349,41 @@ def _agent_record_source_urls(vault, state, job, fetched):
     _agent_json(folder / 'source-urls.json', manifest)
 
 
-def _agent_tool_definitions():
+_AGENT_NETWORK_CALLS = 8  # fetch_source and download share one durable, per-job allowance
+
+
+def _agent_spend_network_call(vault, state, job):
+    """Reserve before I/O, under tools.lock; failures and bridge restarts do not refund it."""
+    folder = _agent_job_folder(vault, state, job['id'])
+    try:
+        path = _agent_checked_path(folder, ['network-budget.json'])
+    except FileNotFoundError:
+        used = 0
+    else:
+        budget = json.loads(_agent_read_text(path))
+        if (not isinstance(budget, dict) or budget.get('schema') != 1 or budget.get('job_id') != job['id'] or
+                type(budget.get('used')) is not int or not 0 <= budget['used'] <= _AGENT_NETWORK_CALLS):
+            raise ValueError('Ajan ag cagri sayaci gecersiz; ag erisimi kapatildi.')
+        used = budget['used']
+    if used >= _AGENT_NETWORK_CALLS:
+        raise ValueError('Bu isin %d ag cagri hakki doldu; complete ile onay iste.' % _AGENT_NETWORK_CALLS)
+    _agent_json(folder / 'network-budget.json', {'schema': 1, 'job_id': job['id'], 'used': used + 1})
+
+
+def _agent_tool_definitions(config=None):
     string = {'type': 'string'}
+    source_rule = ('Public HTTP(S) URLs are allowed. Never put private vault data into a URL.'
+                   if _agent_open_network(config or {}) else
+                   'Only the exact captured URL or links returned by an authorized source; no model-created URLs.')
+    budget = ' Fetch and download share at most %d calls per job, including failures.' % _AGENT_NETWORK_CALLS
     specs = (
         ('read_note', 'Read a bounded vault Markdown/text note; hidden/secret files and links are refused.',
          {'path': string}, ['path'], True, False),
         ('search_notes', 'Search visible Markdown notes, at most 30 results and a bounded scan.',
          {'query': string}, ['query'], True, False),
-        ('fetch_source', 'Fetch the exact captured URL or a link returned by an authorized source. No model-created URLs.',
+        ('fetch_source', 'Fetch bounded public source text. ' + source_rule + budget,
          {'url': string}, ['url'], True, True),
-        ('download', 'Stage an exact authorized source URL; create-only media/text/PDF, at most 50 MiB, never execute.',
+        ('download', 'Stage create-only media/text/PDF, at most 50 MiB, never execute. ' + source_rule + budget,
          {'url': string, 'filename': string}, ['url', 'filename'], False, True),
         ('write_note', 'Create one new job-owned result note. Cannot edit, overwrite or delete an existing note.',
          {'title': string, 'content': string}, ['title', 'content'], False, False),
@@ -7835,10 +8402,24 @@ def _agent_tool_definitions():
 
 
 def _agent_tool_call(vault, state, job_id, name, arguments):
+    # One cross-process lock covers authorization, quota reservation and completion. Separate
+    # MCP connections cannot overspend or start a write after another connection completed.
+    folder = _agent_job_folder(vault, state, job_id)
+    with _AgentFileLock(folder / 'tools.lock'):
+        value = _agent_dispatch_tool(vault, state, job_id, name, arguments)
+        if name != 'complete':
+            # Especially important for visible Windows sessions, whose console survives its
+            # worker: do not return newly read data after an in-flight operation lost authority.
+            _agent_require_live_job(_agent_load_job(vault, state, job_id))
+        # complete only acknowledges a submitted snapshot. The worker may already have
+        # consumed it and closed this job; do not turn that valid acknowledgement into an error.
+        return value
+
+
+def _agent_dispatch_tool(vault, state, job_id, name, arguments):
     job = _agent_load_job(vault, state, job_id)
-    if job.get('state') != 'running':
-        raise ValueError('This job is not running; its tools are no longer available.')
-    specifications = {item['name']: item['inputSchema'] for item in _agent_tool_definitions()}
+    _agent_require_live_job(job)
+    specifications = {item['name']: item['inputSchema'] for item in _agent_tool_definitions(job.get('config'))}
     if not isinstance(name, str) or name not in specifications or not isinstance(arguments, dict):
         raise ValueError('Unknown tool or invalid argument object.')
     schema = specifications[name]
@@ -7855,16 +8436,20 @@ def _agent_tool_call(vault, state, job_id, name, arguments):
         raise ValueError('This exact URL is not authorized. Use the captured URL or a returned source link; '
                          'otherwise complete with approval_required. Do not encode vault text into URLs.')
     if name == 'read_note':
-        path = _agent_safe_note(vault, arguments['path'], job)
-        own = _agent_own_note(_agent_parts(arguments['path']), job)
-        return {'path': arguments['path'], 'text': _agent_read_note(path, own=own), 'source_trust': 'vault-data'}
+        path = _agent_safe_note(vault, arguments['path'], job, state=state)
+        origin = _agent_note_origin(vault, path, job)
+        return {'path': arguments['path'], 'text': _agent_read_note(path, own=origin != 'vault'),
+                'source_trust': 'untrusted' if origin == 'source' else 'vault-data'}
     if name == 'search_notes':
-        return _agent_note_search(vault, arguments['query'])
+        return _agent_note_search(vault, arguments['query'], state=state)
     if name == 'fetch_source':
+        _agent_spend_network_call(vault, state, job)
         fetched = _agent_fetch_source(arguments['url'])
+        _agent_require_live_job(_agent_load_job(vault, state, job_id))
         _agent_record_source_urls(vault, state, job, fetched)
         return fetched
     if name == 'download':
+        _agent_spend_network_call(vault, state, job)
         return _agent_download(vault, state, job, **arguments)
     if name == 'write_note':
         return _agent_write_note(vault, state, job, **arguments)
@@ -7877,7 +8462,7 @@ def _agent_mcp_main(vault, state, job_id):
     MCP 2024-11-05/2025-03-26/2025-06-18 stdio framing, initialization and tools/call.
     No sampling, elicitation, roots, HTTP listener, general shell or arbitrary filesystem tool.
     """
-    _agent_load_job(vault, state, job_id)  # fail before publishing any capability for an unknown job
+    _agent_require_live_job(_agent_load_job(vault, state, job_id))
     incoming = getattr(sys.stdin, 'buffer', sys.stdin)
     outgoing = getattr(sys.stdout, 'buffer', sys.stdout)
     if incoming is None or outgoing is None:
@@ -7928,6 +8513,11 @@ def _agent_mcp_main(vault, state, job_id):
             if not error(identifier, -32602, 'Parameters must be an object.'):
                 return 1
             continue
+        try:
+            _agent_require_live_job(_agent_load_job(vault, state, job_id))
+        except (OSError, ValueError) as exc:
+            error(identifier, -32000, str(exc)[:500])
+            return 1
         if method == 'ping':
             result = {}
         elif method == 'initialize':
@@ -7946,7 +8536,8 @@ def _agent_mcp_main(vault, state, job_id):
                 return 1
             continue
         elif method == 'tools/list':
-            result = {'tools': _agent_tool_definitions()}
+            job = _agent_load_job(vault, state, job_id)
+            result = {'tools': _agent_tool_definitions(job.get('config'))}
         elif method == 'tools/call':
             if (not isinstance(params.get('name'), str) or
                     params['name'] not in {item['name'] for item in _agent_tool_definitions()} or
@@ -8096,6 +8687,8 @@ def main(argv=None, vault=None, state=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
     if len(arguments) == 2 and arguments[0] == '_win-read':
         return _windows_reader_main(arguments[1])
+    if len(arguments) == 3 and arguments[0] == '_ajan-guard':
+        return _agent_guard_main(int(arguments[1]), int(arguments[2]))
     def shared(default):
         # Subcommands must not reset a --vault/--json given before them, hence SUPPRESS there.
         common = argparse.ArgumentParser(add_help=False)
