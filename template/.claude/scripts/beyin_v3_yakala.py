@@ -7146,7 +7146,10 @@ def _agent_read_note(path, own=False):
                     raise ValueError('Unsupported frontmatter cannot be safely read in the background.')
                 key, raw = match.groups()
                 key = _agent_yaml_scalar(key)
-                if key.casefold().replace('\u0307', '') in ('remote_allowed', 'sensitivity', 'kaynak_guveni'):
+                # visibility too: _dump writes `visibility: "private"`, and a quoted or commented
+                # value read raw would never equal 'private' below.
+                if key.casefold().replace('\u0307', '') in ('remote_allowed', 'sensitivity', 'kaynak_guveni',
+                                                            'visibility'):
                     value = _agent_yaml_scalar(raw)
                 else:
                     # Non-policy flat metadata can contain the JSON arrays emitted by _dump.

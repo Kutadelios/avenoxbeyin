@@ -1858,12 +1858,20 @@ class AgentBridgeFilesTest(unittest.TestCase):
     def test_private_notes_stay_out_except_this_jobs_own_card_raw_and_results(self):
         # Hook context never shows `visibility: private` (audience "internal"); neither may a job
         # that also has public fetch and web search. Its own card and outputs stay readable.
-        canary = 'private-diary-canary'
-        self.note('knowledge/gunluk.md', '---\nvisibility: private\n---\n' + canary)
-        self.note('knowledge/gunluk-json.md', '---\n{"visibility": "private"}\n---\n' + canary)
-        other = yakala.capture(self.vault, text='Baska bir pano metni ' + canary, why='Baska is', state=self.state)
-        for path in ('knowledge/gunluk.md', 'knowledge/gunluk-json.md', other['path']):
-            with self.subTest(path=path), self.assertRaises(ValueError):
+        # Names carry no kasa-class word, so only the visibility gate can refuse these. Quoted and
+        # commented forms included: capture's own _dump writes `visibility: "private"`.
+        canary = 'gunluk-izi-canary'
+        headers = {'plain': 'visibility: private', 'double': 'visibility: "private"',
+                   'single': "visibility: 'private'", 'comment': 'visibility: private # yalniz yerel',
+                   'json': '{"visibility": "private"}'}
+        paths = []
+        for name, header in headers.items():
+            paths.append('knowledge/gunluk-%s.md' % name)
+            self.note(paths[-1], '---\n' + header + '\n---\n' + canary)
+        other = yakala.capture(self.vault, text='Alisveris listesi ' + canary, why='Baska is', state=self.state)
+        self.assertIn('visibility: "private"', (self.vault / other['path']).read_text(encoding='utf-8'))
+        for path in paths + [other['path']]:
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'visibility: private'):
                 self.call('read_note', path=path)
         self.assertEqual(self.call('search_notes', query=canary)['matches'], [])
         own = yakala.capture(self.vault, text='Bu isin pano metni', why='Ozetle', state=self.state)
