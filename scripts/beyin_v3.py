@@ -503,7 +503,38 @@ def hook_reconcile(vault: Path, state: Path, force: bool = False) -> dict:
             "message": "No installed hooks found to reconcile.",
         }
 
-    if paths_report.get("status") != "stale" and not force:
+    expected_state = str(state.resolve())
+    runtime_stale = False
+    runtime_path = vault / ".beyin-runtime.json"
+    if runtime_path.is_file():
+        _local_hook_file(vault, runtime_path)
+        try:
+            rdata = json.loads(runtime_path.read_text(encoding="utf-8"))
+            if isinstance(rdata, dict) and rdata.get("state") != expected_state:
+                runtime_stale = True
+        except (OSError, ValueError):
+            pass
+
+    launchers_stale = False
+    planned_launchers = {}
+    launcher_script = vault / ".claude/scripts/beyin_v3_launchers.py"
+    if launcher_script.is_file():
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("beyin_reconcile_launchers", launcher_script)
+            lmod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(lmod)
+            planned_launchers = lmod.plan_launchers(vault, state)
+            for lname, lbytes in planned_launchers.items():
+                lpath = vault / lname
+                if lpath.is_file():
+                    _local_hook_file(vault, lpath)
+                    if lpath.read_bytes() != lbytes:
+                        launchers_stale = True
+        except Exception:
+            pass
+
+    if paths_report.get("status") != "stale" and not force and not runtime_stale and not launchers_stale:
         return {
             "status": "ok",
             "checked": paths_report.get("checked", 0),
@@ -648,6 +679,69 @@ def hook_reconcile(vault: Path, state: Path, force: bool = False) -> dict:
             })
             total_reconciled += file_reconciled
 
+    if runtime_path.is_file() and (runtime_stale or force):
+        try:
+            original_bytes = runtime_path.read_bytes()
+            rdata = json.loads(original_bytes.decode("utf-8"))
+            old_state = rdata.get("state", "")
+            if old_state != expected_state or force:
+                rdata["state"] = expected_state
+                target_bytes = (json.dumps(rdata, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+                if runtime_path.read_bytes() != original_bytes:
+                    raise RuntimeError("Runtime configuration changed during reconciliation; preserved")
+                backup_path = _backup_hook_file(runtime_path, original_bytes)
+                _local_hook_file(vault, runtime_path)
+                if runtime_path.read_bytes() != original_bytes:
+                    raise RuntimeError("Runtime configuration changed after backup; preserved")
+                runtime_path.write_bytes(target_bytes)
+                reconciled_originals[".beyin-runtime.json"] = original_bytes
+                reconciled_files.append({
+                    "file": ".beyin-runtime.json",
+                    "backup": str(backup_path.relative_to(vault).as_posix()),
+                    "reconciled": 1,
+                    "changes": [{
+                        "event": "runtime_state",
+                        "old_command": str(old_state),
+                        "new_command": expected_state,
+                        "old_summary": str(old_state),
+                        "new_summary": expected_state,
+                    }],
+                })
+                total_reconciled += 1
+        except (OSError, ValueError, UnicodeError):
+            pass
+
+    for lname, expected_bytes in planned_launchers.items():
+        lpath = vault / lname
+        if not lpath.is_file():
+            continue
+        try:
+            original_bytes = lpath.read_bytes()
+            if original_bytes != expected_bytes or force:
+                if lpath.read_bytes() != original_bytes:
+                    raise RuntimeError("Launcher changed during reconciliation; preserved")
+                backup_path = _backup_hook_file(lpath, original_bytes)
+                _local_hook_file(vault, lpath)
+                if lpath.read_bytes() != original_bytes:
+                    raise RuntimeError("Launcher changed after backup; preserved")
+                lpath.write_bytes(expected_bytes)
+                reconciled_originals[lname] = original_bytes
+                reconciled_files.append({
+                    "file": lname,
+                    "backup": str(backup_path.relative_to(vault).as_posix()),
+                    "reconciled": 1,
+                    "changes": [{
+                        "event": "launcher",
+                        "old_command": "",
+                        "new_command": "",
+                        "old_summary": lname,
+                        "new_summary": lname,
+                    }],
+                })
+                total_reconciled += 1
+        except OSError:
+            pass
+
     manifest_path = state / "v3-install.json"
     if manifest_path.is_file() and (all_new_commands or reconciled_files):
         try:
@@ -663,7 +757,10 @@ def hook_reconcile(vault: Path, state: Path, force: bool = False) -> dict:
                     baseline = base64.b64decode(files[name].get("installed_content") or "")
                     original = reconciled_originals.get(name, b"")
                     # Never adopt user edits as installer-owned content.
-                    if file_path.is_file() and baseline.replace(b"\r\n", b"\n") == original.replace(b"\r\n", b"\n"):
+                    adopt = (baseline.replace(b"\r\n", b"\n") == original.replace(b"\r\n", b"\n")
+                             or name == ".beyin-runtime.json"
+                             or name in planned_launchers)
+                    if file_path.is_file() and adopt:
                         file_bytes = file_path.read_bytes()
                         files[name]["installed_hash"] = hashlib.sha256(file_bytes).hexdigest()
                         files[name]["installed_content"] = base64.b64encode(file_bytes).decode("ascii")
@@ -882,6 +979,14 @@ def parser():
     ingest_server.add_argument("--host", default="127.0.0.1", help="Host interface to bind (default 127.0.0.1)")
     ingest_server.add_argument("--port", type=int, default=8484, help="Port to listen on (default 8484)")
     ingest_server.add_argument("--token", help="Optional Bearer token for authentication")
+    bridge = sub.add_parser("bridge", help="Manage global lifecycle bridge configuration")
+    bridge.add_argument("--harness", choices=("claude", "codex", "antigravity"), required=True)
+    bridge.add_argument("--project-root", type=Path, action="append", help="Project root to bridge (repeatable)")
+    bridge.add_argument("--install", action="store_true", help="Install global bridge hooks")
+    bridge.add_argument("--uninstall", action="store_true", help="Uninstall global bridge hooks")
+    bridge.add_argument("--print-config", action="store_true", help="Print global hook JSON without installing")
+    bridge.add_argument("--event", choices=("SessionStart", "Stop", "PreCompact", "SessionEnd"), action="append")
+    bridge.add_argument("--context-chars", type=int, default=1500)
     return root
 
 
@@ -927,10 +1032,42 @@ def main(argv=None, return_result=False):
         if read_only_context and args.jev:
             raise ValueError("context --no-sync cannot be combined with --jev")
         # The advisor switch reads and writes one small file; it needs no index or sync engine.
-        engine = load_engine() if args.command not in ("jev", "project-scope", "ingest-server") else None
+        engine = load_engine() if args.command not in ("jev", "project-scope", "ingest-server", "bridge") else None
         store = engine.MemoryStore(state, vault, read_only=read_only_context) if engine else None
         sync = load_sync()(vault, state) if args.command in ("sync", "recover-views", "recap", "receipt", "task-update", "note-create", "task-create", "context", "jev-review", "jev-answer", "jev-memory", "history") and not read_only_context else None
-        if args.command == "ingest-server":
+        if args.command == "bridge":
+            if sum([bool(args.print_config), bool(args.install), bool(args.uninstall)]) > 1:
+                argument_parser.error("--print-config, --install, and --uninstall are mutually exclusive")
+            _ensure_scripts_path()
+            import beyin_v3_bridge as bridge_mod
+            events = list(dict.fromkeys(args.event or bridge_mod.EVENTS))
+            if args.harness == "antigravity":
+                events = [e for e in events if e in bridge_mod.ANTIGRAVITY.values()]
+                if not events:
+                    argument_parser.error("Antigravity offers only SessionStart and Stop")
+            if args.uninstall:
+                result = bridge_mod.uninstall_bridge(args.harness)
+            elif args.install:
+                if not args.project_root:
+                    argument_parser.error("--project-root is required with --install")
+                roots = [p.expanduser().resolve() for p in args.project_root]
+                result = bridge_mod.install_bridge(vault, state, args.harness, roots, events, args.context_chars)
+            elif args.print_config:
+                if not args.project_root:
+                    argument_parser.error("--project-root is required with --print-config")
+                roots = [p.expanduser().resolve() for p in args.project_root]
+                bridge_args = ["--vault", str(vault), "--state", str(state), "--harness", args.harness,
+                               "--context-chars", str(args.context_chars), "--print-config"]
+                for r in roots: bridge_args.extend(["--project-root", str(r)])
+                for e in events: bridge_args.extend(["--event", e])
+                return bridge_mod.main(bridge_args)
+            else:
+                argument_parser.error("specify one of --install, --uninstall, or --print-config")
+            if return_result:
+                return result, 0
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        elif args.command == "ingest-server":
             _ensure_scripts_path()
             import beyin_v3_ingest_server
             beyin_v3_ingest_server.run_server(vault, host=args.host, port=args.port, token=args.token)

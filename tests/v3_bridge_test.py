@@ -509,6 +509,97 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(self.raw(cut), {})
         self.assertEqual(len(self.queued()), 1)
 
+    def test_bridge_install_and_uninstall_antigravity(self):
+        gemini_dir = self.home / '.gemini/config'
+        gemini_dir.mkdir(parents=True, exist_ok=True)
+        hooks_json = gemini_dir / 'hooks.json'
+        hooks_json.write_text(json.dumps({'custom-hook': {'PreInvocation': [{'type': 'command', 'command': 'echo custom'}]}}), encoding='utf-8')
+        gemini_md = gemini_dir / 'GEMINI.md'
+        gemini_md.write_text("# Existing Instructions\nKeep this rule safe.\n", encoding='utf-8')
+
+        # Install bridge
+        res = bridge.install_bridge(self.vault, self.state, 'antigravity', [self.project], home=self.home)
+        self.assertEqual(res['status'], 'installed')
+        self.assertEqual(res['harness'], 'antigravity')
+
+        # Verify hooks.json has beyin-v3-bridge AND preserved custom-hook
+        data = json.loads(hooks_json.read_text(encoding='utf-8'))
+        self.assertIn('beyin-v3-bridge', data)
+        self.assertIn('custom-hook', data)
+        self.assertTrue((gemini_dir / 'hooks.json.bak').is_file())
+
+        # Verify GEMINI.md has pointer and preserved custom rule
+        md_text = gemini_md.read_text(encoding='utf-8')
+        self.assertIn('<!-- beyin-v3-bridge:start -->', md_text)
+        self.assertIn(str(self.vault), md_text)
+        self.assertIn('Keep this rule safe.', md_text)
+        self.assertTrue((gemini_dir / 'GEMINI.md.bak').is_file())
+
+        # Idempotent install: run again, verify content is preserved and no extra backups
+        res2 = bridge.install_bridge(self.vault, self.state, 'antigravity', [self.project], home=self.home)
+        self.assertEqual(res2['status'], 'installed')
+        self.assertFalse((gemini_dir / 'hooks.json.bak.1').exists())
+
+        # Uninstall bridge
+        un_res = bridge.uninstall_bridge('antigravity', home=self.home)
+        self.assertEqual(un_res['status'], 'uninstalled')
+        self.assertGreaterEqual(un_res['removed_count'], 1)
+
+        # Verify hooks.json no longer has beyin-v3-bridge but still has custom-hook
+        data_after = json.loads(hooks_json.read_text(encoding='utf-8'))
+        self.assertNotIn('beyin-v3-bridge', data_after)
+        self.assertIn('custom-hook', data_after)
+
+        # Verify GEMINI.md no longer has pointer block but still has custom rule
+        md_after = gemini_md.read_text(encoding='utf-8')
+        self.assertNotIn('<!-- beyin-v3-bridge:start -->', md_after)
+        self.assertIn('Keep this rule safe.', md_after)
+
+    def test_bridge_install_and_uninstall_claude_and_codex(self):
+        for harness, rel_path in (('claude', '.claude/settings.json'), ('codex', '.codex/hooks.json')):
+            target = self.home / rel_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({'hooks': {'SessionStart': [{'hooks': [{'type': 'command', 'command': 'echo custom'}]}]}}), encoding='utf-8')
+
+            res = bridge.install_bridge(self.vault, self.state, harness, [self.project], home=self.home)
+            self.assertEqual(res['status'], 'installed')
+            self.assertTrue(target.with_name(target.name + '.bak').is_file())
+
+            data = json.loads(target.read_text(encoding='utf-8'))
+            cmds = [h['command'] for g in data['hooks']['SessionStart'] for h in g['hooks']]
+            self.assertIn('echo custom', cmds)
+            self.assertTrue(any('beyin_v3_bridge.py' in cmd or 'beyin_v3_bridge.py' in bridge._decoded_command(cmd) for cmd in cmds))
+
+            un_res = bridge.uninstall_bridge(harness, home=self.home)
+            self.assertEqual(un_res['status'], 'uninstalled')
+            data_after = json.loads(target.read_text(encoding='utf-8'))
+            cmds_after = [h['command'] for g in data_after.get('hooks', {}).get('SessionStart', []) for h in g['hooks']]
+            self.assertIn('echo custom', cmds_after)
+            self.assertFalse(any('beyin_v3_bridge.py' in cmd or 'beyin_v3_bridge.py' in bridge._decoded_command(cmd) for cmd in cmds_after))
+
+    def test_bridge_cli_subprocess_and_mutual_exclusion(self):
+        # Mutual exclusion
+        cmd = [sys.executable, str(SCRIPTS / 'beyin_v3_bridge.py'), '--vault', str(self.vault),
+               '--harness', 'antigravity', '--project-root', str(self.project), '--install', '--uninstall']
+        res = subprocess.run(cmd, capture_output=True, text=True, env=self.env, cwd=self.project)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn('mutually exclusive', res.stderr)
+
+        # CLI install
+        cmd_install = [sys.executable, str(SCRIPTS / 'beyin_v3_bridge.py'), '--vault', str(self.vault),
+                       '--state', str(self.state), '--harness', 'antigravity', '--project-root', str(self.project), '--install']
+        res_inst = subprocess.run(cmd_install, capture_output=True, text=True, env=self.env, cwd=self.project)
+        self.assertEqual(res_inst.returncode, 0, res_inst.stderr)
+        data = json.loads(res_inst.stdout)
+        self.assertEqual(data['status'], 'installed')
+
+        # CLI uninstall
+        cmd_uninst = [sys.executable, str(SCRIPTS / 'beyin_v3_bridge.py'), '--harness', 'antigravity', '--uninstall']
+        res_uninst = subprocess.run(cmd_uninst, capture_output=True, text=True, env=self.env, cwd=self.project)
+        self.assertEqual(res_uninst.returncode, 0, res_uninst.stderr)
+        data_un = json.loads(res_uninst.stdout)
+        self.assertEqual(data_un['status'], 'uninstalled')
+
 
 if __name__ == '__main__':
     unittest.main()

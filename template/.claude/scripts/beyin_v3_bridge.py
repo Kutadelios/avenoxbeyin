@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -213,22 +214,311 @@ def shell_command(argv):
     return subprocess.list2cmdline([launcher]) + ' -NoProfile -NonInteractive -EncodedCommand ' + encoded
 
 
+def global_hook_path(harness, home=None):
+    if home is not None:
+        base = Path(home).resolve()
+        if harness == 'antigravity':
+            return base / '.gemini/config/hooks.json'
+        elif harness == 'codex':
+            return base / '.codex/hooks.json'
+        elif harness == 'claude':
+            return base / '.claude/settings.json'
+        else:
+            raise ValueError(f'Unsupported harness: {harness}')
+    if harness == 'antigravity':
+        return Path.home().resolve() / '.gemini/config/hooks.json'
+    elif harness == 'codex':
+        custom = os.environ.get('CODEX_HOME')
+        return Path(custom).resolve() / 'hooks.json' if custom else Path.home().resolve() / '.codex/hooks.json'
+    elif harness == 'claude':
+        custom = os.environ.get('CLAUDE_CONFIG_DIR')
+        return Path(custom).resolve() / 'settings.json' if custom else Path.home().resolve() / '.claude/settings.json'
+    else:
+        raise ValueError(f'Unsupported harness: {harness}')
+
+
+def global_gemini_md_path(home=None):
+    base = Path(home).resolve() if home is not None else Path.home().resolve()
+    return base / '.gemini/config/GEMINI.md'
+
+
+def gemini_md_content(vault):
+    vault = Path(vault).resolve()
+    beyin_py = vault / 'beyin.py'
+    return (
+        "<!-- beyin-v3-bridge:start -->\n"
+        "## İkinci Beyin & Global Hafıza Bağlantısı (Single Source of Truth)\n"
+        f"Vault konumu: `{vault}`\n"
+        "Hangi projede veya dizinde çalışırsan çalış; kullanıcı \"ikinci beynim\", \"kurallarımı hatırla\", "
+        "\"geçmiş oturum/kararlar\" veya \"beynime kaydet\" dediğinde doğrudan bu dizini ve aşağıdaki dosyaları referans al:\n"
+        "- `🔮 850-Companion/Core.md`: Kimlik, hitap tarzı, düşünme ortağı rolü ve temel teknoloji yığını.\n"
+        "- `🔮 850-Companion/Kurallar.md`: Kesin çalışma kuralları.\n"
+        "- `🔮 850-Companion/Last-Session.md`: En son oturumun devir kartı, nerede kalındığı ve açık adımlar.\n"
+        "- `🔮 850-Companion/Threads.md`: Aktif ve kapanan konular, iş takip listesi.\n"
+        "- `🔮 850-Companion/Journal.md`: Gözlemler, öğrenimler ve açık sorular.\n\n"
+        "### Hafıza Arama ve Kayıt Kuralları:\n"
+        "1. Geniş hafıza veya bilgi notu (`knowledge/`) aramaları için:\n"
+        f"   Terminalde `python \"{beyin_py}\" context \"<arama terimi>\"` komutunu çalıştırabilirsin.\n"
+        "2. Kullanıcı yeni bir kural veya tercih belirttiğinde, beklemeden `🔮 850-Companion/Kurallar.md` dosyasını güncelle.\n"
+        f"3. Anlamlı bir iş bittiğinde `Last-Session.md` devir kartını güncelle ve `python \"{beyin_py}\" receipt` ile kaydet.\n"
+        "<!-- beyin-v3-bridge:end -->"
+    )
+
+
+def _backup_file(path):
+    if not path.is_file():
+        return None
+    raw = path.read_bytes()
+    index = 0
+    while True:
+        backup = path.with_name(path.name + '.bak' + ('.' + str(index) if index else ''))
+        try:
+            with backup.open('xb') as out:
+                out.write(raw)
+                out.flush()
+                os.fsync(out.fileno())
+            return backup
+        except FileExistsError:
+            index += 1
+
+
+def _decoded_command(command):
+    if not isinstance(command, str):
+        return ""
+    match = re.search(r"-EncodedCommand\s+([A-Za-z0-9+/=]+)", command, re.IGNORECASE)
+    if match:
+        try:
+            return base64.b64decode(match.group(1)).decode("utf-16le")
+        except Exception:
+            pass
+    return command
+
+
+def update_gemini_md(vault, home=None):
+    gemini_path = global_gemini_md_path(home=home)
+    gemini_path.parent.mkdir(parents=True, exist_ok=True)
+    block = gemini_md_content(vault)
+    pattern = r"(?:\r?\n)*<!-- beyin-v3-bridge:start -->.*?<!-- beyin-v3-bridge:end -->(?:\r?\n)*"
+    if gemini_path.is_file():
+        original = gemini_path.read_text(encoding="utf-8")
+        if re.search(pattern, original, flags=re.S):
+            new_content = re.sub(pattern, lambda m: "\n\n" + block + "\n\n", original, flags=re.S).strip() + "\n"
+        else:
+            new_content = (original.rstrip() + "\n\n" + block + "\n").lstrip()
+        if original.strip() != new_content.strip():
+            _backup_file(gemini_path)
+            gemini_path.write_text(new_content, encoding="utf-8")
+    else:
+        new_content = block + "\n"
+        gemini_path.write_text(new_content, encoding="utf-8")
+    return gemini_path
+
+
+def remove_gemini_md(home=None):
+    gemini_path = global_gemini_md_path(home=home)
+    if not gemini_path.is_file():
+        return 0
+    original = gemini_path.read_text(encoding="utf-8")
+    pattern = r"(?:\r?\n)*<!-- beyin-v3-bridge:start -->.*?<!-- beyin-v3-bridge:end -->(?:\r?\n)*"
+    if not re.search(pattern, original, flags=re.S):
+        return 0
+    _backup_file(gemini_path)
+    new_content = re.sub(pattern, "\n\n", original, flags=re.S).strip()
+    if new_content:
+        gemini_path.write_text(new_content + "\n", encoding="utf-8")
+    else:
+        gemini_path.unlink()
+    return 1
+
+
+def install_bridge(vault, state, harness, roots, events=None, context_chars=1500, home=None):
+    vault = Path(vault).expanduser().resolve()
+    if not vault.is_dir() or not 0 <= context_chars <= 4000:
+        raise ValueError('Invalid vault or context budget')
+    state = Path(state).expanduser().resolve()
+    if not state.is_absolute() or state.is_relative_to(vault):
+        raise ValueError('Runtime state must be absolute and outside vault')
+    roots = [Path(p).expanduser().resolve() for p in roots]
+    if not roots or any(not p.is_dir() for p in roots):
+        raise ValueError('Project roots must exist')
+    events = list(dict.fromkeys(events or EVENTS))
+    if harness == 'antigravity':
+        events = [event for event in events if event in ANTIGRAVITY.values()]
+        if not events:
+            raise ValueError('Antigravity offers only SessionStart and Stop')
+    elif harness not in ('claude', 'codex'):
+        raise ValueError(f'Unsupported harness: {harness}')
+
+    target = global_hook_path(harness, home=home)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    bridge_script = Path(__file__).resolve()
+    command = [sys.executable, str(bridge_script), '--vault', str(vault),
+               '--state', str(state), '--harness', harness, '--context-chars', str(context_chars)]
+    for root in roots:
+        command.extend(['--project-root', str(root)])
+    for event in events:
+        command.extend(['--event', event])
+
+    data = {}
+    if target.is_file():
+        try:
+            data = json.loads(target.read_text(encoding='utf-8'))
+            if not isinstance(data, dict):
+                data = {}
+        except Exception:
+            data = {}
+
+    if harness == 'antigravity':
+        data['beyin-v3-bridge'] = {
+            native: [{
+                'type': 'command',
+                'command': shell_command(command + ['--native-event', native]),
+                'timeout': 20 if os.name == 'nt' else 5
+            }]
+            for native, ev in ANTIGRAVITY.items() if ev in events
+        }
+    else:
+        shell = shell_command(command)
+        hooks_map = data.setdefault('hooks', {})
+        for event in events:
+            groups = hooks_map.setdefault(event, [])
+            cleaned_groups = []
+            for grp in groups:
+                if not isinstance(grp, dict):
+                    cleaned_groups.append(grp)
+                    continue
+                handlers = grp.get('hooks', [grp]) if 'hooks' in grp else [grp]
+                rem = [h for h in handlers if isinstance(h, dict) and 'beyin_v3_bridge.py' not in h.get('command', '')
+                       and 'beyin_v3_bridge.py' not in _decoded_command(h.get('command', ''))]
+                if rem:
+                    if 'hooks' in grp:
+                        cleaned_groups.append(dict(grp, hooks=rem))
+                    else:
+                        cleaned_groups.extend(rem)
+            timeout = 3 if event == 'SessionEnd' else (20 if os.name == 'nt' else 5)
+            cleaned_groups.append({'hooks': [{'type': 'command', 'command': shell, 'timeout': timeout}]})
+            hooks_map[event] = cleaned_groups
+
+    new_bytes = (json.dumps(data, indent=2, ensure_ascii=False) + '\n').encode('utf-8')
+    if not target.is_file() or target.read_bytes() != new_bytes:
+        _backup_file(target)
+        target.write_bytes(new_bytes)
+
+    gemini_path = None
+    if harness == 'antigravity':
+        gemini_path = update_gemini_md(vault, home=home)
+
+    return {
+        'status': 'installed',
+        'harness': harness,
+        'hook_file': str(target),
+        'gemini_md': str(gemini_path) if gemini_path else None,
+        'events': events,
+        'project_roots': [str(r) for r in roots],
+    }
+
+
+def uninstall_bridge(harness, home=None):
+    if harness not in ('claude', 'codex', 'antigravity'):
+        raise ValueError(f'Unsupported harness: {harness}')
+    target = global_hook_path(harness, home=home)
+    removed_count = 0
+    if target.is_file():
+        try:
+            data = json.loads(target.read_text(encoding='utf-8'))
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            modified = False
+            if harness == 'antigravity':
+                if 'beyin-v3-bridge' in data:
+                    del data['beyin-v3-bridge']
+                    removed_count += 1
+                    modified = True
+            else:
+                hooks_map = data.get('hooks')
+                if isinstance(hooks_map, dict):
+                    for event in list(hooks_map.keys()):
+                        groups = hooks_map[event]
+                        if not isinstance(groups, list):
+                            continue
+                        cleaned_groups = []
+                        for grp in groups:
+                            if not isinstance(grp, dict):
+                                cleaned_groups.append(grp)
+                                continue
+                            handlers = grp.get('hooks', [grp]) if 'hooks' in grp else [grp]
+                            rem = []
+                            for h in handlers:
+                                cmd = h.get('command', '') if isinstance(h, dict) else ''
+                                if 'beyin_v3_bridge.py' in cmd or 'beyin_v3_bridge.py' in _decoded_command(cmd):
+                                    removed_count += 1
+                                    modified = True
+                                else:
+                                    rem.append(h)
+                            if rem:
+                                if 'hooks' in grp:
+                                    cleaned_groups.append(dict(grp, hooks=rem))
+                                else:
+                                    cleaned_groups.extend(rem)
+                        if cleaned_groups:
+                            hooks_map[event] = cleaned_groups
+                        else:
+                            del hooks_map[event]
+                            modified = True
+                    if not hooks_map:
+                        del data['hooks']
+                        modified = True
+            if modified:
+                _backup_file(target)
+                target.write_bytes((json.dumps(data, indent=2, ensure_ascii=False) + '\n').encode('utf-8'))
+
+    if harness == 'antigravity':
+        removed_count += remove_gemini_md(home=home)
+
+    return {
+        'status': 'uninstalled',
+        'harness': harness,
+        'hook_file': str(target),
+        'removed_count': removed_count,
+    }
+
+
 def main(argv=None):
     if hasattr(sys.stdin, 'reconfigure'):
         sys.stdin.reconfigure(encoding='utf-8-sig', errors='replace')
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--vault', type=Path, required=True)
+    parser.add_argument('--vault', type=Path, help='Path to vault root')
     parser.add_argument('--state', type=Path, help='Defaults to the installed vault runtime locator')
     parser.add_argument('--harness', choices=('claude', 'codex', 'antigravity'), required=True)
     parser.add_argument('--native-event', choices=tuple(ANTIGRAVITY), help='Antigravity hook event; set by --print-config')
-    parser.add_argument('--project-root', type=Path, action='append', required=True)
+    parser.add_argument('--project-root', type=Path, action='append', help='Project root directory')
     parser.add_argument('--context-chars', type=int, default=1500, help='Startup instructions only; 0 disables injection')
     parser.add_argument('--event', choices=EVENTS, action='append', help='Allowed events; default all four lifecycle boundaries')
     parser.add_argument('--print-config', action='store_true', help='Print hook groups to merge into global JSON; changes nothing')
+    parser.add_argument('--install', action='store_true', help='Install bridge into global hook settings')
+    parser.add_argument('--uninstall', action='store_true', help='Uninstall bridge from global hook settings')
     args = parser.parse_args(argv)
+
+    if sum([bool(args.print_config), bool(args.install), bool(args.uninstall)]) > 1:
+        parser.error('--print-config, --install, and --uninstall are mutually exclusive')
+
     # Antigravity's Stop contract expects a decision; "stop" lets the agent finish as usual.
     quiet = '{"decision":"stop"}' if args.harness == 'antigravity' and args.native_event == 'Stop' else '{}'
     try:
+        if args.uninstall:
+            result = uninstall_bridge(args.harness)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+
+        if not args.vault:
+            parser.error('--vault is required')
+        if not args.project_root and (args.print_config or args.install):
+            parser.error('--project-root is required')
+        if not args.project_root:
+            print(quiet); return 0
+
         vault = args.vault.expanduser().resolve()
         if not vault.is_dir() or not 0 <= args.context_chars <= 4000:
             raise ValueError('Invalid vault or context budget')
@@ -246,6 +536,12 @@ def main(argv=None):
             events = [event for event in events if event in ANTIGRAVITY.values()]
             if not events:
                 raise ValueError('Antigravity offers only SessionStart and Stop')
+
+        if args.install:
+            result = install_bridge(vault, state, args.harness, roots, events, args.context_chars)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+
         if args.print_config:
             command = [sys.executable, str(Path(__file__).resolve()), '--vault', str(vault),
                        '--state', str(state), '--harness', args.harness, '--context-chars', str(args.context_chars)]
@@ -336,9 +632,9 @@ def main(argv=None):
         # Do not cut a command, path or JSON token in half for a small budget.
         print(json.dumps(output_context(args.harness, event, text)) if len(text) <= args.context_chars else '{}')
         return 0
-    except Exception:
-        if args.print_config:
-            print('Bridge configuration invalid; verify paths and budget.', file=sys.stderr)
+    except Exception as exc:
+        if args.print_config or args.install or args.uninstall:
+            print(f'Bridge error: {exc}', file=sys.stderr)
             return 1
         print(quiet)  # Never block the host or expose a path/payload in an error.
         return 0
