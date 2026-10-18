@@ -367,5 +367,94 @@ class ProjectScopesTest(unittest.TestCase):
         self.assertIn('Projeler/Beta', added['folders'])
 
 
+class TestResolveActiveProject(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.vault = Path(self.tmp.name) / 'vault'
+        self.vault.mkdir()
+
+    def test_resolve_active_project_standard_folder(self):
+        import beyin_v3_projects
+        cwd = self.vault / 'projects' / 'my-project' / 'src'
+        cwd.mkdir(parents=True)
+        self.assertEqual(beyin_v3_projects.resolve_active_project(self.vault, cwd), 'my-project')
+
+    def test_resolve_active_project_json_mapping(self):
+        import beyin_v3_projects
+        (self.vault / '.beyin-projects.json').write_text(json.dumps({
+            "folders": {"custom/path": "mapped-project"}
+        }))
+        (self.vault / 'custom' / 'path').mkdir(parents=True)
+        cwd = self.vault / 'custom' / 'path' / 'inside'
+        cwd.mkdir(parents=True)
+        self.assertEqual(beyin_v3_projects.resolve_active_project(self.vault, cwd), 'mapped-project')
+
+    def test_resolve_active_project_missing_json(self):
+        import beyin_v3_projects
+        cwd = self.vault / 'other' / 'folder'
+        cwd.mkdir(parents=True)
+        self.assertIsNone(beyin_v3_projects.resolve_active_project(self.vault, cwd))
+
+    def test_malformed_json_fallback(self):
+        import beyin_v3_projects
+        (self.vault / '.beyin-projects.json').write_text("{malformed")
+        cwd = self.vault / 'projects' / 'fallback-proj'
+        cwd.mkdir(parents=True)
+        # Should gracefully fallback to standard folders
+        self.assertEqual(beyin_v3_projects.resolve_active_project(self.vault, cwd), 'fallback-proj')
+
+    def test_symlink_loop(self):
+        import beyin_v3_projects
+        # Create a symlink loop
+        loop_dir = self.vault / 'loop'
+        loop_dir.mkdir()
+        try:
+            os.symlink(loop_dir, loop_dir / 'link')
+        except OSError:
+            self.skipTest('symlinks unavailable on this platform')
+        self.assertIsNone(beyin_v3_projects.resolve_active_project(self.vault, loop_dir / 'link'))
+
+    def test_ntfs_junction_and_symlinks_resolve_properly(self):
+        import beyin_v3_projects
+        # test that resolved path gets the correct active project
+        (self.vault / '.beyin-projects.json').write_text(json.dumps({
+            "folders": {"custom": "my-project"}
+        }))
+        target = self.vault / 'custom'
+        target.mkdir()
+
+        # create symlink outside
+        symlink_dir = Path(self.tmp.name) / 'symlink'
+        created = False
+        try:
+            os.symlink(target, symlink_dir)
+            created = True
+        except OSError:
+            if os.name == 'nt':
+                try:
+                    import _winapi
+                    _winapi.CreateJunction(str(target), str(symlink_dir))
+                    created = True
+                except (ImportError, AttributeError, OSError):
+                    pass
+        if not created:
+            self.skipTest('symlinks and junctions unavailable on this platform')
+        self.assertEqual(beyin_v3_projects.resolve_active_project(self.vault, symlink_dir), 'my-project')
+
+    def test_deleted_directory_graceful_handling(self):
+        import beyin_v3_projects
+        target = self.vault / 'projects' / 'deleted-proj'
+        target.mkdir(parents=True)
+        cwd = target / 'sub'
+        cwd.mkdir()
+        cwd_path = str(cwd)
+        import shutil
+        shutil.rmtree(str(target))
+        # The cwd still points to a deleted directory, resolving should handle gracefully
+        # Using the string path since the Path object might fail to resolve
+        self.assertIsNone(beyin_v3_projects.resolve_active_project(self.vault, cwd_path))
+
+
 if __name__ == '__main__':
     unittest.main()
