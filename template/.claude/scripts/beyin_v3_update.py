@@ -18,6 +18,8 @@ import zipfile
 
 OFFICIAL = 'https://api.github.com/repos/avenoxai/avenoxbeyin/releases/latest'
 MAX_PACKAGE = 32 * 1024 * 1024
+# Managed hook definitions whose change asks the client for a trust review (beyin_entry.TRUST_REVIEW).
+HOOK_FILES = ('.claude/settings.local.json', '.codex/hooks.json', '.agents/hooks.json', '.kiro/hooks/beyin-v3.json')
 # The installer mirrors each starter skill into all client roots. Mirrors
 # install_v3.MANAGED_SKILL_PATHS.
 MANAGED_SKILL_PATHS = frozenset(root + '/skills/' + name + '/SKILL.md' for root in ('.agents', '.claude', '.kiro')
@@ -429,16 +431,16 @@ def update(vault, state, package=None, check=False):
                 plan = installer.install(vault, state, plan_only=True, version=new,
                                          legacy_hashes=manifest.get('legacy_hashes', {}),
                                          legacy_skill_hashes=manifest.get('legacy_skill_hashes', {}))
-                trust_review = False
-                for name in ('.claude/settings.local.json', '.codex/hooks.json', '.agents/hooks.json',
-                             '.kiro/hooks/beyin-v3.json'):
+                trust_review = []
+                for name in HOOK_FILES:
                     if name in plan['planned']:
                         path = vault / name
                         before = json.loads(path.read_bytes()) if path.exists() else {}
                         planned = plan['planned'][name]
                         after = json.loads(planned) if planned is not None else {}
                         key = 'beyin-v3' if name == '.agents/hooks.json' else 'hooks'
-                        trust_review = trust_review or before.get(key) != after.get(key)
+                        if before.get(key) != after.get(key):
+                            trust_review.append(name)
                 operations = []
                 for name, data in plan['planned'].items():
                     if name == '.beyin-version': continue
@@ -469,7 +471,10 @@ def update(vault, state, package=None, check=False):
                         (state / 'release-cache.json').unlink(missing_ok=True)
                 except Exception:
                     pass
-        result = {'status': 'updated', 'from_version': old, 'version': new, 'trust_review_required': trust_review}
+        result = {'status': 'updated', 'from_version': old, 'version': new, 'trust_review_required': bool(trust_review)}
+        if trust_review:
+            # Which client's hook definitions changed, so the message names only the review it needs.
+            result['trust_review_files'] = trust_review
         if plan.get('removed'):
             result['removed'] = plan['removed']
         if plan.get('preserved_excluded'):
