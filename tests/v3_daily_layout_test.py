@@ -538,6 +538,30 @@ class DailyLayoutTest(unittest.TestCase):
         self.assertEqual(human.returncode, 0, human.stderr)
         self.assertIn('Daily duzeni: flat (daily/YYYY-MM-DD.md)', human.stdout)
 
+    def test_malformed_shared_layout_keeps_sync_and_freezes_views(self):
+        # .beyin-daily-layout.json travels through git; a merge conflict must not stop
+        # indexing, receipts or hooks. Views stay as they are until the file is valid.
+        self.receipt()
+        preferences.save_daily_layout(self.vault, 'flat')
+        self.assertEqual(self.engine.sync()['status'], 'succeeded')
+        before = self.daily('flat').read_bytes()
+        layout = self.vault / '.beyin-daily-layout.json'
+        layout.write_text('<<<<<<< HEAD\n{"schema": 1, "daily_layout": "flat"}\n=======\n'
+                          '{"schema": 1, "daily_layout": "v3"}\n>>>>>>> other\n', encoding='utf-8')
+        second = self.receipt('second')
+        result = self.engine.sync()
+        self.assertEqual(result['status'], 'degraded')
+        self.assertIn('.beyin-daily-layout.json', [issue.get('source') for issue in result['warnings']])
+        self.assertEqual(self.daily('flat').read_bytes(), before)
+        self.assertFalse(self.daily('v3').exists())
+        self.assertIn(self.daily('flat').relative_to(self.vault).as_posix(), self.tracked())
+        written = self.cli('receipt', '--harness', 'codex', '--event-id', 'during-conflict',
+                           '--summary', 'Kayıt sürüyor.', '--ref', 'notes/source.md')
+        self.assertEqual(written['status'], 'succeeded')
+        layout.write_text('{"schema": 1, "daily_layout": "flat"}\n', encoding='utf-8')
+        self.assertEqual(self.engine.sync()['status'], 'succeeded')
+        self.assertIn(second.encode(), self.daily('flat').read_bytes())
+
     def test_flat_name_alone_is_not_view_provenance(self):
         source = 'daily/' + self.day + '.md'
         self.assertFalse(projections.is_receipt_view_source(source))

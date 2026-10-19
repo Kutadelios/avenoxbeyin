@@ -1011,7 +1011,17 @@ class SyncEngine:
             db.execute("INSERT OR REPLACE INTO metadata VALUES ('last_sync_time', ?)", (str(now_sec),))
             completed, recovery_conflicts = self._recover(db)
             receipt_warnings, receipt_conflicts = self._scan_receipts(db)
-            desired_views = _receipt_view_contents(self, db, receipt_warnings)
+            # The layout file is shared through git and can arrive malformed (for
+            # example with merge markers). Indexing, receipts and hooks keep working;
+            # receipt views stay exactly as they are until the file is valid again.
+            layout_issue = None
+            try:
+                from beyin_v3_preferences import read_daily_layout
+                read_daily_layout(self.root)
+            except (ValueError, OSError) as exc:
+                layout_issue = {'source': '.beyin-daily-layout.json',
+                                'reason': 'invalid daily layout; receipt views left unchanged: ' + str(exc)}
+            desired_views = {} if layout_issue else _receipt_view_contents(self, db, receipt_warnings)
             view_paths = set(desired_views)
             # First sync has no tracking table. Keep edited stale views excluded
             # even when no receipt currently produces them; unexpected tracking
@@ -1101,12 +1111,14 @@ class SyncEngine:
             # Include the deletion event just written, and already-deleted snapshots
             # at these proven paths. Audit payloads remain immutable.
             provenance_durable = quarantine_receipt_view_history(self, db, self.receipt_view_sources, warnings)
+            if layout_issue:
+                warnings.append(layout_issue)
             db.execute('INSERT OR REPLACE INTO metadata VALUES (?,?)',
                        (RECEIPT_VIEW_SOURCES_ROW, _json(sorted(self.receipt_view_sources))))
             recovered_views = [] if recover_views else None
             view_issues = project_receipts(self, db, warnings, recover_views=recover_views,
                                           recovered=recovered_views, desired=desired_views,
-                                          allow_view_writes=provenance_durable)
+                                          allow_view_writes=provenance_durable and not layout_issue)
             for issue in view_issues:
                 if is_receipt_view_conflict(issue):
                     warnings.append(dict(issue, kind='receipt_view'))
