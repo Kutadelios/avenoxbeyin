@@ -3219,50 +3219,85 @@ def _source_shortcut(event):
     return {'ı': 'i', 'i̇': 'i', 'idotless': 'i', 'iabovedot': 'i'}.get(key, key)
 
 
-def _windows_source_cards(canvas, root, sources, y, width, pad, key_label='Alt', entry=None, reveal=None):
-    """Independent source tiles; consume shortcuts before Entry's class bindings."""
+def _source_row_layout(count, room):
+    """(card height, gap): two-line cards while they fit `room`, else one-line cards (scrolled past that)."""
+    if count * 66 - 8 <= room:
+        return 58, 8
+    return max(36, min(44, (room + 4) // max(count, 1))) - 4, 4
+
+
+def _windows_source_cards(canvas, root, sources, y, width, pad, key_label='Alt', entry=None, reveal=None, layout=(58, 8)):
+    """Independent source cards with a check box and a shortcut badge; consume shortcuts before Entry's class bindings.
+
+    Selected cards are tinted with the accent. `layout` is (card height, gap); a height under 50 means
+    one-line cards: name, then what it holds after it.
+    """
+    import tkinter.font as tkfont
     tiles, shortcuts = [], {}
-    P = PALETTE
+    P, (height, gap) = PALETTE, layout
+    compact = height < 50
+    name_font, detail_font, badge_font = _font(12, 'bold'), _font(11), _font(10, 'bold')
+    badge_measure = tkfont.Font(root=root, font=badge_font).measure
+    name_measure = tkfont.Font(root=root, font=name_font).measure
+    mark = 9 if height >= 40 else 8
 
     def paint():
-        for source, box, check, tick, label in tiles:
-            on = source['on']
-            canvas.itemconfigure(box, fill=P['selected'] if on else P['card'],
-                                 outline=P['accent'] if on else P['card_line'])
-            canvas.itemconfigure(check, fill=P['accent'] if on else P['card'],
-                                 outline=P['accent'] if on else P['faint'])
-            canvas.itemconfigure(tick, state='normal' if on else 'hidden')
-            canvas.itemconfigure(label, fill=P['text'] if on else P['soft'])
+        for tile in tiles:
+            on, hover = tile['source']['on'], tile['hover'] and not tile['source']['on']
+            canvas.itemconfigure(tile['card'], fill=P['selected'] if on else P['card'],
+                                 outline=P['accent'] if on else P['faint'] if hover else P['card_line'])
+            canvas.itemconfigure(tile['name'], fill=P['text'] if on else P['soft'])
+            canvas.itemconfigure(tile['detail'], fill=P['soft'] if on else P['muted'])
+            canvas.itemconfigure(tile['mark'], fill=P['accent'] if on else '', outline=P['accent'] if on else P['faint'])
+            canvas.itemconfigure(tile['tick'], state='normal' if on else 'hidden')
+            if tile['badge'] is not None:
+                canvas.itemconfigure(tile['badge'], fill=P['chip'] if on else P['key'], outline=P['accent'] if on else P['key_line'])
+                canvas.itemconfigure(tile['keys'], fill=P['chip_text'] if on else P['muted'])
 
     for index, source in enumerate(sources):
-        items = []
-        box = _round_rect(canvas, pad, y, width - pad, y + 62, 10, width=1)
-        check = _round_rect(canvas, pad + 14, y + 15, pad + 30, y + 31, 4, width=1)
-        tick = canvas.create_text(pad + 22, y + 23, text='✓', fill=P['accent_text'], font=_font(10, 'bold'))
+        middle = y + height / 2
+        card = _round_rect(canvas, pad, y, width - pad, y + height, 12, fill=P['card'], outline=P['card_line'])
+        # Links can be combined now, so every source is a check box.
+        cx = pad + 18 + mark
+        shape = _round_rect(canvas, cx - mark, middle - mark, cx + mark, middle + mark, 5, width=1.5)
+        tick = canvas.create_text(cx, middle, text='✓', fill=P['accent_text'], font=_font(10, 'bold'))
+        text_x = cx + mark + 14
         right = width - pad - 14
+        badge = keys_text = None
         if source['key']:
-            badge = key_label + '+' + source['key'].upper()
-            badge_w = 76 if key_label == 'Option' else 54
-            items.append(_round_rect(canvas, right - badge_w, y + 12, right, y + 32, 5,
-                                     fill=P['key'], outline=P['key_line']))
-            items.append(canvas.create_text(right - badge_w / 2, y + 22, text=badge, fill=P['muted'], font=_font(9)))
-            right -= badge_w + 12
-        label = canvas.create_text(pad + 42, y + 22, anchor='w', font=_font(12, 'bold'),
-                                   text=_fit(canvas, source['label'], _font(12, 'bold'), right - pad - 42))
+            keys = key_label + '+' + source['key'].upper()
+            badge_w = badge_measure(keys) + 16
+            badge = _round_rect(canvas, right - badge_w, middle - 10, right, middle + 10, 6, fill=P['key'], outline=P['key_line'])
+            keys_text = canvas.create_text(right - badge_w / 2, middle, text=keys, font=badge_font)
+            right -= badge_w + 14
         picture = source.get('image')
-        thumb = _image_thumb(root, picture, (48, 30)) if picture else None
-        detail_right = width - pad - 14
+        thumb = _image_thumb(root, picture, (56, height - 16 if compact else 38)) if picture else None
+        extras = []
         if thumb:
             picture['thumb'] = thumb
-            items.append(canvas.create_image(right, y + 32, image=thumb, anchor='e'))
-            detail_right = right - 58
+            extras.append(canvas.create_image(right, middle, image=thumb, anchor='e'))
+            right -= thumb.width() + 12
+        # A link shows the address itself, so what will be saved can be checked before Enter.
         value = source['value'] if source['kind'] == 'url' else (source.get('title') or source['value'])
         if picture:
             value = '%d×%d' % (picture['width'], picture['height'])
             if picture.get('method'):
                 value += ' · ' + picture['method']
-        detail = canvas.create_text(pad + 42, y + 44, anchor='w', font=_font(10), fill=P['muted'],
-                                    text=_fit(canvas, _first_line(value, 200), _font(10), detail_right - pad - 42))
+        value = _first_line(value, 200)
+        if compact:
+            name = _fit(canvas, source['label'], name_font, (right - text_x) * 0.6)
+            name_item = canvas.create_text(text_x, middle, anchor='w', font=name_font, text=name)
+            detail_x = text_x + name_measure(name) + 12
+            detail = canvas.create_text(detail_x, middle, anchor='w', font=detail_font,
+                                        text=_fit(canvas, value, detail_font, right - detail_x))
+        else:
+            name_item = canvas.create_text(text_x, middle - 10, anchor='w', font=name_font,
+                                           text=_fit(canvas, source['label'], name_font, right - text_x))
+            detail = canvas.create_text(text_x, middle + 11, anchor='w', font=detail_font,
+                                        text=_fit(canvas, value, detail_font, right - text_x))
+        tile = dict(source=source, card=card, name=name_item, detail=detail, mark=shape, tick=tick,
+                    badge=badge, keys=keys_text, hover=False)
+        tiles.append(tile)
 
         def toggle(_event=None, chosen=source, row=index):
             _source_toggle(sources, chosen)
@@ -3270,12 +3305,20 @@ def _windows_source_cards(canvas, root, sources, y, width, pad, key_label='Alt',
             if reveal:
                 reveal(row)
             return 'break'
-        for item in [box, check, tick, label, detail] + items:
+
+        def hover(entered, tile=tile):
+            tile['hover'] = entered
+            canvas.configure(cursor='hand2' if entered else '')
+            paint()
+        for item in [card, shape, tick, name_item, detail, badge, keys_text] + extras:
+            if item is None:
+                continue
             canvas.tag_bind(item, '<Button-1>', toggle)
+            canvas.tag_bind(item, '<Enter>', lambda _event, tile=tile: hover(True, tile))
+            canvas.tag_bind(item, '<Leave>', lambda _event, tile=tile: hover(False, tile))
         if source['key']:
             shortcuts[source['key']] = toggle
-        tiles.append((source, box, check, tick, label))
-        y += 70
+        y += height + gap
 
     def shortcut(event):
         toggle = shortcuts.get(_source_shortcut(event))
@@ -3934,9 +3977,33 @@ def gather_context():
 
 # ---------------------------------------------------------------- popup
 
-PALETTE = {'bg': '#F5F2EB', 'card': '#FFFDFA', 'card_line': '#DDD7CD', 'line': '#E3DDD3', 'text': '#302D29',
-           'soft': '#565149', 'muted': '#716A60', 'faint': '#8A8175', 'accent': '#AD593D', 'accent_text': '#FFFFFF',
-           'key': '#EEE9E0', 'key_line': '#DDD7CD', 'selected': '#F5E7DC', 'ok': '#AD593D'}
+# Warm neutrals with one terracotta accent. `card_on` / `chip` are the accent's tint, `field` is the note box.
+PALETTES = {
+    'dark': {'bg': '#262624', 'card': '#2E2D2B', 'selected': '#3A2F29', 'card_line': '#403E3A', 'line': '#403E3A',
+             'text': '#F5F4EE', 'soft': '#C9C6BC', 'muted': '#9C998F', 'faint': '#7C7A72', 'accent': '#D97757',
+             'accent_text': '#241912', 'key': '#383633', 'key_line': '#4B4844', 'ok': '#9BC995',
+             'chip': '#4A3329', 'chip_text': '#EE9A7B', 'field': '#2E2D2B'},
+    'light': {'bg': '#FAF9F5', 'card': '#FFFFFF', 'selected': '#FBF0EA', 'card_line': '#E5E2D8', 'line': '#E5E2D8',
+              'text': '#1F1E1D', 'soft': '#4D4B45', 'muted': '#85827A', 'faint': '#ABA89E', 'accent': '#C96442',
+              'accent_text': '#FFFFFF', 'key': '#F0EEE6', 'key_line': '#DDDAD0', 'ok': '#4C8A5B',
+              'chip': '#F6E5DC', 'chip_text': '#B5532F', 'field': '#FFFFFF'},
+}
+
+
+def _system_theme():
+    """'light' when Windows apps use the light theme; macOS and Linux windows stay dark."""
+    if os.name == 'nt':
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize') as key:
+                return 'light' if winreg.QueryValueEx(key, 'AppsUseLightTheme')[0] else 'dark'
+        except (OSError, ImportError, ValueError):
+            pass
+    return 'dark'
+
+
+PALETTE = dict(PALETTES[_system_theme()])
 KIND_LABEL = {'youtube': 'VİDEO', 'x': 'TWEET', 'mail': 'MAİL', 'github': 'REPO', 'pdf': 'PDF', 'makale': 'SAYFA'}
 
 
@@ -3947,6 +4014,12 @@ def _font(size, weight='normal'):
         family = 'Segoe UI Variable Text' if sys.getwindowsversion().build >= 22000 else 'Segoe UI'
     else:
         family = 'DejaVu Sans'
+    return (family, size, weight)
+
+
+def _serif(size, weight='normal'):
+    """Title face: Georgia reads like a book cover next to the UI font; Linux falls back to DejaVu Serif."""
+    family = 'DejaVu Serif' if sys.platform.startswith('linux') else 'Georgia'
     return (family, size, weight)
 
 
@@ -4324,7 +4397,7 @@ def _image_card(canvas, root, image, y, width, pad, changed):
     """Preview card for the clipboard image; Tab or a click switches it. Calls changed(on), returns the next y."""
     import tkinter.font as tkfont
     P, height, state = PALETTE, 78, {'on': bool(image['on'])}
-    items = [_round_rect(canvas, pad, y, width - pad, y + height, 14, fill=P['card'], outline=P['card_line'])]
+    items = [_round_rect(canvas, pad, y, width - pad, y + height, 12, fill=P['card'], outline=P['card_line'])]
     right = width - pad - 16
     thumb = _image_thumb(root, image)
     if thumb is not None:
@@ -4334,16 +4407,16 @@ def _image_card(canvas, root, image, y, width, pad, changed):
     chip_font = _font(10, 'bold')
     chip_w = tkfont.Font(root=root, font=chip_font).measure('GÖRSEL') + 18
     chip_y, text_x = y + 28, pad + 16 + chip_w + 12
-    chip = _round_rect(canvas, pad + 16, chip_y - 11, pad + 16 + chip_w, chip_y + 11, 8, fill=P['accent'], outline='')
-    label = canvas.create_text(pad + 16 + chip_w / 2, chip_y, text='GÖRSEL', fill=P['accent_text'], font=chip_font)
+    chip = _round_rect(canvas, pad + 16, chip_y - 11, pad + 16 + chip_w, chip_y + 11, 8, fill=P['chip'], outline='')
+    label = canvas.create_text(pad + 16 + chip_w / 2, chip_y, text='GÖRSEL', fill=P['chip_text'], font=chip_font)
     headline = canvas.create_text(text_x, chip_y, anchor='w', fill=P['text'], font=_font(14, 'bold'))
     detail = canvas.create_text(pad + 16, y + height - 20, anchor='w', fill=P['muted'], font=_font(12))
 
     def draw():
         on = state['on']
         first, second = image_lines(image, on)
-        canvas.itemconfigure(chip, fill=P['accent'] if on else P['key'], outline='' if on else P['key_line'])
-        canvas.itemconfigure(label, fill=P['accent_text'] if on else P['muted'])
+        canvas.itemconfigure(chip, fill=P['chip'] if on else P['key'], outline='' if on else P['key_line'])
+        canvas.itemconfigure(label, fill=P['chip_text'] if on else P['muted'])
         canvas.itemconfigure(headline, text=_fit(canvas, first, _font(14, 'bold'), right - text_x), fill=P['text'] if on else P['muted'])
         canvas.itemconfigure(detail, text=_fit(canvas, second, _font(12), right - pad - 16))
         changed(on)
@@ -4356,7 +4429,7 @@ def _image_card(canvas, root, image, y, width, pad, changed):
         canvas.tag_bind(item, '<Button-1>', toggle)
     root.bind('<Tab>', toggle)
     draw()
-    return y + height + 12
+    return y + height + 10
 
 
 def _image_done(image):
@@ -4488,27 +4561,30 @@ def popup(vault, context=None, state=None, root=None, session=None):
             work = _win_monitor(context.get('hwnd') or 0) or work
         except Exception:
             pass
-    P, pad = PALETTE, 24
+    P, pad = PALETTE, 28 if work[2] - work[0] >= 560 else 20
     W, max_height = _popup_bounds(work)
     _window_chrome(root)
     canvas = tk.Canvas(root, width=W, highlightthickness=0, bd=0, bg=P['bg'])
     canvas.pack(fill='both', expand=True)
 
-    # Warm surfaces and one accent keep the content in front.
-    y = 28
-    canvas.create_text(pad, y, text='Beyne at', anchor='w', fill=P['text'], font=_font(15, 'bold'))
+    # Header: brand mark, name, where it came from.
+    y = 34
+    canvas.create_text(pad, y, text='✻', anchor='w', fill=P['accent'], font=_font(18, 'bold'))
+    canvas.create_text(pad + 28, y, text='Beyne at', anchor='w', fill=P['text'], font=_serif(17))
     source = context.get('uygulama') or ''
     if source:
-        canvas.create_text(W - pad - (64 if windows else 0), y, text=_fit(canvas, source, _font(10), W // 3),
-                           anchor='e', fill=P['muted'], font=_font(10))
+        canvas.create_text(W - pad - (26 if windows else 0), y, text=_fit(canvas, source, _font(12), W // 3),
+                           anchor='e', fill=P['muted'], font=_font(12))
 
-    # Main field: large, borderless, with a placeholder.
-    y = 60
-    _round_rect(canvas, pad, y, W - pad, y + 52, 12, fill=P['card'], outline=P['card_line'])
-    entry = tk.Entry(root, font=_font(16), fg=P['text'], bg=P['card'], insertbackground=P['accent'], insertwidth=2,
+    # Main field: a soft card with the accent ring while it has the keyboard, placeholder inside.
+    y = 64
+    field = _round_rect(canvas, pad, y, W - pad, y + 56, 14, fill=P['field'], outline=P['accent'], width=1.5)
+    entry = tk.Entry(root, font=_font(15), fg=P['text'], bg=P['field'], insertbackground=P['accent'], insertwidth=2,
                      selectbackground=P['selected'], selectforeground=P['text'],
                      relief='flat', bd=0, highlightthickness=0)
-    canvas.create_window(pad + 14, y + 8, window=entry, anchor='nw', width=W - 2 * pad - 28, height=36)
+    canvas.create_window(pad + 18, y + 12, window=entry, anchor='nw', width=W - 2 * pad - 36, height=32)
+    entry.bind('<FocusIn>', lambda _e: canvas.itemconfigure(field, outline=P['accent']))
+    entry.bind('<FocusOut>', lambda _e: canvas.itemconfigure(field, outline=P['card_line']))
     placeholder_text = 'Neden kaydediyorsun?' if (url or files or clip_text or sources) else 'Aklındakini yaz…'
     hint = {'on': False}
 
@@ -4543,26 +4619,30 @@ def popup(vault, context=None, state=None, root=None, session=None):
     entry.bind('<KeyRelease>', after_key)
     entry.bind('<Button-1>', lambda _e: (entry.focus_set(), entry.icursor(0), 'break')[-1] if hint['on'] else None)
     show_hint()
-    y += 70
+    y += 56 + 18
 
     if sources is not None:
-        content_height = 70 * len(sources)
-        viewport = min(content_height, max(62, min(420, max_height - y - 92)))
-        scrolling = content_height > viewport
         canvas.create_text(pad, y + 6, anchor='w', text='Kaynaklar · Birlikte seçebilirsin',
-                           fill=P['muted'], font=_font(10))
-        y += 24
+                           fill=P['muted'], font=_font(11))
+        y += 26
+        # Cards shrink to one line first; only then does the list scroll.
+        room = max(40, min(480, max_height - y - 64))  # 64: gap, hairline and footer below the list
+        layout = _source_row_layout(len(sources), room)
+        pitch = sum(layout)
+        content_height = pitch * len(sources) - layout[1]  # no gap after the last card
+        viewport = min(content_height, room)
+        scrolling = content_height > viewport
         rows = tk.Canvas(root, width=W - 2 * pad, height=viewport, highlightthickness=0, bd=0, bg=P['bg'])
         canvas.create_window(pad, y, window=rows, anchor='nw', width=W - 2 * pad, height=viewport)
         rows.configure(scrollregion=(0, 0, W - 2 * pad, content_height))
 
         def reveal(row):
             if scrolling:
-                rows.yview_moveto(min(row * 70, content_height - viewport) / content_height)
+                rows.yview_moveto(min(row * pitch, content_height - viewport) / content_height)
 
         _windows_source_cards(rows, root, sources, 0, W - 2 * pad, 1,
                               key_label='Option' if sys.platform == 'darwin' and os.name != 'nt' else 'Alt',
-                              entry=entry, reveal=reveal)
+                              entry=entry, reveal=reveal, layout=layout)
         if scrolling:
             def scroll(event):
                 step = -1 if getattr(event, 'num', 0) == 4 or getattr(event, 'delta', 0) > 0 else 1
@@ -4591,20 +4671,20 @@ def popup(vault, context=None, state=None, root=None, session=None):
         else:
             kind, headline, detail = 'METİN', _first_line(clip_text, 200), ''
         card_h = 78 if detail and detail != headline else 56
-        _round_rect(canvas, pad, y, W - pad, y + card_h, 14, fill=P['card'], outline=P['card_line'])
+        _round_rect(canvas, pad, y, W - pad, y + card_h, 12, fill=P['card'], outline=P['card_line'])
         chip_font = _font(10, 'bold')
         import tkinter.font as tkfont
         chip_w = tkfont.Font(root=root, font=chip_font).measure(kind) + 18
         chip_y = y + (20 if card_h > 56 else card_h / 2) + (8 if card_h > 56 else 0)
-        _round_rect(canvas, pad + 16, chip_y - 11, pad + 16 + chip_w, chip_y + 11, 8, fill=P['accent'], outline='')
-        canvas.create_text(pad + 16 + chip_w / 2, chip_y, text=kind, fill=P['accent_text'], font=chip_font)
+        _round_rect(canvas, pad + 16, chip_y - 11, pad + 16 + chip_w, chip_y + 11, 8, fill=P['chip'], outline='')
+        canvas.create_text(pad + 16 + chip_w / 2, chip_y, text=kind, fill=P['chip_text'], font=chip_font)
         text_x = pad + 16 + chip_w + 12
         canvas.create_text(text_x, chip_y, text=_fit(canvas, headline, _font(14, 'bold'), W - pad - 16 - text_x),
                            anchor='w', fill=P['text'], font=_font(14, 'bold'))
         if card_h > 56:
             canvas.create_text(pad + 16, y + card_h - 20, text=_fit(canvas, detail, _font(12), W - 2 * pad - 32),
                                anchor='w', fill=P['muted'], font=_font(12))
-        y += card_h + 12
+        y += card_h + 10
 
     # Optional clipboard toggle when something better is already being saved.
     if clip_text and (url or files):
@@ -4634,17 +4714,18 @@ def popup(vault, context=None, state=None, root=None, session=None):
                 show_hint()
         y = _image_card(canvas, root, image, y, W, pad, image_changed)
 
-    # Footer: status on the left, key hints on the right.
-    y += 8
-    footer_y = y + 14
+    # Footer: a hairline, status on the left, key hints on the right.
+    y += 4
+    canvas.create_line(pad, y, W - pad, y, fill=P['line'])
+    footer_y = y + 26
     footer_text = (('Kaydır · PgUp/PgDn' if scrolling else
                     'Option ile kaynak seç' if sys.platform == 'darwin' else 'Alt ile kaynak seç') if sources else
                    'Tab: panoyu ekle' if clip_text and (url or files) else
                    _hotkey_hint(vault, state) if (url or files or clip_text or image) else
                    _empty_capture_hint(vault, state))
     status_width = W - 2 * pad - (220 if W >= 520 else 110)
-    status = canvas.create_text(pad, footer_y, anchor='w', fill=P['muted'], font=_font(10),
-                                text=_fit(canvas, footer_text, _font(10), status_width))
+    status = canvas.create_text(pad, footer_y, anchor='w', fill=P['muted'], font=_font(11),
+                                text=_fit(canvas, footer_text, _font(11), status_width))
     right = W - pad
 
     def keycap(x_right, key, label):
@@ -4659,8 +4740,11 @@ def popup(vault, context=None, state=None, root=None, session=None):
     right = keycap(right, '↵', 'Kaydet')
     if W >= 520:
         keycap(right, 'esc', 'Kapat')
-    height = footer_y + 28
+    height = footer_y + 26
     canvas.configure(height=height)
+    # The window can end up a little larger than the canvas; the frame follows its real edge.
+    frame = canvas.create_rectangle(0, 0, W - 1, height - 1, outline=P['line'])
+    canvas.bind('<Configure>', lambda e: canvas.coords(frame, 0, 0, e.width - 1, e.height - 1))
     result = {}
     saving = {'on': False}
     stop_escape = lambda: None
@@ -4702,13 +4786,13 @@ def popup(vault, context=None, state=None, root=None, session=None):
                                   **({'capture_id': capture_id} if windows else {})))
         except Exception as exc:
             saving['on'] = False
-            canvas.itemconfigure(status, text=_fit(canvas, 'Kaydedilemedi: ' + str(exc), _font(10), status_width), fill=P['accent'])
+            canvas.itemconfigure(status, text=_fit(canvas, 'Kaydedilemedi: ' + str(exc), _font(11), status_width), fill=P['accent'])
             return 'break'
         if windows:
             if any(item.get('clipboard') and item['on'] for item in sources):
                 _clipboard_saved(vault, sequence, state, context.get('clipboard_generation'))
             stop_escape()
-        entry.configure(state='disabled', disabledbackground=P['card'], disabledforeground=P['muted'])
+        entry.configure(state='disabled', disabledbackground=P['field'], disabledforeground=P['muted'])
         canvas.itemconfigure(status, text='✓  Beyne atıldı', fill=P['ok'], font=_font(12, 'bold'))
         root.after(260, close)
         return 'break'
@@ -4725,8 +4809,10 @@ def popup(vault, context=None, state=None, root=None, session=None):
     root.bind('<Escape>', dismiss if windows else lambda _e: close())
     if windows:
         root.protocol('WM_DELETE_WINDOW', dismiss)
-        close_label = canvas.create_text(W - pad, 28, text='× Kapat', anchor='e', fill=P['soft'], font=_font(10))
+        close_label = canvas.create_text(W - pad, 33, text='×', anchor='e', fill=P['muted'], font=_font(20))
         canvas.tag_bind(close_label, '<Button-1>', dismiss)
+        canvas.tag_bind(close_label, '<Enter>', lambda _e: canvas.itemconfigure(close_label, fill=P['text']))
+        canvas.tag_bind(close_label, '<Leave>', lambda _e: canvas.itemconfigure(close_label, fill=P['muted']))
 
     # Drag the borderless window by any empty canvas spot; items with their own click binding keep it.
     drag = {'on': False, 'ox': 0, 'oy': 0, 'cursor': ''}
@@ -4864,9 +4950,11 @@ def _window_chrome(root):
         return
     root.title('Beyne at')
     root.configure(bg=PALETTE['bg'])
-    root.resizable(False, False)
     if os.name == 'nt':
+        # The frame is stripped later (_win_managed_chrome); a fixed-size flag here makes Tk grow the window past its canvas.
         root.overrideredirect(False)
+    else:
+        root.resizable(False, False)
     root._chrome = True
 
 
