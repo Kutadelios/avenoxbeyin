@@ -95,12 +95,16 @@ def _check_source_trust(state: Path, source: str) -> None:
             from contextlib import closing
             import sqlite3
             with closing(sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True, timeout=5)) as db:
-                row = db.execute(
-                    "SELECT payload FROM records WHERE id = ? OR instr(payload, ?) > 0 LIMIT 1",
+                # instr() also finds notes that merely mention the path in their text; only the
+                # record whose own id or source is this path decides (any match, not the first).
+                rows = db.execute(
+                    "SELECT payload FROM records WHERE id = ? OR instr(payload, ?) > 0",
                     (source, source)
-                ).fetchone()
-                if row:
-                    rec = json.loads(row[0])
+                ).fetchall()
+                for (payload,) in rows:
+                    rec = json.loads(payload)
+                    if source not in (rec.get("id"), rec.get("source")):
+                        continue
                     if (rec.get("visibility") == "private" or
                         rec.get("trust") == "untrusted" or
                         rec.get("trusted") is False or

@@ -225,6 +225,17 @@ class LearningCandidateLedgerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             learning.stage_candidate(self.state, "sess-untr", "Discovered untrusted leak", source="untrusted-doc")
 
+    def test_private_source_is_found_even_when_another_note_mentions_its_path(self):
+        # Real rows written by the sync engine; the earlier row only cites the private path.
+        (self.vault / 'notes' / 'a-özet.md').write_text('Bkz. notes/z-gizli.md\n', encoding='utf-8')
+        (self.vault / 'notes' / 'z-gizli.md').write_text('---\nvisibility: private\n---\nGizli içerik\n',
+                                                         encoding='utf-8')
+        self.assertEqual(self.engine.sync()['status'], 'succeeded')
+        with self.assertRaises(ValueError):
+            learning.stage_candidate(self.state, "sess-priv", "Gizli nottan aday", source="notes/z-gizli.md")
+        rec = learning.stage_candidate(self.state, "sess-priv", "Özetten aday", source="notes/a-özet.md")
+        self.assertEqual(rec["source"], "notes/a-özet.md")
+
     def test_scope_isolation(self):
         learning.stage_candidate(self.state, "sess-1", "Global learning", scope="global")
         learning.stage_candidate(self.state, "sess-2", "Project A learning", scope="projectA")
