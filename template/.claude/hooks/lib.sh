@@ -3,7 +3,7 @@
 # Shared, portable helpers for all beyin hooks.
 
 if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
-  BEYIN_PROJECT_DIR="$CLAUDE_PROJECT_DIR"
+  BEYIN_PROJECT_DIR=$CLAUDE_PROJECT_DIR
 else
   BEYIN_HOOK_DIR=$(CDPATH= cd "$(dirname "$0")" 2>/dev/null && pwd)
   BEYIN_PROJECT_DIR=$(CDPATH= cd "$BEYIN_HOOK_DIR/../.." 2>/dev/null && pwd)

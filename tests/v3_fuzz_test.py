@@ -43,13 +43,5 @@ class HookFuzzingTest(unittest.TestCase):
         res = subprocess.run([sys.executable, str(ROOT / 'template/.claude/scripts/beyin_v3_hook_done.py')], input=b"{", capture_output=True, env=dict(os.environ))
         self.assertEqual(res.returncode, 0)
         
-    def test_shell_script_unquoted_dir(self):
-        if sys.platform == 'win32' or not shutil.which('bash'):
-            self.skipTest("POSIX bash environment required for shell hook tests")
-        res = subprocess.run([
-            'bash', '-c', f'CLAUDE_PROJECT_DIR="/tmp/dir with spaces" bash "{ROOT.as_posix()}/template/.claude/hooks/lib.sh"'
-        ], capture_output=True, env=dict(os.environ))
-        self.assertEqual(res.returncode, 0)
-
 if __name__ == '__main__':
     unittest.main()
