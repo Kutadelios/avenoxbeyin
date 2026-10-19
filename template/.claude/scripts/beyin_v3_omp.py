@@ -93,11 +93,7 @@ function send(state, event, payload) {
         })
       child.on("error", () => resolve(""))
       child.stdin.on("error", () => {})
-      try {
-        child.stdin.end(JSON.stringify({ hook_event_name: event, ...payload }))
-      } catch {
-        // Ignored
-      }
+      child.stdin.end(JSON.stringify({ hook_event_name: event, ...payload }))
     } catch {
       resolve("")
     }
