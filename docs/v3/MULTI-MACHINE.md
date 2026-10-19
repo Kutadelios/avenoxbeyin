@@ -201,6 +201,13 @@ değildir. Önce `note-read` ile yeniden oku ve `sync` çalıştır; aynı düze
 körü körüne tekrarlama. Bu durumda başarı bildirimi ve oturum işaretleyicisi
 üretilmez.
 
+Yönetilen görünümler insan notu olarak okunmaz veya düzenlenmez. Dosyanın
+`generated` / `kind` başlıkları dışarıdan silinse bile güncel `receipt_views`
+kaydı varsa komut yazımdan önce reddedilir; kanonik dosya yolu denetlenir.
+Yalnız dosya adı veya emekliye ayrılmış görünümün geçmişi ret nedeni değildir:
+aynı `daily/GÜN.md` yolundaki sıradan insan notları kullanılabilir.
+Sahiplik veritabanı okunamazsa yazım başlamadan hata döner.
+
 Kilit ve önceki baytların base64 JSON yedekleri vault içindeki
 `.beyin-note-write/` altındadır. MSIX uygulamaları AppData'yı sanallaştırabildiği
 için aynı `.beyin-runtime.json` state yolu bile iki istemcide farklı klasöre

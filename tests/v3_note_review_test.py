@@ -175,12 +175,86 @@ print(json.dumps(result))
 
     def test_database_exception_after_replace_is_not_a_generic_error(self):
         path = self.write()
-        with patch.object(self.engine, 'sync', return_value={'status': 'succeeded'}), \
-                patch.object(self.engine.store, '_connect', side_effect=sqlite3.OperationalError('disk full')):
+        indexing = []
+        original_connect = self.engine.store._connect
+        def refresh():
+            indexing.append(True)
+            return {'status': 'succeeded'}
+        def connect():
+            if indexing:
+                raise sqlite3.OperationalError('disk full')
+            return original_connect()
+        with patch.object(self.engine, 'sync', side_effect=refresh), \
+                patch.object(self.engine.store, '_connect', side_effect=connect):
             with self.assertRaises(notes.NoteConflict) as caught:
                 self.engine.note_edit(self.request())
         self.assertIs(caught.exception.write_occurred, True)
         self.assertEqual(path.read_bytes(), b'ALPHA\nbeta\n')
+
+    def track_view(self, source):
+        with self.engine.store._connect() as db:
+            db.execute('CREATE TABLE IF NOT EXISTS receipt_views(path TEXT PRIMARY KEY, hash TEXT NOT NULL)')
+            # Ownership persists even when the current bytes/header were edited.
+            db.execute('INSERT OR REPLACE INTO receipt_views VALUES (?,?)', (source, '0' * 64))
+
+    def test_tracked_view_without_header_is_rejected_using_canonical_source(self):
+        source = 'daily/2026-10-19.md'
+        path = self.write(source)
+        self.track_view(source)
+        with self.alias_lookup({'DAILY': 'daily'}), \
+                patch.object(self.engine, 'sync') as refresh, \
+                patch.object(sync, '_safe_replace', wraps=sync._safe_replace) as replace:
+            for requested in (source, 'DAILY/2026-10-19.md'):
+                with self.subTest(source=requested):
+                    with self.assertRaisesRegex(ValueError, 'managed source'):
+                        self.engine.note_read(requested)
+                    with self.assertRaisesRegex(ValueError, 'managed source'):
+                        self.engine.note_edit(self.request(requested))
+        self.assertEqual(path.read_bytes(), b'alpha\nbeta\n')
+        self.assertFalse((self.vault / notes.LOCAL_DIRECTORY / 'backups').exists())
+        refresh.assert_not_called()
+        replace.assert_not_called()
+
+    def test_human_daily_without_current_view_tracking_remains_editable(self):
+        source = 'daily/2026-10-19.md'
+        for tracking in ('absent', 'retired'):
+            with self.subTest(tracking=tracking):
+                path = self.write(source)
+                if tracking == 'retired':
+                    self.track_view(source)
+                    with self.engine.store._connect() as db:
+                        db.execute('DELETE FROM receipt_views WHERE path=?', (source,))
+                self.assertEqual(self.engine.note_read(source)['content'], 'alpha\nbeta\n')
+                self.assertEqual(self.engine.note_edit(self.request(source))['status'], 'written')
+                self.assertEqual(path.read_bytes(), b'ALPHA\nbeta\n')
+
+    def test_view_claim_while_preparing_write_is_rechecked_before_replace(self):
+        source = 'daily/2026-10-19.md'
+        path = self.write(source)
+        original = notes.tempfile.mkstemp
+        def prepare(*args, **kwargs):
+            self.track_view(source)
+            return original(*args, **kwargs)
+        with patch.object(notes.tempfile, 'mkstemp', side_effect=prepare), \
+                patch.object(self.engine, 'sync') as refresh, \
+                patch.object(sync, '_safe_replace', wraps=sync._safe_replace) as replace:
+            with self.assertRaisesRegex(ValueError, 'managed source'):
+                self.engine.note_edit(self.request(source))
+        self.assertEqual(path.read_bytes(), b'alpha\nbeta\n')
+        self.assertEqual(list(path.parent.glob('.beyin-note-*')), [])
+        refresh.assert_not_called()
+        replace.assert_not_called()
+
+    def test_view_tracking_database_error_fails_before_writing(self):
+        path = self.write()
+        with patch.object(self.engine.store, '_connect', side_effect=sqlite3.OperationalError('disk full')), \
+                patch.object(self.engine, 'sync') as refresh, \
+                patch.object(sync, '_safe_replace', wraps=sync._safe_replace) as replace:
+            with self.assertRaises(sqlite3.OperationalError):
+                self.engine.note_edit(self.request())
+        self.assertEqual(path.read_bytes(), b'alpha\nbeta\n')
+        refresh.assert_not_called()
+        replace.assert_not_called()
 
     def test_path_and_cleanup_exceptions_after_replace_report_write(self):
         for stage in ('source-path', 'temporary-cleanup', 'diagnostics'):

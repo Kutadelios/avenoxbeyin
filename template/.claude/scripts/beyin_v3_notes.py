@@ -127,6 +127,16 @@ def _human(text):
         raise ValueError('managed source; use the dedicated V3 command')
 
 
+def _refuse_tracked_view(engine, source):
+    # A generated flat daily can lose its frontmatter during an external edit.
+    # Current ownership rows still make it a managed view. Use the canonical
+    # source, not a filename pattern or historical provenance of a retired view.
+    with engine.store._connect() as db:
+        exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_views'").fetchone()
+        if exists and db.execute('SELECT 1 FROM receipt_views WHERE path=?', (source,)).fetchone():
+            raise ValueError('managed source; use the dedicated V3 command')
+
+
 def _bytes(path):
     try:
         return path.read_bytes()
@@ -199,6 +209,7 @@ def read(engine, source):
     with locked(engine):
         path = source_path(engine, source)
         source = path.relative_to(engine.root).as_posix()
+        _refuse_tracked_view(engine, source)
         raw = _bytes(path)
         text = raw.decode('utf-8') if raw is not None else None
         if text is not None:
@@ -234,6 +245,7 @@ def _apply(engine, request, committed):
     with locked(engine) as folder:
         path = source_path(engine, source)  # Revalidate after waiting for the lock.
         source = path.relative_to(engine.root).as_posix()
+        _refuse_tracked_view(engine, source)
         raw = _bytes(path)
         actual = _hash(raw) if raw is not None else None
         if actual != expected:
@@ -281,6 +293,7 @@ def _apply(engine, request, committed):
                 out.flush()
                 os.fsync(out.fileno())
             path = source_path(engine, source)
+            _refuse_tracked_view(engine, path.relative_to(engine.root).as_posix())
             if _bytes(path) != raw:
                 raise NoteConflict('external edit detected before replace; source preserved')
             details = {'source': source, 'written_sha256': _hash(updated),
