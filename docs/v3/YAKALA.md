@@ -208,8 +208,11 @@ aninin kaydedilmis noktasini temsil etmez.
 **Secim ve sure.** macOS/Linux tam Tk penceresinde, dogrulanmis sayfa ve ondan farkli imlec
 linki varsa `Imlecin altindaki baglanti` varsayilan, `Etkin sayfa` alternatif gelir.
 macOS'ta Option+I/Option+S, Linux'ta Alt+I/Alt+S veya satira tiklama kullanilir.
-Pano metni/gorseli/linki bu durumda istege bagli secenektir. Dosya secimi ve yalniz sayfa
-akisi mevcut davranisini korur. Tk olmayan `kdialog`/`zenity`/macOS basit soru yedeginde
+Pano bağlantısı bu durumda kapalı bir seçenektir. macOS/Linux bu sayfa+imleç yolunda
+pano metninin tazeliğini doğrulamadığından metin kartı sunulmaz; not kutusuna elle
+yazılabilir veya açıkça yapıştırılabilir. Mevcut pano görseli okuyucusu da sayfa varken
+görsel teklif etmez. Dosya seçimi ve yalnız sayfa akışı mevcut davranışını korur.
+Tk olmayan `kdialog`/`zenity`/macOS basit soru yedeginde
 imlec ve sayfa secicisi yoktur; dogrulanmis sayfa kullanilir.
 
 Yeni Windows belge okuyucusu 1 saniye; macOS tarayici okuma toplami 2,5 saniye (AX payi en
@@ -340,8 +343,9 @@ Birden çok bağlantı birlikte seçilebilir. Ana `url` önceliği: imleç bağl
 alıntılanan gönderi, pano bağlantısı. Diğer seçilen adresler kartın `Ek bağlantılar` bölümünde
 ve isteğe bağlı `ek_urller` listesinde tutulur; `isle` ana URL'yi işler. Aynı adres ikinci kart
 olarak gösterilmez. Yalnız bir bağlantıyı kaydetmek için diğerlerinin işaretini kaldır.
-Pano metni/dosya eklenen
-mevcut URL kartı da `private` olur. Aynı popup'ın kayıt kimliği tekrar oynatılsa bile ikinci
+Pano metni, dosya veya mail adresi eklenen mevcut URL kartı da `private` olur.
+Mail adresi ana kaynak yerine `ek_urller` içinde seçilmiş olsa da bütün kart özel kalır.
+Aynı popup'ın kayıt kimliği tekrar oynatılsa bile ikinci
 commit yapılmaz.
 
 Popup sıcak nötr zemin, kiremit vurgu ve küçük kısayol rozetleri kullanır. Seçili kaynaklar
@@ -504,7 +508,8 @@ elde olanla devam edilir.
 - Yakalama ağa çıkmaz; yalnız vault'a bir dosya yazar.
 - Ağ yalnız `isle` adımında ve yalnız yakaladığın kaynaklar için kullanılır. Defuddle,
   X gönderisi sayfada yoksa gönderi adresini FxTwitter API'sine sorar.
-- Mail, pano metni ve dosya kartları `visibility: private` ile yazılır.
+- Mail, pano metni ve dosya kartları `visibility: private` ile yazılır. Seçilen ek
+  bağlantılardan biri mail adresiyse ana kaynak herkese açık olsa da aynı kural uygulanır.
 - Kaldırmak için `python3 beyin.py yakala kaldir`: kısayol, skill ve bildirim gider, kartların kalır.
 
 ## Komutlar

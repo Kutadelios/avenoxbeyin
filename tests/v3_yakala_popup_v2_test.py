@@ -172,6 +172,46 @@ class CardCompatibilityTest(unittest.TestCase):
                 y.capture(self.vault, url=PAGE, extra_urls=[unsafe])
         self.assertEqual(list(self.vault.iterdir()), [])
 
+    def test_secondary_mail_url_keeps_the_whole_card_private(self):
+        import beyin_v3_sync as sync
+        import beyin_v3_triage as triage
+        mailbox = 'https://mail.google.com/mail/u/0/#inbox/synthetic-thread'
+        sources = y.windows_sources({'url_imlec': PAGE, 'url': mailbox}, '', False)
+        y._source_toggle(sources, next(source for source in sources if source['key'] == 's'))
+        saved = y.capture(self.vault, why='Synthetic secondary mail privacy canary',
+                          **y._source_arguments(sources))
+        card = y.find_card(self.vault, saved['id'])
+        self.assertEqual(card['meta']['url'], PAGE)
+        self.assertEqual(card['meta']['kaynak_turu'], 'makale')
+        self.assertEqual(card['meta']['ek_urller'], [mailbox])
+        self.assertEqual(card['meta']['visibility'], 'private')
+        self.assertFalse(triage._scan_allowed(card['path'], self.vault, frozenset()))
+        state = tempfile.TemporaryDirectory(prefix='popup-private-state-')
+        self.addCleanup(state.cleanup)
+        engine = sync.SyncEngine(self.vault, Path(state.name))
+        self.addCleanup(engine.store.close)
+        self.assertEqual(engine.sync()['status'], 'succeeded')
+        self.assertEqual(engine.store.retrieve('secondary mail privacy canary')['records'], [])
+        private = engine.store.retrieve('secondary mail privacy canary', audience='private')['records']
+        self.assertEqual(len(private), 1)
+
+    def test_adding_a_mail_url_to_an_existing_card_upgrades_privacy(self):
+        import beyin_v3_triage as triage
+        saved = y.capture(self.vault, url=PAGE)
+        self.assertEqual(y.find_card(self.vault, saved['id'])['meta']['visibility'], 'internal')
+        mailbox = 'https://outlook.office.com/mail/inbox/id/synthetic-thread'
+        again = y.capture(self.vault, url=PAGE, extra_urls=[mailbox])
+        self.assertEqual(again['id'], saved['id'])
+        # Later recaptures must never downgrade the existing private card.
+        y.capture(self.vault, url=PAGE, extra_urls=[QUOTE])
+        with patch.object(y, 'tools', return_value={}), \
+                patch.object(y, 'extract', return_value=('Synthetic public page', 'test', None)):
+            y.process(self.vault, [saved['id']])
+        card = y.find_card(self.vault, saved['id'])
+        self.assertEqual(card['meta']['ek_urller'], [mailbox, QUOTE])
+        self.assertEqual(card['meta']['visibility'], 'private')
+        self.assertFalse(triage._scan_allowed(card['path'], self.vault, frozenset()))
+
 
 if __name__ == '__main__':
     unittest.main()

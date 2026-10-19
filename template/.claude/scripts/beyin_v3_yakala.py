@@ -512,7 +512,7 @@ def _capture(vault, url=None, text=None, files=(), why='', app=None, title=None,
                 copied = _capture_files(vault, folder, files)
                 if copied:
                     addition += '\n\n## Dosyalar\n\n' + '\n'.join('- [[' + item + ']]' for item in copied)
-                if text or copied:
+                if text or copied or any(kind_of(value) == 'mail' for value in merged):
                     card['meta']['visibility'] = 'private'
                 if capture_id:
                     identifiers = _capture_ids(card['meta'])
@@ -528,7 +528,8 @@ def _capture(vault, url=None, text=None, files=(), why='', app=None, title=None,
     path = _unique(folder / (name + '.md'))
     meta = {'tur': 'yakala', 'durum': 'bekliyor', 'kaynak_turu': kind, 'baslik': _first_line(title, 160),
             'url': url, 'yakalandi': stamp.isoformat(timespec='seconds'), 'arac': tool, 'uygulama': app,
-            'visibility': 'private' if kind in ('mail', 'metin', 'dosya') or text or files else 'internal'}
+            'visibility': 'private' if (kind in ('mail', 'metin', 'dosya') or text or files or
+                                       any(kind_of(value) == 'mail' for value in extra_urls)) else 'internal'}
     body = ['# ' + _first_line(title, 160), '', '## Neden', '', why or '_(not yok)_']
     if url:
         body += ['', '## Kaynak', '', url]
