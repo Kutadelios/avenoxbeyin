@@ -109,6 +109,10 @@ class LearningCandidateLedgerTest(unittest.TestCase):
         self.assertIsNotNone(res)
         self.assertEqual(res.get('decision'), 'block')
         self.assertIn("Öğrenilen: yok", res.get('reason', ''))
+        # The command in the reminder runs on every platform and names this session, so a
+        # harness without a session variable (Codex) stages into the right window.
+        self.assertIn('python3 beyin.py learn --session ' + session_hash + ' --candidate', res['reason'])
+        self.assertNotIn('py -3', res['reason'])
 
         # Subsequent Stop passes open (agent answered challenge or routine edit)
         res2 = hook.receipt_reminder(payload_stop, self.state, 'claude', 'Stop', vault=self.vault)
@@ -178,6 +182,7 @@ class LearningCandidateLedgerTest(unittest.TestCase):
             with self.subTest(name):
                 session_id = 'new-session-' + name
                 session_hash = hashlib.sha256(session_id.encode('utf-8')).hexdigest()[:24]
+                reason = reason.format(session=session_hash)
                 hook.receipt_reminder({'session_id': session_id}, self.state, 'claude', 'PostToolUse', vault=self.vault)
                 time.sleep(0.02)
                 self.engine.receipt('old-cli-' + name, 'İş bitti.\n' + line, ['notes/task.md'], 'claude',

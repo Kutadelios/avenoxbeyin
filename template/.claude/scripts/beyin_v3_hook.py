@@ -32,8 +32,8 @@ KNOWLEDGE_REMINDER = (
 )
 NO_LEARNING_CHALLENGE_REMINDER = (
     "Receipt declared no learnings ('Öğrenilen: yok') but files were edited in this session. "
-    "In V3, lasting lessons must be distilled into knowledge/ or staged as candidates "
-    "(state/learning-state.jsonl or py -3 beyin.py learn). If this edit was purely mechanical/routine "
+    "In V3, lasting lessons must be distilled into knowledge/ or staged as candidates: "
+    'python3 beyin.py learn --session {session} --candidate "Lesson". If this edit was purely mechanical/routine '
     "without new lessons, state that in one sentence to proceed."
 )
 HARNESS_SYNTHETIC_PROMPT_PREFIXES = (
@@ -354,7 +354,8 @@ def receipt_reminder(payload, state, harness, event, vault=None):
         if not kdone.exists():
             summary = receipt.get("summary", "")
             reason = (KNOWLEDGE_REMINDER if _has_declared_learning(summary)
-                      else NO_LEARNING_CHALLENGE_REMINDER if _is_bare_no_learning(summary) else None)
+                      else NO_LEARNING_CHALLENGE_REMINDER.format(session=session)
+                      if _is_bare_no_learning(summary) else None)
             if (reason and marker.get("knowledge") is not True and
                     not _has_staged_candidates(state, session, since) and
                     not _has_knowledge_update(vault, receipt, since)):
