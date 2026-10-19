@@ -8,6 +8,50 @@ Alanlar: `auto_sync` boolean; `interval_minutes` 0–1440 (0 her olay); `context
 
 Ekonomik profil: auto_sync=true, interval_minutes=15, context_mode=session, context_chars=2000. Manuel: auto_sync=false ve context_mode=off. Mevcut ayarların yalnız bir alanını değiştirmek için örneğin `preferences --interval-minutes 30`; profil seçmek otomatik kontrol ve bağlam alanlarını o profile sıfırlar, bağımsız sır süzgeci tercihini korur. Aralık değiştirmek kapalı kontrolü açmaz.
 
+## Günlük receipt düzeni
+
+`python3 beyin.py preferences --daily-layout flat` günlük receipt görünümlerini
+`daily/YYYY-MM-DD.md` yoluna yazar. Varsayılan `v3`, mevcut `daily/v3/YYYY-MM-DD.md`
+düzenini korur; geri dönmek için `--daily-layout v3` kullan. Tercih sonraki `sync` ile
+uygulanır. Ayar vault kökündeki `.beyin-daily-layout.json` dosyasındadır; vault'u Git ile
+eşitliyorsan bu dosyayı da eşitle. Makineye özel değildir, profil değişimleri etkilemez.
+Ayrı dosya eski sürümlerin sıkı `.beyin-preferences.json` şemasıyla uyumluluğu korur;
+eski motorlar bu tercihi uygulamaz, aynı vault'a yazan tüm makineleri güncelle.
+
+Flat hedefinde motorun takip etmediği, generated olmayan bir insan günlüğü varsa dosya
+korunur, görünüm yazılmaz ve çakışma oluşmaz. Receipt'ler `knowledge/v3/outcomes.md`
+içinde kalır; insan günlüğüne referans veren receipt'ler bağlamdan gizlenmez.
+Düzen değişince eski takip edilen görünüm yalnız son yazılan baytlarla aynıysa kaldırılır.
+Elle düzenlenmiş görünüm korunur ve `sync` ile `doctor` görünür uyarı verir.
+`python3 beyin.py sync --recover-views` bu düzenlemeyi yanındaki `.archive/` içine
+kayıpsız arşivleyip görünümü yeniden üretir veya eski görünümü kaldırır. Bu komut da
+takip edilmeyen insan günlüğüne dokunmaz.
+
+`preferences --human` etkin düzeni ve hedef yol kalıbını gösterir. Flat hedefi sembolik
+bağlantıysa hedef dosyaya dokunulmaz; `sync` kaynak uyarısı ile diğer notları işlemeye
+devam eder. State yeniden kurulduktan sonra eski düzende kalan `generated: true` ve
+`kind: receipt-index` görünümleri de bulunur. Baytları yeni düzende üretilecek içerikle
+aynıysa emekliye ayrılır; eşleşmiyorsa elle değiştirilmiş olabilecekleri için korunur
+ve yalnız `--recover-views` ile kayıpsız arşivlenir. Flat dosya adı tek başına sahiplik
+kanıtı değildir; state ve generated başlığı birlikte kaybolmuşsa insan notu sayılır.
+
+Üretilmiş bir görünüme dayandığı için bağlamdan dışlanan receipt'in kimlik kanıtı
+`receipts/<event-id-sha256>.md.view-provenance.json` içinde kalır. Receipt Markdown'ı
+değişmez; işaret özet metni veya not içeriği taşımaz. State silinip yeniden kurulduğunda
+ya da başka makineye geçildiğinde bu receipt dışarıda kalır; aynı eski günlük yolunu
+sonradan kullanan insan notuna dayanan **yeni kimlikli** receipt'ler görünür olabilir.
+`receipts/` eşitlenirken bu JSON dosyalarını da eşitle ve geçmiş kanıtı korumak için
+silme. İşaret bozuksa sessizce onarılmaz; ilgili receipt dışarıda tutulur, uyarı verilir
+ve mevcut görünümler korunur. İşaret yazılamadığında veya POSIX dizin `fsync` başarısız
+olduğunda da görünümün son kopyası silinmez; sorun giderilip `sync` yeniden çalıştırılır.
+Windows'ta Python'un standart API'siyle dizin `fsync` yoktur; dosya `fsync` ve atomik
+yenileme uygulanır. Eski motorlar yeni JSON işaretlerini okuyamaz; dosya biçimi onları
+bozmasa da state kaybından sonraki bu dışlama güvencesi için tüm makineleri güncelle.
+Önceki sürümden kalan SQLite dışlama satırları ilk `sync` sırasında bu işaretlere
+aktarılır. Güncellemeden önce hem state hem eski görünümün kanıtı zaten kaybolmuşsa
+geçmiş güvenle çıkarılamaz; eski state veya vault yedeği gerekir. İnsan günlüklerini
+yanlışlıkla gizlememek için yalnız dosya adından geçmiş sahiplik uydurulmaz.
+
 ## Hafıza dosyası sınırları
 
 `Last-Session.md` varsayılan olarak 3.000, `Threads.md` 8.000 karakterle sınırlıdır.

@@ -692,6 +692,7 @@ class YakalaUnitTest(unittest.TestCase):
             commands.append(command)
             return subprocess.CompletedProcess(command, code, clip if isinstance(clip, bytes) else clip.encode('utf-8'), b'')
         with patch.object(yakala.sys, 'platform', 'linux'), patch.dict(yakala.os.environ, {'WAYLAND_DISPLAY': 'wayland-0'}), \
+                patch.object(yakala, 'linux_browser_context', return_value={}), \
                 patch.object(yakala, '_which', lambda *names: next(('/usr/bin/' + n for n in names if n not in missing), None)), \
                 patch.object(yakala.subprocess, 'run', run):
             if not wayland:
@@ -809,7 +810,8 @@ class YakalaUnitTest(unittest.TestCase):
 
     def test_fallback_on_other_systems_never_opens_a_linux_dialog(self):
         with patch.object(yakala, '_linux_ask', side_effect=AssertionError('Linux dialog')), \
-                patch.object(yakala, '_osascript', return_value='mac nedeni') as mac:
+                patch.object(yakala, '_osascript', return_value='mac nedeni') as mac, \
+                patch.object(yakala, 'default_state', return_value=Path(self.tmp.name) / 'capture-state'):
             with patch.object(yakala.sys, 'platform', 'darwin'):
                 saved = yakala._popup_fallback(self.vault, {'url': 'https://ornek.com/mac', 'baslik': 'Başlık', 'uygulama': 'Safari'})
             with patch.object(yakala.sys, 'platform', 'win32'):
