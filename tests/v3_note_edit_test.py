@@ -358,7 +358,9 @@ with locked(engine):
             mark.assert_not_called()
             self.engine.sync()
             self.assertEqual(invoke(self.request('unindexed', 'merged'))[0]['status'], 'written')
-            mark.assert_called_once_with(self.state)
+            mark.assert_called_once()
+            # The CLI resolves the state root; macOS /var and Windows 8.3 temp names differ.
+            self.assertEqual(Path(mark.call_args.args[0]).resolve(), self.state.resolve())
         marker = self.run_cli('note-edit', self.request('merged', 'final'))
         self.assertEqual(marker.returncode, 0, marker.stdout + marker.stderr)
         key = hashlib.sha256(b'synthetic-note-session').hexdigest()
