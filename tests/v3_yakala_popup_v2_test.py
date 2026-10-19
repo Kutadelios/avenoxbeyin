@@ -1,4 +1,5 @@
 """Popup v2 source policy and card compatibility, with no desktop or network."""
+import contextlib
 import os
 from pathlib import Path
 import sys
@@ -115,7 +116,8 @@ class CardCompatibilityTest(unittest.TestCase):
         for platform in ('nt', 'posix'):
             system = types.SimpleNamespace(**{**vars(os), 'name': platform})
             url = PAGE + '/' + platform
-            with patch.object(y, 'os', system):
+            # Only the card writer is under test; the commit lock's OS primitive belongs to the host.
+            with patch.object(y, 'os', system), patch.object(y, '_WindowsCommitLock', lambda _vault: contextlib.nullcontext()):
                 saved = y.capture(self.vault, url=url, files=[source])
                 y.capture(self.vault, url=url, files=[source])
             card = y.find_card(self.vault, saved['id'])
