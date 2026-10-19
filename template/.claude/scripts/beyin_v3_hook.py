@@ -230,16 +230,18 @@ _NO_LEARNING_EXPLAINED = re.compile(
 
 
 def _is_bare_no_learning(summary):
-    """True when receipt declares 'none'/'yok' without a parenthetical explanation."""
+    """True when receipt declares 'none'/'yok' without a parenthetical explanation.
+
+    An empty label is not an answer: "Öğrenilen:" often heads a list on the following lines,
+    and the challenge must not tell that agent it declared no learnings.
+    """
     if not isinstance(summary, str):
         return False
     for line in summary.splitlines():
         match = _LEARNING_LABEL.match(_tr_fold(line).strip())
         if match:
             content = match.group(1).strip().strip(".!*_` ").strip()
-            if not content:
-                return True
-            if _NO_LEARNING.fullmatch(content) and not _NO_LEARNING_EXPLAINED.fullmatch(content):
+            if content and _NO_LEARNING.fullmatch(content) and not _NO_LEARNING_EXPLAINED.fullmatch(content):
                 return True
     return False
 

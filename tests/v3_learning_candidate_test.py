@@ -118,6 +118,20 @@ class LearningCandidateLedgerTest(unittest.TestCase):
         res2 = hook.receipt_reminder(payload_stop, self.state, 'claude', 'Stop', vault=self.vault)
         self.assertIsNone(res2)
 
+    def test_an_empty_label_heading_a_list_is_not_challenged_as_no_learning(self):
+        session_id = 'list-under-label'
+        session_hash = hashlib.sha256(session_id.encode('utf-8')).hexdigest()[:24]
+        hook.receipt_reminder({'session_id': session_id}, self.state, 'claude', 'PostToolUse', vault=self.vault)
+        time.sleep(0.02)
+        self.engine.receipt('list-1', 'İş bitti.\nÖğrenilen:\n- WAL zaman aşımı en az 5 sn', ['notes/task.md'],
+                            'claude', session=session_hash)
+        self.assertIsNone(hook.receipt_reminder({'session_id': session_id}, self.state, 'claude', 'Stop',
+                                                vault=self.vault))
+        self.assertFalse(hook._is_bare_no_learning('Öğrenilen:'))
+        for bare in ('Öğrenilen: yok', 'ÖĞRENİLEN: YOK', 'Ogrenilen: hiçbiri', 'Learned: none'):
+            self.assertTrue(hook._is_bare_no_learning('İş bitti.\n' + bare), bare)
+        self.assertFalse(hook._is_bare_no_learning('Öğrenilen: yok (rutin kontrol)'))
+
     def test_staged_candidate_satisfies_learning_contract(self):
         session_id = 'test-staged-candidate'
         session_hash = hashlib.sha256(session_id.encode('utf-8')).hexdigest()[:24]
