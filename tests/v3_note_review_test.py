@@ -173,8 +173,10 @@ print(json.dumps(result))
                                     env=self.env, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
-        self.assertEqual(report['status'], 'conflict')
-        self.assertTrue(any('writer busy' in item['reason'] for item in report['conflicts']))
+        # Deferring a live writer's journal is not a conflict: a hook sync running beside
+        # note-create would otherwise drop SessionStart context and record hook-error.json.
+        self.assertEqual(report['status'], 'succeeded')
+        self.assertEqual(report['conflicts'], [])
         self.assertFalse(path.exists())
         self.assertEqual(len(list(self.engine.journal.glob('*.json'))), 1)
         self.assertEqual(self.engine.sync()['status'], 'succeeded')

@@ -881,7 +881,13 @@ class SyncEngine:
                 # transaction: another writer may hold the note lock and need it.
                 with ExitStack() as guard:
                     if intent.get('kind') == 'note':
-                        guard.enter_context(locked(self, timeout=0))
+                        try:
+                            guard.enter_context(locked(self, timeout=0))
+                        except NoteConflict:
+                            # A live writer holds the lock (the OS releases it when a
+                            # process dies). Its own sync, or a later one, replays this
+                            # journal; a concurrent hook sync is not a source conflict.
+                            continue
                     path = self._path(intent['source'])
                     actual = _hash(path.read_bytes()) if path.exists() else None
                     desired = _hash(intent['content'])

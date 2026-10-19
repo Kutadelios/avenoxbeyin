@@ -221,9 +221,10 @@ OS kilidi en çok 15 saniye bekler ve süreç kapanınca bırakılır. `note-cre
 de varlık denetimi, kaynak yazımı ve indeks geri okumasında aynı kilidi alır;
 farklı state kökleri kullanan istemciler de aynı yeni notu sessizce ezemez.
 Başarısız `note-create` işleminden kalan journal'ın `sync` ile yeniden
-oynatılması da bu kilide dahildir. Kilit başka yazardaysa geri kazanım beklemeden
-`conflict` raporlanır ve journal korunur; yazarı bitirdikten sonra `sync` yeniden
-çalıştırılır. Böylece veritabanı işlemi açıkken başka yazarın kilidi beklenmez.
+oynatılması da bu kilide dahildir. Kilit başka yazardaysa bu `sync` o journal
+kaydını beklemeden atlar ve korur; kilidi tutan yazarın kendi `sync`'i ya da sonraki
+`sync` onu tamamlar. Bu durum çakışma sayılmaz, hook bağlamı düşmez. Böylece
+veritabanı işlemi açıkken başka yazarın kilidi beklenmez.
 Kilit altında
 hash kontrolü, tekil hedef denetimi, tam bayt yedeği, geçici dosyaya yazım ve atomik
 değiştirme yapılır; değiştirmeden hemen önce ve sonra kaynak yeniden okunur.
