@@ -591,9 +591,11 @@ def _install(vault, state, uninstall=False, plan_only=False, version="3.0.0", le
     add(".claude/scripts/beyin_v3_cli.py", (ROOT / "scripts/beyin_v3.py").read_bytes())
     hook = vault / ".claude/scripts/beyin_v3_hook.py"
     kiro_adapter = vault / ".claude/scripts/beyin_v3_kiro.py"
+    # The hook files are the user's, and Windows PowerShell 5.1 (Set-Content -Encoding UTF8) and
+    # many editors save JSON with a UTF-8 BOM, which json.loads refuses in a str (#336).
     for harness, name in (("claude", ".claude/settings.local.json"), ("codex", ".codex/hooks.json")):
         path = vault / name
-        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        data = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
         hooks = data.setdefault("hooks", {})
         for event, groups in list(hooks.items()):
             cleaned = []
@@ -632,13 +634,13 @@ def _install(vault, state, uninstall=False, plan_only=False, version="3.0.0", le
     # Claude merges checked-in and local settings; retire only recognized legacy adapters.
     path = vault / ".claude/settings.json"
     if path.exists():
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         for event, groups in data.get("hooks", {}).items():
             data["hooks"][event] = [dict(group, hooks=remaining) for group in groups
                                      if (remaining := [h for h in group.get("hooks", []) if not managed_handler(h, manifest.get("commands", []), kept)])]
         add(".claude/settings.json", jbytes(data))
     path = vault / ".agents/hooks.json"
-    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    data = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
     data.pop("avenox-beyin", None)
     if "harnesses/antigravity" in user_excluded:
         data.pop("beyin-v3", None)
