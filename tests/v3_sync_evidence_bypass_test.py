@@ -33,10 +33,11 @@ class TestSyncEvidenceBypass(unittest.TestCase):
             self.skipTest('Symlink privilege not held on this system')
 
     def test_case_variation(self):
-        if os.name == 'nt':
-            self.skipTest('NTFS is case-insensitive')
         evidence = self.root / 'Evidence.txt'
         evidence.write_text('evidence', encoding='utf-8')
+        if (self.root / 'evidence.txt').exists():
+            # NTFS and default APFS: both spellings are one existing source, so no issue is right.
+            self.skipTest('case-insensitive volume')
         metadata = {
             'id': 'T-1',
             'title': 'Test',

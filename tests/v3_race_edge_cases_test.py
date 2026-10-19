@@ -48,7 +48,8 @@ class TestHygieneAndCompactRaceEdgeCases(unittest.TestCase):
     def test_beyin_v3_compact_rollback_unlink_missing(self):
         from beyin_v3_compact import _compact_files
         with TemporaryDirectory() as d:
-            vault = Path(d)
+            # macOS /var -> /private/var and Windows RUNNER~1: _inside() compares resolved paths.
+            vault = Path(d).resolve()
             target = vault / 'companion'
             target.mkdir()
 
@@ -78,7 +79,9 @@ class TestHygieneAndCompactRaceEdgeCases(unittest.TestCase):
                 with patch.object(Path, 'unlink', new=mock_unlink):
                     from datetime import datetime, timezone
                     now = datetime(2023, 10, 1, tzinfo=timezone.utc)
-                    _compact_files(vault, target, configured, dry_run=False, now=now)
+                    result = _compact_files(vault, target, configured, dry_run=False, now=now)
+            # The rollback ran (live file changed after the archive write) and reported it.
+            self.assertEqual(result['files']['Last-Session.md']['status'], 'conflict')
 
 
 if __name__ == '__main__':
