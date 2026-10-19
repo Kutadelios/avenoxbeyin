@@ -6385,6 +6385,145 @@ def _agent_codex_permissions():
             '-c', 'default_permissions=' + json.dumps(name)]
 
 
+def _agent_codex_home(vault):
+    cwd = Path(vault) if vault else Path.cwd()
+    home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex').expanduser()
+    return (cwd / home).resolve()
+
+
+def _agent_codex_config_files(vault):
+    """Include lower-priority layers too: merging must not hide a managed limit."""
+    cwd = Path(vault) if vault else Path.cwd()
+    home = _agent_codex_home(vault)
+    files = [(home / 'config.toml', False), (home / 'managed_config.toml', True),
+             (home / 'requirements.toml', True)]
+    files += [(Path('/etc/codex') / name, name != 'config.toml')
+              for name in ('config.toml', 'managed_config.toml', 'requirements.toml')]
+    files += [(parent / '.codex' / 'config.toml', False) for parent in (cwd, *cwd.parents)]
+    # A default user profile can load <name>.config.toml alongside config.toml.
+    # Check all such fragments, including inactive ones, without reimplementing
+    # Codex's profile selection and config merge rules.
+    for folder in dict.fromkeys(path.parent for path, _ in files):
+        try:
+            with os.scandir(folder) as entries:
+                for index, entry in enumerate(entries):
+                    if index >= 4096:
+                        raise ValueError('config directory size limit')
+                    if entry.name.endswith('.config.toml'):
+                        files.append((folder / entry.name, False))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            raise ValueError('Codex config konumlari okunamadi; '
+                             'guvenli kok reddi dogrulanamadi, ajan baslatilmadi.') from exc
+    return tuple(dict.fromkeys(files))
+
+
+def _agent_codex_profile_preflight(vault):
+    """Refuse constraints which can replace the random POSIX root-deny profile.
+
+    Codex 0.163.0 can silently select a managed default when a named profile is
+    outside allowed_permission_profiles. --strict-config does not prevent that.
+    Never try to infer that an administrator's alternative profile is safe.
+    """
+    if os.name == 'nt':
+        return
+    import tomllib
+
+    def check(value, managed=False):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in ('allowed_permission_profiles', 'allowed_sandbox_modes', 'remote_sandbox_config') or (
+                        managed and key in ('default_permissions', 'sandbox_mode')):
+                    raise ValueError('Codex izin profili yonetici veya kullanici ayariyla kisitli (' + key +
+                                     '); guvenli kok reddi dogrulanamadi, ajan baslatilmadi. '
+                                     'Normal Codex oturumunda yapilandirmayi incele.')
+                check(item, managed)
+        elif isinstance(value, list):
+            for item in value:
+                check(item, managed)
+
+    def read(path):
+        try:
+            with path.open('rb') as stream:
+                data = stream.read(1024 * 1024 + 1)
+            if len(data) > 1024 * 1024:
+                raise ValueError('config size limit')
+            return data
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            raise ValueError('Codex izin yapilandirmasi okunamadi; guvenli kok reddi dogrulanamadi, '
+                             'ajan baslatilmadi. Config dosyalarini ve erisim izinlerini incele.') from exc
+
+    def check_toml(data, managed):
+        try:
+            value = tomllib.loads(data.decode('utf-8'))
+        except (UnicodeError, ValueError) as exc:
+            raise ValueError('Codex izin yapilandirmasi cozumlenemedi; '
+                             'ajan baslatilmadi. Config TOML dosyalarini incele.') from exc
+        check(value, managed)
+
+    for path, managed in _agent_codex_config_files(vault):
+        data = read(path)
+        if data is not None:
+            check_toml(data, managed)
+
+    # Cloud-managed requirements are another config layer. The local CLI probes
+    # can refresh this cache; preflight checks it again after those probes.
+    data = read(_agent_codex_home(vault) / 'cloud-config-bundle-cache.json')
+    if data is not None:
+        try:
+            bundle = json.loads(data)
+        except (UnicodeError, ValueError) as exc:
+            raise ValueError('Codex yonetilen bulut config onbellegi cozumlenemedi; ajan baslatilmadi.') from exc
+        # Do not depend on a particular cache schema to unwrap embedded TOML.
+        # A present managed bundle is refused even if its limits appear unrelated.
+        if bundle:
+            raise ValueError('Codex yonetilen bulut config onbellegi var; '
+                             'guvenli kok reddi dogrulanamadi, ajan baslatilmadi. '
+                             'Normal Codex oturumunda yonetici ayarlarini incele.')
+
+    if sys.platform == 'darwin':
+        _agent_codex_mdm_preflight()
+
+
+def _agent_codex_mdm_preflight():
+    # MDM can supply both legacy config and requirements outside CODEX_HOME.
+    # Refuse a present managed domain rather than guessing its effective policy
+    # from on-disk plist files (CFPreferences can also provide host/user layers).
+    import ctypes
+    try:
+        cf = ctypes.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
+        cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+        cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        cf.CFPreferencesCopyAppValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        cf.CFPreferencesCopyAppValue.restype = ctypes.c_void_p
+        cf.CFRelease.argtypes = [ctypes.c_void_p]
+        domain = cf.CFStringCreateWithCString(None, b'com.openai.codex', 0x08000100)
+        if not domain:
+            raise ValueError('MDM domain')
+        try:
+            for name in (b'config_toml', b'requirements_toml', b'config_toml_base64',
+                         b'requirements_toml_base64'):
+                key = cf.CFStringCreateWithCString(None, name, 0x08000100)
+                if not key:
+                    raise ValueError('MDM key')
+                try:
+                    value = cf.CFPreferencesCopyAppValue(key, domain)
+                finally:
+                    cf.CFRelease(key)
+                if value:
+                    cf.CFRelease(value)
+                    raise ValueError('MDM policy')
+        finally:
+            cf.CFRelease(domain)
+    except (OSError, AttributeError, ValueError) as exc:
+        raise ValueError('Codex yonetilen macOS izin yapilandirmasi var veya okunamadi; '
+                         'guvenli kok reddi dogrulanamadi, ajan baslatilmadi. '
+                         'Normal Codex oturumunda yonetici ayarlarini incele.') from exc
+
+
 def _agent_codex_features(prefix, vault, *, restricted=False):
     """Validate the plain feature table before using any feature name in --disable.
 
@@ -6457,6 +6596,7 @@ def _agent_preflight(client, prefix, vault=None):
     if rc or any(flag not in output for flag in required):
         raise ValueError('Ajan CLI gerekli guvenlik bayraklarini desteklemiyor: ' + client)
     if client == 'codex':
+        _agent_codex_profile_preflight(vault)
         rc, output, error = _run([*prefix, '--version'], 15, cwd=str(vault) if vault else None)
         match = re.fullmatch(r'codex-cli (\d+)\.(\d+)\.(\d+)', output.strip())
         if rc or not match or tuple(map(int, match.groups())) < CODEX_MIN_VERSION:
@@ -6482,6 +6622,7 @@ def _agent_preflight(client, prefix, vault=None):
                 mcp_off.append(name)
         if any(item['enabled'] for item in _agent_codex_inventory(prefix, vault, 'mcp', mcp_off)):
             raise ValueError('Codex MCP sunuculari bu calistirmada kapatilamadi; normal oturumda incele.')
+        _agent_codex_profile_preflight(vault)
         return tuple(mcp_off)
     return ()
 
