@@ -48,14 +48,14 @@ class CodexFeatureReviewTest(AgentFiles):
             if argv[-2:] == ['exec', '--help']:
                 return 0, '--ignore-rules --json --sandbox --skip-git-repo-check', ''
             if argv[-1] == '--help':
-                return 0, '--disable --ask-for-approval', ''
+                return 0, '--disable --ask-for-approval --strict-config', ''
             self.fail('Preflight attempted an unexpected CLI invocation: ' + repr(argv))
 
         with patch.object(yakala, '_run', side_effect=run):
             return yakala._agent_preflight('codex', ['codex'], self.vault)
 
     def test_supported_versions_discover_then_disable_without_json_or_model_calls(self):
-        for version in ('codex-cli 0.155.1', 'codex-cli 0.160.0\r\n'):
+        for version in ('codex-cli 0.155.1', 'codex-cli 0.160.0\r\n', 'codex-cli 0.163.0'):
             with self.subTest(version=version):
                 self.assertEqual(self.preflight(version), ())
                 calls = [entry[0] for entry in self.calls]
@@ -76,10 +76,17 @@ class CodexFeatureReviewTest(AgentFiles):
 
     def test_unsupported_or_ambiguous_version_stops_before_feature_flags(self):
         for version in ('codex-cli 0.155.0', 'codex-cli 0.154.2', 'codex-cli 0.160.0-alpha.1',
+                        'codex-cli 0.164.0-alpha.3',
                         'another CLI 0.160.0', '2.1.302 (Claude Code)', '', '0.160.0'):
             with self.subTest(version=version), self.assertRaisesRegex(ValueError, 'Codex 0.155.1'):
                 self.preflight(version)
             self.assertFalse(any('--disable' in argv for argv, _, _ in self.calls))
+
+    def test_missing_strict_config_support_stops_before_loading_a_profile(self):
+        with patch.object(yakala, '_run', return_value=(0, '--disable --ask-for-approval', '')) as run:
+            with self.assertRaisesRegex(ValueError, 'guvenlik bayraklarini'):
+                yakala._agent_preflight('codex', ['codex'], self.vault)
+        self.assertEqual(run.call_count, 1)
 
     def test_every_required_feature_must_be_present_even_if_all_others_are_off(self):
         for feature in FEATURES:
@@ -145,12 +152,20 @@ class CodexFeatureReviewTest(AgentFiles):
     def test_window_and_headless_commands_deny_images_both_agent_generations_and_writes(self):
         self.configure('codex')
         _, job, _ = self.queued(url='https://example.com/post')
+        names = set()
         for view in ('gizli', 'pencere'):
             with self.subTest(view=view), patch.object(yakala, '_agent_window_supported', return_value=True), \
                     patch.object(yakala, '_agent_executable', return_value=['codex']):
                 job['config']['gorunum'] = view
                 argv = yakala._agent_command(self.vault, self.state, job, job['config'])
-                self.assertEqual(argv[argv.index('-s') + 1], 'read-only')
+                self.assertIn('--strict-config', argv)
+                self.assertNotIn('-s', argv)
+                self.assertNotIn('--sandbox', argv)
+                selected = next(item for item in argv if item.startswith('default_permissions='))
+                profile = json.loads(selected.split('=', 1)[1])
+                self.assertRegex(profile, r'^beyin_yakala_[0-9a-f]{32}$')
+                names.add(profile)
+                self.assertIn('permissions.' + profile + '.filesystem={":root"="deny"}', argv)
                 self.assertEqual(argv[argv.index('-a') + 1], 'never')
                 self.assertIn('agents.enabled=false', argv)
                 for feature in ('view_image', 'multi_agent', 'multi_agent_v2'):
@@ -162,6 +177,8 @@ class CodexFeatureReviewTest(AgentFiles):
                 self.assertEqual('exec' in argv, view == 'gizli')
                 if view == 'pencere':
                     self.assertEqual(argv[-2], '--')
+        # A name copied from the user's config must not contribute narrower read/write grants.
+        self.assertEqual(len(names), 2)
 
 
 class AgentClientOptionsReviewTest(AgentFiles):

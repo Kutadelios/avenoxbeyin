@@ -314,7 +314,7 @@ ajan işinin popup'tan ayrılmasını sağlayan yeni süreç ayarını almalıd�
 - `gizli` (varsayılan): iş arka planda başsız bir oturumda çalışır, bitince bildirim gelir.
 - `pencere`: Ctrl+Enter ekranda seçili istemcinin Claude Code veya Codex penceresini açar; ajanın ne yaptığını canlı
   izlersin, gerekirse aynı pencerede yazarak yön verirsin. Araç sınırı gizli çalışmayla aynıdır
-  (genel kabuk kapalıdır; Codex'in kalan `apply_patch` sınırı ve ağ ayarı aşağıda). İş, ajan `complete` çağırınca
+  (genel kabuk kapalıdır; Codex'in dosya okuma profili ve ağ ayarı aşağıda). İş, ajan `complete` çağırınca
   teslim edilir; receipt ve kart güncellemesi yine çalışan tarafından doğrulanarak yapılır, pencere
   açık kalır ve konuşma sürdürülebilir. Pencereyi sonuç bırakmadan kapatırsan iş `onay-bekliyor`
   olur. Tur ve bütçe sınırları yalnız gizli çalışmada uygulanır; zaman sınırı ikisinde de
@@ -545,8 +545,12 @@ tekrarlanan anahtar, bozuk/kapanmamış metadata veya desteklenmeyen biçim sess
 
 Claude profili `dontAsk`, `--permission-prompts none`, sınırlı built-in araçlar ve yalnız bu
 MCP yapılandırmasıyla çalışır; `--permission-prompts` için en az 2.1.259 gerekir. Codex için
-desteklenen en eski kararlı sürüm **0.155.1**'dir. Codex profili `-a never`, `-s read-only`,
-`--ignore-rules` ve `-c agents.enabled=false` kullanır. Ön kontrol önce bayraksız
+desteklenen en eski kararlı sürüm **0.155.1**'dir. Codex profili `-a never`, `--strict-config`,
+`-c agents.enabled=false` ve her çalıştırma için rastgele adlandırılan bir izin profili kullanır.
+Bu profilin tek dosya sistemi girdisi `":root"="deny"` olduğu için yerel araçlara okuma ya da
+yazma kökü verilmez. Profil `-c default_permissions=...` ile seçilir; `-s read-only` eklenmez:
+eski sandbox seçicisi adlı profili devre dışı bırakır. Gizli çalışmada `--ignore-rules` da
+kullanılır. Ön kontrol önce bayraksız
 `codex features list` düz tablosunu okur; bu komuta `--json` verilmez. Ardından işin kapatma
 bayraklarıyla etkin durumları doğrular. Eksik, kaldırılmış, yinelenen veya ayrıştırılamayan
 gerekli özellik; eski/ön sürüm; başarısız ya da aşırı büyük envanter çıktısı işi durdurur.
@@ -571,7 +575,7 @@ yalnız altı `mcp__yakala__*` aracıdır, `acik` ağda buna `WebSearch` eklenir
 yoktur. `kisitli` ağda model URL'ye not metni ekleyince köprü adresi reddetti. Bu kayıt güncel
 dalın Windows üzerinde ölçümü değildir. [#384 bakımcı yorumu](https://github.com/avenoxai/avenoxbeyin/pull/384#issuecomment-6243678257)
 
-Yeni ölçüm (19.10.2026 Türkiye saati; 18.10.2026 23:12-23:14 UTC): resmî Linux Codex 0.155.1,
+Önceki `read-only` profilinin ölçümü (19.10.2026 Türkiye saati; 18.10.2026 23:12-23:14 UTC): resmî Linux Codex 0.155.1,
 boş/geçici `CODEX_HOME`, zararsız test dosyaları ve yerel sahte Responses API kullanıldı.
 Gerçek hesaba/model hizmetine istek gönderilmedi. Zorlanan `view_image`, `exec_command` ve
 `spawn_agent` çağrıları desteklenmeyen araç olarak reddedildi. Vault içinde/dışında mevcut
@@ -580,15 +584,34 @@ test dosyaları değişmedi. Etkin `local_mcp` bulunan ayrı ön kontrol onu iş
 config dosyasının hash'i aynı kaldı. Bu deneme gerçek modelin altı MCP aracıyla bir işi
 bitirdiğini veya Windows sandbox davranışını ölçmez.
 
-**Codex'te kalan sınır, #384 bulgu 2 kısmen açık:** `apply_patch` araç yüzeyinde kalır.
-0.155.1'de `apply_patch_freeform` kaldırılmış ve etkisizdir; desteklenen bağımsız bir kapatma
-anahtarı bulunmadı. `read-only` ve `never` yazmayı engeller, fakat yama bağlamı bu kontrolden
-önce doğrulanır. Gerçek denemede mevcut bir satır doğru tahmin edildiğinde yazma politikası
-hatası, yanlış tahminde beklenen satırın bulunamadığı hatası döndü; vault dışında da aynı
-ayrım oluştu. Tam dosya okunmadı, ancak içerik tahmini doğrulama kanalı vardır. Bu nedenle
-Codex için bütün yerel okumaların yalnız Yakala köprüsünden geçtiği söylenemez. Sıkı not
-okuma sınırı gereken kullanımda Claude seçilmelidir. Codex desteği bu sürümde korunmuştur;
-bu sınır kabul edilmeden bulgu 2 tamamen kapatılmış sayılmamalıdır.
+**Codex `apply_patch`, #384 bulgu 2 için yeni düzeltme (19.10.2026 UTC):** Araç yüzeyinde
+`apply_patch` kalabilir; `apply_patch_freeform` 0.155.1 ve güncel kararlı 0.163.0'da
+kaldırılmıştır ve güvenlik anahtarı değildir. Eski `read-only` profili 0.163.0'da da doğru
+ve yanlış satır tahminine farklı hatalar verdi. Bu dal bunun yerine resmî belgelerdeki
+**adlı dosya sistemi izin profilini** kullanır. `":root"="deny"`, yama doğrulamasının
+dosya okumasına da uygulanır. Kullanıcının aynı ad altındaki daha dar izinleri birleşerek
+yeniden açılmasın diye her komut için yeni 128 bit rastgele profil adı üretilir; config
+dosyası düzenlenmez. `:minimal`, vault, geçici dizin veya Python köküne ek okuma izni verilmez.
+
+Resmî **Linux 0.155.1, 0.160.0 ve 0.163.0** ikilileriyle, her sürümde iki testin her birinde
+28 zorlanmış `apply_patch` çağrısı sınandı: göreli/mutlak, vault içi/dışı yollar; Update/Move için doğru
+ve yanlış bağlam; Delete; mevcut/yeni dosyaya Add. Doğru/yanlış çiftleri aynı okuma hatasıyla
+reddedildi, içerik açığa çıkmadı ve mevcut dosya hash'leri değişmedi. Her sürümde ayrıca gerçek
+Yakala MCP köprüsü izinli notu ve `AGENTS.md`'yi okudu, private notu reddetti, sonuç notunu
+yazdı ve `complete` teslimini kabul etti. Normal hash güveni verilmiş sentetik `SessionStart`
+hook'u ilk isteğe hafıza bağlamı ekledi. Yerel sahte Responses API kullanıldı; gerçek hesap
+ve model hizmeti kullanılmadı. Bu, `complete` teslim kanıtıdır; canlı masaüstünde receipt,
+Last-Session ve bildirimin tamamlandığı ölçümü değildir. Testler mevcut kullanıcı
+config'inde `workspace-write` ile ayrıca seçilmiş config profilinde `read-only` bulunan
+durumları kapsar; yeni izin seçiminin bu legacy ayarlar altında da etkinliği ölçüldü.
+
+İzin profilleri resmî belgede **beta** durumundadır. `--strict-config`, bilinmeyen üst düzey
+ayarların sessizce yok sayılmasını önler; gelecekteki bütün davranış değişikliklerini
+saptayan bir güvenlik kanıtı değildir. En yeni görülen ön sürüm **0.164.0-alpha.3** yalnız
+kaynakta incelendi; mevcut kararlı sürüm kapısı bunu kabul etmez. Linux'ta bu tahmin kanalı
+kapatıldı. **Native Windows ve macOS uygulaması henüz ölçülmedi**; aşağıdaki masaüstü
+matrisiyle doğrulanmalıdır. Kaynak, hash ve tekrar komutları:
+[Codex dosya okuma sınırı incelemesi](CODEX-APPLY-PATCH.md).
 
 **Güven sınırı:** Normal vault hook'ları, istemci ve `beyin.py receipt` güvenilen yerel koddur;
 onların kendi davranışları bu araç köprüsü tarafından sandbox içine alınmaz. Ajanın kullandığı
@@ -703,9 +726,13 @@ Gerçek kullanıcı sırları yerine ayırt edilebilir zararsız test notları k
 9. Önceden etkin MCP ve eklenti bulunan geçici CLI profilinde işi çalıştır; başka sunucunun
    aracı açılmamalı, kullanıcı config hash'i değişmemeli. Claude `--model haiku` ve özel
    executable seçildikten sonra Codex'e geç; yeni iş varsayılan Codex seçeneğiyle başlamalı.
-10. Sahte notlarla Codex `apply_patch` yazma/okuma tahmini sınırını doğrula: vault içinde ve
-    dışında mevcut/yeni dosyaya yazma reddedilmeli; doğru ve yanlış satır tahmininin hata
-    ayrımı kayıt altına alınmalı. Yazma reddini bütün yerel okumaların kapandığı diye yorumlama.
+10. Sahte notlarla yeni Codex dosya okuma profilini hem gizli hem pencere kipinde doğrula:
+    vault içinde/dışında, göreli/mutlak yollarda Update/Move/Delete ve mevcut/yeni Add
+    reddedilmeli. Aynı yol ve işlemde doğru/yanlış satır tahmini aynı içeriksiz hataya
+    dönmeli; hiçbir mevcut dosyanın hash'i değişmemeli. Windows sandbox türünü de kaydet.
+    Ardından aynı oturumda izinli MCP not okuması, private reddi, sonuç, receipt ve
+    Last-Session zincirini doğrula. Bu ölçümü geçmeyen kurulumu kapalı okuma sınırı olarak
+    sunma; `-s read-only` veya ek okuma kökü vererek sınırı gevşetme.
 11. İzinli `fetch_source`/`download` çağrılarını karışık ve başarısız denemelerle toplam 8'e
     getir. Dokuzuncu çağrı ağdan önce reddedilmeli. Aynı işe yeni MCP bağlantısı açmak hakkı
     yenilememeli; `complete` yine çalışmalı. `acik` araç açıklaması yeni public URL'yi
@@ -746,8 +773,9 @@ Gerçek kullanıcı sırları yerine ayırt edilebilir zararsız test notları k
 ### Teknik kaynaklar
 
 İlk CLI/bildirim bağlantılarının erişim tarihi **17.10.2026**; aşağıdaki sürüm sabitli Codex,
-süreç, atomik yayın ve klavye kaynakları bu düzeltmede **19.10.2026 Türkiye saati** ile
-incelenmiştir (UTC kayıtları 18.10.2026). CLI seçenekleri değişebilir;
+süreç, atomik yayın ve klavye kaynakları ilk düzeltmede **19.10.2026 Türkiye saati** ile
+incelenmiştir (UTC kayıtları 18.10.2026). Adlı Codex izin profili araştırması ve üç resmî
+ikiliyle regresyon **19.10.2026 UTC** tarihinde yapıldı. CLI seçenekleri değişebilir;
 belge desteği bu bilgisayarda canlı çalıştırma kanıtı değildir.
 
 - İnceleme: [#384 ana yorum](https://github.com/avenoxai/avenoxbeyin/pull/384#issuecomment-6243678257),
@@ -761,7 +789,15 @@ belge desteği bu bilgisayarda canlı çalıştırma kanıtı değildir.
   [apply_patch doğrulama sırası](https://github.com/openai/codex/blob/rust-v0.155.1/codex-rs/core/src/tools/handlers/apply_patch.rs).
   Linux musl binary SHA-256: `a0ef8b2debc3bf747e07b1a039354de31300ac0dcc2276498ba281470b5d9115`.
   [0.160.0 özellik tablosu](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/features/src/lib.rs)
-  kaynakta karşılaştırıldı; yeni dal bu sürümle canlı çalıştırılmış sayılmaz.
+  kaynakta karşılaştırıldı; bu düzeltmede 0.160.0 ikilisiyle de sentetik CLI/MCP testi yapıldı.
+- Codex izin sınırı: [resmî beta profiller ve kapsam](https://learn.chatgpt.com/docs/permissions),
+  [0.163.0 sürümü](https://github.com/openai/codex/releases/tag/rust-v0.163.0),
+  [0.164.0-alpha.3 ön sürümü](https://github.com/openai/codex/releases/tag/rust-v0.164.0-alpha.3),
+  [0.163.0 yama doğrulaması](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/core/src/tools/handlers/apply_patch.rs),
+  [izin profilinin derlenmesi](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/core/src/config/permissions.rs),
+  [CLI profil seçimi](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/core/src/config/mod.rs),
+  [normal hook güven sözleşmesi](https://learn.chatgpt.com/docs/hooks).
+  Ayrıntı ve SHA-256 listesi [araştırma notunda](CODEX-APPLY-PATCH.md).
 - Süreç: [Linux /proc](https://docs.kernel.org/filesystems/proc.html),
   [Windows GetProcessTimes](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes),
   [WaitForSingleObject](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject),
