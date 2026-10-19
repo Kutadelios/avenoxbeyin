@@ -15,7 +15,7 @@ import time
 import unittest
 from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
-from v3_package_helpers import clean_environ, isolated_path
+from v3_package_helpers import clean_environ, inherited_env, isolated_path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / 'template/.claude/scripts'
@@ -1199,10 +1199,10 @@ runpy.run_path({str(HOOK)!r}, run_name='__main__')
         self.assertIn('Synthetic Reviewer', resp['hookSpecificOutput']['additionalContext'])
 
 
-if __name__ == '__main__':
-    unittest.main()
 
 class HookFailOpenTest(unittest.TestCase):
+    """#417: the foreground hook answers the client even when its own diagnostics cannot be written."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='v3-fail-open-test-')
         self.addCleanup(self.tmp.cleanup)
@@ -1211,24 +1211,53 @@ class HookFailOpenTest(unittest.TestCase):
         self.state = self.root / 'state'
         self.vault.mkdir()
         self.state.mkdir()
+        self.env = inherited_env()  # an agent session's BEYIN_V3_SKIP would answer {} before any code under test (#169)
+
+    def run_hook(self, payload, *extra, state=None):
+        return subprocess.run([sys.executable, str(HOOK), '--vault', str(self.vault), '--state', str(state or self.state),
+                               '--harness', 'claude', *extra], input=payload, capture_output=True, env=self.env, timeout=60)
 
     def test_invalid_json_stdin_fails_open_without_crash(self):
-        result = subprocess.run(
-            [sys.executable, str(HOOK), '--vault', str(self.vault), '--state', str(self.state), '--harness', 'claude'],
-            input=b'{invalid json', capture_output=True
-        )
+        result = self.run_hook(b'{invalid json')
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         self.assertEqual(result.stdout.strip(), b'{}')
 
-    def test_read_only_state_directory_fails_open_without_crash(self):
+    @unittest.skipIf(os.name == 'nt' or (hasattr(os, 'geteuid') and os.geteuid() == 0),
+                     'a read-only folder needs POSIX permissions and a non-root user')
+    def test_read_only_state_still_answers_the_prompt(self):
+        # Enqueueing fails, and so does the hook-error.json the handler writes: the turn still gets the
+        # failure notice and exit 0 instead of a PermissionError traceback.
         self.state.chmod(0o555)
-        self.addCleanup(lambda: self.state.chmod(0o755))
-        result = subprocess.run(
-            [sys.executable, str(HOOK), '--vault', str(self.vault), '--state', str(self.state), '--harness', 'claude'],
-            input=b'{invalid json', capture_output=True
-        )
+        self.addCleanup(self.state.chmod, 0o755)
+        payload = json.dumps({'hook_event_name': 'UserPromptSubmit', 'session_id': 'ro', 'event_id': 'ro-1',
+                              'cwd': str(self.vault), 'prompt': 'Nebula'}).encode()
+        result = self.run_hook(payload)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
-        self.assertEqual(result.stdout.strip(), b'{}')
+        context = json.loads(result.stdout)['hookSpecificOutput']['additionalContext']
+        self.assertIn('V3 source sync failed', context)
+
+    def test_failed_drain_keeps_its_exit_code_and_single_result(self):
+        # The foreground reads the worker's exit code to tell a failed sync from a finished one; a drain
+        # that failed must not exit 0 or print a second JSON document.
+        (self.vault / 'notes').mkdir()
+        (self.vault / 'notes/canary.md').write_text('# Nebula\nNebula canary.\n', encoding='utf-8', newline='\n')
+        (self.state / 'hook-queue').mkdir()
+        (self.state / 'hook-queue' / ('a' * 64 + '.json')).write_text(
+            json.dumps({'event': 'UserPromptSubmit', 'harness': 'claude', 'session': 's', 'at': time.time()}),
+            encoding='utf-8')
+        (self.state / 'skills.sqlite3').mkdir()  # skill mirroring fails after the source sync
+        result = self.run_hook(b'', '--drain-queue')
+        self.assertEqual(result.returncode, 1, result.stderr.decode())
+        self.assertEqual(json.loads(result.stdout)['failed'], 1)
+        self.assertTrue((self.state / 'hook-error.json').exists())
+
+    def test_state_inside_vault_is_refused_without_writing_into_the_vault(self):
+        # Runtime state inside the vault is an install error; the hook says so and never writes there.
+        inside = self.vault / '.state'
+        result = self.run_hook(b'{}', state=inside)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Runtime state must be outside vault', result.stderr.decode())
+        self.assertFalse(inside.exists())
 
     def test_missing_command_in_cli_json_mode_fails_open_with_json_error(self):
         cli = ROOT / 'scripts/beyin_v3.py'
@@ -1264,10 +1293,6 @@ class HookFailOpenTest(unittest.TestCase):
         self.assertEqual(error['error'], 'SystemExit')
         self.assertIn('invalid choice', error['message'])
 
-    def test_invalid_vault_path_in_hook_fails_open_without_crash(self):
-        result = subprocess.run(
-            [sys.executable, str(HOOK), '--vault', '.', '--state', '.', '--harness', 'claude'],
-            input=b'{invalid json', capture_output=True
-        )
-        self.assertEqual(result.returncode, 0, result.stderr.decode())
-        self.assertEqual(result.stdout.strip(), b'{}')
+
+if __name__ == '__main__':
+    unittest.main()

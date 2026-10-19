@@ -100,12 +100,6 @@ def _safe_replace(source, destination):
 
 
 def atomic(path, data):
-    try:
-        _atomic(path, data)
-    except (OSError, PermissionError):
-        pass
-
-def _atomic(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
     with temporary.open("w", encoding="utf-8") as out:
@@ -113,6 +107,15 @@ def _atomic(path, data):
         out.flush()
         os.fsync(out.fileno())
     _safe_replace(temporary, path)
+
+
+def record_error(state, exc):
+    """hook-error.json is a diagnostic only. A state folder that refuses the write (read-only,
+    full disk) must not turn the fail-open handler itself into a traceback (#417)."""
+    try:
+        atomic(Path(state) / "hook-error.json", {"at": time.time(), "error": type(exc).__name__})
+    except OSError:
+        pass
 
 
 def output_context(harness, event, text):
@@ -393,13 +396,7 @@ def drain_queue(vault, state):
         if skills.get("unmanaged"):
             result = dict(result, skill_unmanaged=skills["unmanaged"])
     except Exception as exc:
-        try:
-            try:
-                atomic(state / "hook-error.json", {"at": time.time(), "error": type(exc).__name__})
-            except Exception:
-                pass
-        except Exception:
-            pass
+        record_error(state, exc)
         return {"processed": 0, "failed": len(pending), "pending": len(pending)}
     atomic(state / "hook-health.json", {"at": time.time(), "worker_pid": os.getpid(), "sync": result})
     # A degraded scan is complete but excluded one or more invalid sources. The
@@ -436,30 +433,6 @@ def drain_queue(vault, state):
 
 
 def main():
-    try:
-        _main()
-    except BaseException as exc:
-        import sys, json, time
-        from pathlib import Path
-        args_list = sys.argv[1:]
-        harness = 'claude'
-        if '--harness' in args_list:
-            harness = args_list[args_list.index('--harness') + 1]
-        state_dir = Path('.')
-        if '--state' in args_list:
-            state_dir = Path(args_list[args_list.index('--state') + 1])
-        metadata_only = '--metadata-only' in args_list
-        event = notice = ''
-        try:
-            atomic(state_dir / 'hook-error.json', {'at': time.time(), 'error': type(exc).__name__})
-        except (OSError, PermissionError):
-            pass
-        if not metadata_only and '--event' in args_list and args_list[args_list.index('--event')+1] in ('SessionStart', 'UserPromptSubmit'):
-            print(json.dumps({'hookSpecificOutput': {'hookEventName': '', 'additionalContext': 'V3 source sync failed.'}}))
-        else:
-            print('{}')
-
-def _main():
     started = time.monotonic()
     if hasattr(sys.stdin, "reconfigure"):
         sys.stdin.reconfigure(encoding="utf-8-sig", errors="replace")
@@ -744,13 +717,7 @@ def _main():
             # worker is not failing, so keep the pending notice and record no hook error.
             print(json.dumps(output_context(args.harness, event, notice + "V3 source sync is pending. Verify current Markdown sources before using prior context.")))
             return
-        try:
-            try:
-                atomic(state / "hook-error.json", {"at": time.time(), "error": type(exc).__name__})
-            except Exception:
-                pass
-        except Exception:
-            pass
+        record_error(state, exc)
         if not args.metadata_only and locals().get("event") in ("SessionStart", "UserPromptSubmit"):
             print(json.dumps(output_context(args.harness, event, notice + "V3 source sync failed or conflicted; metadata remains queued. Run the local CLI doctor and verify current Markdown sources.")))
         else:
