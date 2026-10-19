@@ -1201,3 +1201,73 @@ runpy.run_path({str(HOOK)!r}, run_name='__main__')
 
 if __name__ == '__main__':
     unittest.main()
+
+class HookFailOpenTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='v3-fail-open-test-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.vault = self.root / 'vault'
+        self.state = self.root / 'state'
+        self.vault.mkdir()
+        self.state.mkdir()
+
+    def test_invalid_json_stdin_fails_open_without_crash(self):
+        result = subprocess.run(
+            [sys.executable, str(HOOK), '--vault', str(self.vault), '--state', str(self.state), '--harness', 'claude'],
+            input=b'{invalid json', capture_output=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.stdout.strip(), b'{}')
+
+    def test_read_only_state_directory_fails_open_without_crash(self):
+        self.state.chmod(0o555)
+        self.addCleanup(lambda: self.state.chmod(0o755))
+        result = subprocess.run(
+            [sys.executable, str(HOOK), '--vault', str(self.vault), '--state', str(self.state), '--harness', 'claude'],
+            input=b'{invalid json', capture_output=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.stdout.strip(), b'{}')
+
+    def test_missing_command_in_cli_json_mode_fails_open_with_json_error(self):
+        cli = ROOT / 'scripts/beyin_v3.py'
+        result = subprocess.run(
+            [sys.executable, str(cli), '--vault', str(self.vault), '--json'],
+            capture_output=True
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.strip(), b'')
+        error = json.loads(result.stderr.decode().strip())
+        self.assertEqual(error['error'], 'SystemExit')
+        self.assertIn('command', error['message'])
+
+    def test_missing_command_in_cli_human_mode_exits_with_argparse_stderr(self):
+        cli = ROOT / 'scripts/beyin_v3.py'
+        result = subprocess.run(
+            [sys.executable, str(cli), '--vault', str(self.vault)],
+            capture_output=True
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout.strip(), b'')
+        self.assertIn('the following arguments are required', result.stderr.decode())
+
+    def test_invalid_command_in_cli_json_mode_fails_open_with_json_error(self):
+        cli = ROOT / 'scripts/beyin_v3.py'
+        result = subprocess.run(
+            [sys.executable, str(cli), '--vault', str(self.vault), '--json', 'invalid-command'],
+            capture_output=True
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.strip(), b'')
+        error = json.loads(result.stderr.decode().strip())
+        self.assertEqual(error['error'], 'SystemExit')
+        self.assertIn('invalid choice', error['message'])
+
+    def test_invalid_vault_path_in_hook_fails_open_without_crash(self):
+        result = subprocess.run(
+            [sys.executable, str(HOOK), '--vault', '.', '--state', '.', '--harness', 'claude'],
+            input=b'{invalid json', capture_output=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.stdout.strip(), b'{}')
