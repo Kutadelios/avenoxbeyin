@@ -247,6 +247,12 @@ class IngestServerTest(unittest.TestCase):
         import time
         server = ingest_server.create_server(self.vault, port=0)
         port = server.server_address[1]
+        # The server already survived a dropped client before #393; what changed is that the
+        # drop no longer reaches handle_error, which prints a traceback for every request.
+        errors, closed = [], []
+        server.handle_error = lambda request, address: errors.append(address)
+        shutdown_request = server.shutdown_request
+        server.shutdown_request = lambda request: (closed.append(1), shutdown_request(request))
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
         self.addCleanup(lambda: (server.shutdown(), server.server_close(), t.join(2)))
@@ -286,6 +292,11 @@ class IngestServerTest(unittest.TestCase):
         import urllib.request
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/health") as resp:
             self.assertEqual(resp.status, 200)
+        deadline = time.monotonic() + 10
+        while len(closed) < 5 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(len(closed), 5)
+        self.assertEqual(errors, [])
 
 
 if __name__ == '__main__':
