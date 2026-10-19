@@ -77,6 +77,22 @@ class ReceiptViewIsolationTest(unittest.TestCase):
              '--state', str(self.engine.state), *args], capture_output=True, text=True,
             encoding='utf-8', env=inherited_env(), timeout=20)
 
+    def hook_with_completed_sync(self, payload):
+        # These assertions inspect completed sync diagnostics, not the foreground
+        # hook's 1.5 s wait budget. Finish the real worker before reading its health;
+        # otherwise a slow runner may leave a detached writer racing test cleanup.
+        command = [sys.executable, str(ROOT / 'template/.claude/scripts/beyin_v3_hook.py'),
+                   '--vault', str(self.vault), '--state', str(self.engine.state),
+                   '--harness', 'codex']
+        env = inherited_env(BEYIN_V3_NO_SPAWN='1')
+        worker = subprocess.run(command + ['--worker'], text=True, capture_output=True,
+                                encoding='utf-8', env=env, timeout=20)
+        self.assertEqual(worker.returncode, 0, worker.stderr)
+        self.assertTrue((self.engine.state / 'hook-health.json').is_file(), worker.stdout)
+        self.assertFalse((self.engine.state / 'hook-error.json').exists(), worker.stdout)
+        return subprocess.run(command, input=json.dumps(payload), text=True,
+                              capture_output=True, encoding='utf-8', env=env, timeout=20)
+
     def test_edited_view_is_preserved_with_typed_warning_and_healthy_context(self):
         original = self.damage_view()
         result = self.engine.sync()
@@ -125,11 +141,9 @@ class ReceiptViewIsolationTest(unittest.TestCase):
                 self.assertEqual(cli.returncode, 0, cli.stderr)
                 self.assertIn('SYNTHETIC_HEALTHY_CANARY', cli.stdout)
                 self.assertNotIn('HIDDEN_', cli.stdout)
-                hook = subprocess.run([sys.executable, str(ROOT / 'template/.claude/scripts/beyin_v3_hook.py'),
-                    '--vault', str(self.vault), '--state', str(self.engine.state), '--harness', 'codex'],
-                    input=json.dumps({'hook_event_name': 'UserPromptSubmit', 'session_id': 'stripped-' + str(fresh),
-                                      'cwd': str(self.vault), 'prompt': 'Nebula calibration'}),
-                    text=True, capture_output=True, env=inherited_env(), timeout=20)
+                hook = self.hook_with_completed_sync(
+                    {'hook_event_name': 'UserPromptSubmit', 'session_id': 'stripped-' + str(fresh),
+                     'cwd': str(self.vault), 'prompt': 'Nebula calibration'})
                 self.assertEqual(hook.returncode, 0, hook.stderr)
                 self.assertIn('SYNTHETIC_HEALTHY_CANARY', hook.stdout)
                 self.assertNotIn('HIDDEN_', hook.stdout)
@@ -422,9 +436,7 @@ class ReceiptViewIsolationTest(unittest.TestCase):
         self.damage_view()
         payload = {'hook_event_name': 'UserPromptSubmit', 'session_id': 'no-match',
                    'cwd': str(self.vault), 'prompt': 'zxqvnonmatchingword'}
-        result = subprocess.run([sys.executable, str(ROOT / 'template/.claude/scripts/beyin_v3_hook.py'),
-            '--vault', str(self.vault), '--state', str(self.state), '--harness', 'codex'],
-            input=json.dumps(payload), text=True, capture_output=True, env=inherited_env(), timeout=20)
+        result = self.hook_with_completed_sync(payload)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('receipt view', result.stdout)
         self.assertNotIn('Initial synthetic outcome', result.stdout)
