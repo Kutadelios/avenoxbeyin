@@ -592,8 +592,16 @@ def main():
             else:
                 store = MemoryStore(state, vault)
             query = prompt_text(payload)
-            from beyin_v3_projects import resolve_active_project
-            project = resolve_active_project(payload, args.harness, vault)
+            project = payload.get('project')
+            project = project.strip() if isinstance(project, str) and project.strip() else None
+            if project is None:
+                # Claude Code and Antigravity send a working directory, not a project (#288, #403).
+                from beyin_v3_bridge import working_directory
+                from beyin_v3_projects import resolve_active_project
+                try:
+                    project = resolve_active_project(vault, working_directory(payload, args.harness))
+                except Exception:
+                    project = None
             session = hashlib.sha256(str(payload.get('session_id', 'unknown')).encode()).hexdigest()[:24]
             warning = ('V3 source sync is still running; this context comes from the previous index. '
                        'Verify current Markdown sources before relying on it.\n') if pending else ''

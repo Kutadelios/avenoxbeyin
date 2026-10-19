@@ -366,25 +366,21 @@ class ProjectScopesTest(unittest.TestCase):
         self.assertEqual(added['status'], 'saved')
         self.assertIn('Projeler/Beta', added['folders'])
 
-    def test_resolve_active_project_precedence_and_conventions(self):
-        """resolve_active_project gives explicit project highest precedence, then resolves cwd (#288)."""
+    def test_resolve_active_project_conventions(self):
+        """resolve_active_project resolves a vault working directory to its project (#288, #403)."""
         import beyin_v3_projects as projects
-        # 1. Explicit payload takes precedence even with cwd
-        payload = {'project': 'explicit_proj', 'cwd': str(self.vault / 'projects/alpha')}
-        self.assertEqual(projects.resolve_active_project(payload, 'claude', self.vault), 'explicit_proj')
-
-        # 2. Standard conventions: projects/<name>, Projeler/<name>, projeler/<name>
+        # Standard conventions: projects/<name>, Projeler/<name>, projeler/<name>
         (self.vault / 'projects/alpha').mkdir(parents=True, exist_ok=True)
-        self.assertEqual(projects.resolve_active_project({'cwd': str(self.vault / 'projects/alpha')}, 'claude', self.vault), 'alpha')
+        self.assertEqual(projects.resolve_active_project(self.vault, self.vault / 'projects/alpha'), 'alpha')
 
         (self.vault / 'Projeler/Beta/nested').mkdir(parents=True, exist_ok=True)
-        self.assertEqual(projects.resolve_active_project({'cwd': str(self.vault / 'Projeler/Beta/nested')}, 'claude', self.vault), 'Beta')
+        self.assertEqual(projects.resolve_active_project(self.vault, self.vault / 'Projeler/Beta/nested'), 'Beta')
 
-        # 3. Negative controls: vault root itself or outside directories return None
-        self.assertIsNone(projects.resolve_active_project({'cwd': str(self.vault)}, 'claude', self.vault))
+        # Negative controls: vault root itself or outside directories return None
+        self.assertIsNone(projects.resolve_active_project(self.vault, self.vault))
         outside = Path(self.tmp.name) / 'outside'
         outside.mkdir(parents=True, exist_ok=True)
-        self.assertIsNone(projects.resolve_active_project({'cwd': str(outside)}, 'claude', self.vault))
+        self.assertIsNone(projects.resolve_active_project(self.vault, outside))
 
     def test_resolve_active_project_from_scoped_folder_and_companion_loading(self):
         """Active project resolves from .beyin-projects.json and companion loads its Kurallar.md (#288)."""
@@ -395,8 +391,7 @@ class ProjectScopesTest(unittest.TestCase):
         self.scopes({'folders': {custom_folder: 'serai'}})
 
         # CWD inside mapped folder resolves project
-        payload = {'cwd': str(self.vault / custom_folder)}
-        self.assertEqual(projects.resolve_active_project(payload, 'claude', self.vault), 'serai')
+        self.assertEqual(projects.resolve_active_project(self.vault, self.vault / custom_folder), 'serai')
 
         # Companion context loads rules from this custom mapped project folder
         comp_dir = self.vault / '🔮 850-Companion'
