@@ -739,12 +739,15 @@ class AgentCommandTest(AgentFiles):
         for flag in ('--bare', '--dangerously-skip-permissions', 'bypassPermissions'):
             self.assertNotIn(flag, argv)
 
-    def test_codex_template_is_read_only_and_never_claims_a_preset_thread_id(self):
+    def test_codex_template_denies_native_reads_and_never_claims_a_preset_thread_id(self):
         argv, request, result, job, prefix = self.command('codex')
         self.assertEqual(argv[:len(prefix)], prefix)
         self.assertNotIn(request, argv)
         self.assertIn('exec', argv)
-        self.assertIn('read-only', argv)
+        self.assertNotIn('-s', argv)  # A legacy sandbox selector would discard the named profile.
+        selected = next(item for item in argv if item.startswith('default_permissions='))
+        profile = json.loads(selected.split('=', 1)[1])
+        self.assertIn('permissions.' + profile + '.filesystem={":root"="deny"}', argv)
         self.assertIn('never', argv)
         self.assertIn('--ignore-rules', argv)
         self.assertIn('--json', argv)
@@ -864,7 +867,10 @@ class AgentWindowViewTest(AgentFiles):
             for flag in ('exec', '--json', '-o', '--ignore-rules', '--skip-git-repo-check', '-', '--session-id'):
                 self.assertNotIn(flag, argv)
             self.assertEqual(argv[argv.index('-a') + 1], 'never')
-            self.assertEqual(argv[argv.index('-s') + 1], 'read-only')
+            self.assertNotIn('-s', argv)
+            selected = next(item for item in argv if item.startswith('default_permissions='))
+            profile = json.loads(selected.split('=', 1)[1])
+            self.assertIn('permissions.' + profile + '.filesystem={":root"="deny"}', argv)
             self.assertEqual(argv[argv.index('-C') + 1], str(self.vault))
             for feature in yakala.CODEX_DISABLED:
                 self.assertIn(['--disable', feature], [argv[i:i + 2] for i in range(len(argv) - 1)])
@@ -1121,7 +1127,7 @@ class AgentPreflightTest(AgentFiles):
             '--strict-mcp-config --mcp-config --session-id --append-system-prompt '
             '--output-format --max-budget-usd --sandbox -s --json -C --cd '
             '--output-last-message -o --skip-git-repo-check --ignore-rules '
-            '--ask-for-approval -a --config -c --disable')
+            '--ask-for-approval -a --config -c --disable --strict-config')
 
     def invoke(self, mcp='[]', plugins='{"installed": [], "available": []}', help_text=None, client='codex'):
         calls = []
@@ -1811,6 +1817,19 @@ class AgentPopupTest(AgentFiles):
         self.assertEqual(yakala.pending(self.vault, self.state), 0)
         self.assertEqual(root.key_results['<Control-Return>'], 'break')
         self.spawned.assert_not_called()
+
+    def test_escape_blocks_pending_return_events_during_close_animation(self):
+        self.configure()
+        for key in ('<Return>', '<Control-Return>'):
+            with self.subTest(key=key):
+                # Tk can deliver another already-queued key before the next
+                # 10 ms fade timer. Escape is cancellation at that point.
+                result, root = self.popup([('type', 'İptal edilen istek.'),
+                                           ('key', '<Escape>'), ('key', key)])
+                self.assertEqual(result['status'], 'vazgecildi')
+                self.assertEqual(yakala.pending(self.vault, self.state), 0)
+                self.assertEqual(root.key_results[key], 'break')
+                self.spawned.assert_not_called()
 
 
 class AgentWorkerLaunchTest(AgentFiles):
