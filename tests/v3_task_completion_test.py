@@ -299,6 +299,22 @@ class TaskCompletionTest(unittest.TestCase):
 
         self.assertEqual(task.read_bytes(), before)
 
+    def test_symlink_loop_in_vault_is_a_sync_warning_not_a_crash(self):
+        """Python 3.11/3.12 resolve() raises RuntimeError on a loop; it stopped the whole sync, not one ref."""
+        notes = self.vault / 'notes'
+        notes.mkdir()
+        (notes / 'gercek.md').write_text('# Gercek\n\nKalibrasyon notu.\n', encoding='utf-8')
+        try:
+            os.symlink(notes / 'b.md', notes / 'a.md')
+            os.symlink(notes / 'a.md', notes / 'b.md')
+        except (OSError, NotImplementedError):
+            self.skipTest('symlinks not supported in this environment')
+        result = self.engine.sync()
+        self.assertEqual(result['indexed'], 1)
+        reasons = {warning['source']: warning['reason'] for warning in result['warnings']}
+        self.assertEqual(reasons.get('notes/a.md'), 'symlink source rejected')
+        self.assertEqual(reasons.get('notes/b.md'), 'symlink source rejected')
+
 
 if __name__ == '__main__':
     unittest.main()
