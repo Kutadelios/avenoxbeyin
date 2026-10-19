@@ -340,6 +340,34 @@ class MemoryAuditorTest(unittest.TestCase):
                 self.assertEqual(len(findings), 1)
                 self.assertNotEqual(findings[0]['type'], 'status_contradiction')
 
+    def test_retired_receipt_and_generated_notes_stay_out(self):
+        """Notes the context never delivers do not fill the report (archived notes were 18 of 20)."""
+        self._public_twin()
+        archive = self.vault / '📦 900-Archive'
+        archive.mkdir()
+        for folder, name, front in ((archive, 'eski.md', 'status: Arşivlendi'),
+                                    (self.knowledge, 'arsivli.md', 'status: archived'),
+                                    (self.knowledge, 'makbuz.md', 'kind: receipt'),
+                                    (self.knowledge, 'gorunum.md', 'generated: true')):
+            (folder / name).write_text("---\n" + front + "\n---\n" + self.SHARED, encoding='utf-8')
+        report = audit_module.audit_memory(self.vault, state=self.state, min_shared=3)
+        self.assertEqual(report['notes_scanned'], 1)
+        self.assertEqual(report['findings'], [])
+
+    def test_supersedes_resolves_like_the_core(self):
+        """A record id from note-create, an Obsidian list and a [[link]] all retire the old note."""
+        (self.knowledge / 'deploy-v1.md').write_text(
+            "---\nid: deployment-v1\nupdated_at: 2026-09-01\nstatus: failed\n---\n" + self.SHARED,
+            encoding='utf-8')
+        for supersedes in ("supersedes:\n  - deployment-v1", 'supersedes: ["[[deploy-v1]]"]'):
+            with self.subTest(supersedes=supersedes):
+                (self.knowledge / 'deploy-v2.md').write_text(
+                    "---\nupdated_at: 2026-10-01\nstatus: passed\n" + supersedes + "\n---\n" + self.SHARED,
+                    encoding='utf-8')
+                report = audit_module.audit_memory(self.vault, state=self.state, min_shared=3)
+                self.assertEqual(report['findings'], [])
+                self.assertEqual(report['notes_scanned'], 1)
+
     def _cli_result(self, args):
         cmd = [sys.executable, str(self.vault / '.claude/scripts/beyin_v3_cli.py'),
                '--vault', str(self.vault), '--state', str(self.state)] + args

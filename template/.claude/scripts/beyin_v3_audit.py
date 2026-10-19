@@ -30,14 +30,17 @@ from beyin_v3 import (
     _tokens,
     _token_counts,
     _stem,
+    _status_word,
     _trusted_record,
+    RETIRED_STATUSES,
+    resolve_supersedes,
     STOPWORDS,
     _strict_terms,
     sensitive_source,
     sensitive_excluded,
     sensitive_fold as fold,
 )
-from beyin_v3_sync import parse as _parse_note
+from beyin_v3_sync import _hash, parse as _parse_note
 
 
 # Status antonym pairs for contradiction detection (Turkish & English)
@@ -139,7 +142,10 @@ def _candidate(path: Path, rel_path: str, meta: dict, body: str) -> dict:
         supersedes = [supersedes]
     elif not isinstance(supersedes, list):
         supersedes = []
+    note_id = meta.get('id')
     return {
+        # The id sync gives the record, so `supersedes: [<id>]` from note-create resolves here too.
+        'id': note_id if isinstance(note_id, str) and note_id else 'md-' + _hash(rel_path)[:24],
         'path': rel_path,
         'full_path': path,
         'title': title,
@@ -215,6 +221,11 @@ def scan_audit_candidates(vault: Path, state: Path | None = None) -> list[dict]:
 
             checked = _auditable(full_path, rel_path)
             if checked is None:
+                continue
+            meta = checked[0]
+            # Never context: sync skips receipts and generated views, every read route drops a
+            # retired status (archived, superseded, arsivlendi, eski, ...).
+            if meta.get('kind') == 'receipt' or meta.get('generated') is True or _status_word(meta) in RETIRED_STATUSES:
                 continue
             candidates.append(_candidate(full_path, rel_path, *checked))
 
@@ -393,6 +404,12 @@ def audit_memory(
             if checked is None:
                 raise ValueError("audit target is private, untrusted, a symlink or unreadable; the auditor does not read it")
             target_candidate = _candidate(target_path, target_rel, *checked)
+
+    # A note another trusted note supersedes is history for every read route. The core resolver
+    # matches record ids, vault paths with or without .md, [[links]] and unique file names.
+    pool = candidates + ([target_candidate] if target_candidate is not None and target_candidate not in candidates else [])
+    retired = resolve_supersedes([{'id': c['id'], 'source': c['path'], 'supersedes': c['supersedes']} for c in pool])[0]
+    candidates = [c for c in candidates if c['id'] not in retired]
 
     findings = []
     pairs_compared = 0
