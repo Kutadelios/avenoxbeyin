@@ -78,6 +78,18 @@ class AgentFiles(unittest.TestCase):
         job = yakala._agent_load_job(self.vault, self.state, result['job_id'])
         return result, job, card
 
+    def window_process_identity(self, pid):
+        # Popen is fake: its PID may belong to an unrelated, protected host process.
+        # Only the fake child is substituted; real worker identity checks still run.
+        host_identity = yakala._agent_process_identity
+
+        def identity(candidate):
+            if candidate == pid:
+                return {'pid': pid, 'kind': 'windows-filetime', 'birth': '1'}
+            return host_identity(candidate)
+
+        return patch.object(yakala, '_agent_process_identity', side_effect=identity)
+
 
 class AgentConfigurationTest(AgentFiles):
     def test_default_is_off_and_reading_settings_does_not_create_state(self):
@@ -966,7 +978,8 @@ class AgentWindowViewTest(AgentFiles):
         if manifest:
             (folder / 'result.json').write_text('{}', encoding='utf-8')
         process = types.SimpleNamespace(pid=777, poll=Mock(return_value=poll), kill=Mock())
-        with patch.object(yakala, '_agent_window_supported', return_value=True), \
+        with self.window_process_identity(process.pid), \
+                patch.object(yakala, '_agent_window_supported', return_value=True), \
                 patch.object(yakala.subprocess, 'Popen', return_value=process) as popen, \
                 patch.object(yakala, '_agent_finalize', return_value=('completed', 'tamam')) as finalize, \
                 patch.object(yakala, '_agent_codex_window_session', return_value=session, side_effect=session_error) as discover, \
@@ -1097,14 +1110,16 @@ class AgentCodexWindowSessionTest(AgentFiles):
         result, job, card = self.queued()
         folder = yakala._agent_job_dir(self.vault, self.state, job['id'])
         observed = []
+        process = Mock(pid=777)
 
         def launch(*args, **kwargs):
             session, path = self.rollout()
             observed.append(session)
             (folder / 'result.json').write_text('{}', encoding='utf-8')
-            return Mock(pid=777)
+            return process
 
-        with patch.object(yakala.subprocess, 'Popen', side_effect=launch), \
+        with self.window_process_identity(process.pid), \
+                patch.object(yakala.subprocess, 'Popen', side_effect=launch), \
                 patch('time.time_ns', side_effect=[self.started_ns, self.started_ns + 10000000000]), \
                 patch.object(yakala, '_agent_finalize', return_value=('completed', 'tamam')) as finalize:
             self.assertEqual(yakala._agent_run_window(self.vault, self.state, job, ['codex.exe']),
