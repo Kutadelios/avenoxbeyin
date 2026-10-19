@@ -317,9 +317,8 @@ def _decision_ledger_check(target, vault):
             raise ValueError('existing decision ledger must have remote_allowed: false or visibility: private')
 
 
-def _record_decisions(target, vault, found, archive_relative, newline='\n', *args, **kwargs):
+def _record_decisions(target, vault, found, archive_relative, newline, source_relative=None):
     """Append each source/card/line once, without losing identical decisions in other cards."""
-    source_relative = args[0] if args else kwargs.get('source_relative')
     path = target / DECISIONS
     _inside(path, vault)
     if path.is_symlink() or (path.exists() and not path.is_file()):

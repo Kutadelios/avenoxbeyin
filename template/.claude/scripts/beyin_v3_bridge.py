@@ -92,7 +92,7 @@ def _one_line(value, limit):
     return (cut.rsplit(' ', 1)[0] if ' ' in cut else cut) + '...'
 
 
-def project_context(vault, state, project_id, project_name='', *args, **kwargs):
+def project_context(vault, state, project_id, project_name, budget=1200, today_iso=None):
     """Scoped, read-only project block for an opted-in external SessionStart.
 
     - Latest receipt of this project_id (receipt_checkpoints session match) by created_at;
@@ -103,8 +103,6 @@ def project_context(vault, state, project_id, project_name='', *args, **kwargs):
     - Other due tasks: count only, never titles.
     - Whole lines only, within budget; no model call, no write.
     """
-    budget = args[0] if len(args) > 0 else kwargs.get('budget', 1200)
-    today_iso = args[1] if len(args) > 1 else kwargs.get('today_iso', None)
     if budget < 80 or not project_id:
         return ''
     import sqlite3

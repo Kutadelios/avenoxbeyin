@@ -74,7 +74,7 @@ MANUAL_POOL = 16
 MANUAL_EXCERPT = 800
 
 
-def _packaged(store, query, cards, project, versions=None, *args, **kwargs):
+def _packaged(store, query, cards, project, versions, facets, mode, transport):
     """One advisor call, or up to client.PACKAGE_LIMIT when the pool is over one request's budget.
 
     Sixteen ordinary notes with 800-character excerpts exceed the default 24,000-character
@@ -83,9 +83,6 @@ def _packaged(store, query, cards, project, versions=None, *args, **kwargs):
     retried; if any package fails, the whole advice is degraded and local order stands, so
     a partial ranking never reorders only part of the pool.
     """
-    facets = args[0] if len(args) > 0 else kwargs.get('facets')
-    mode = args[1] if len(args) > 1 else kwargs.get('mode', {})
-    transport = args[2] if len(args) > 2 else kwargs.get('transport')
     parts = client.packages(store.state_dir, query, cards, facets=facets)
     if parts is None or len(parts) == 1:
         # None: over the package limit; evaluate reports budget_exceeded before any call.
