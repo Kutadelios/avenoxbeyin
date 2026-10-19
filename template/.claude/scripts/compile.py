@@ -725,25 +725,13 @@ def _release_trigger_claim(claim: Path | None) -> None:
 
 
 def _record_failure(
+    state_path: Path,
     state: dict[str, Any],
+    daily_name: str,
     reason: str,
-    daily_name: str = "",
     detail: str = "",
     trigger_claim: Path | None = None,
-    state_path: Path | None = None,
 ) -> None:
-    if isinstance(state, Path):
-        # Backwards compatibility for legacy signature (state_path, state, daily_name, reason, ...)
-        actual_path = state
-        state = reason  # type: ignore[assignment]
-        reason = daily_name
-        daily_name = detail
-        detail = str(trigger_claim or "")
-        trigger_claim = state_path
-        state_path = actual_path
-    elif state_path is None:
-        state_path = STATE_DIR / "compile-state.json"
-
     timestamp = _iso_now()
     state["last_run"] = timestamp
     state["last_status"] = f"fail:{reason}"
@@ -799,11 +787,12 @@ def _run_locked(args: argparse.Namespace, trigger_claim: Path | None) -> int:
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         state = _default_state()
         _record_failure(
+            state_path,
             state,
+            "",
             "state-or-daily-read-failed",
-            detail=str(exc),
-            trigger_claim=trigger_claim,
-            state_path=state_path,
+            str(exc),
+            trigger_claim,
         )
         return 0
     try:
@@ -814,11 +803,12 @@ def _run_locked(args: argparse.Namespace, trigger_claim: Path | None) -> int:
         )
     except (OSError, ValueError, PolicyError) as exc:
         _record_failure(
+            state_path,
             state,
+            "",
             "state-or-daily-read-failed",
-            detail=str(exc),
-            trigger_claim=trigger_claim,
-            state_path=state_path,
+            str(exc),
+            trigger_claim,
         )
         return 0
 
@@ -849,12 +839,12 @@ def _run_locked(args: argparse.Namespace, trigger_claim: Path | None) -> int:
         )
         if reason is not None:
             _record_failure(
+                state_path,
                 state,
+                daily_path.name,
                 reason,
-                daily_name=daily_path.name,
-                detail=detail,
-                trigger_claim=trigger_claim,
-                state_path=state_path,
+                detail,
+                trigger_claim,
             )
             return 0
 
@@ -914,11 +904,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     except (OSError, ValueError, json.JSONDecodeError):
                         state = _default_state()
                     _record_failure(
+                        state_path,
                         state,
+                        "",
                         "unexpected",
-                        detail=exc.__class__.__name__,
-                        trigger_claim=trigger_claim,
-                        state_path=state_path,
+                        exc.__class__.__name__,
+                        trigger_claim,
                     )
                     return 0
                 finally:

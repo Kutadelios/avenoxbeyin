@@ -39,6 +39,12 @@ RELEASED_V2_HOOKS = {
     'prompt-counter.sh': '3494e2a7282c0278372496c08a51c0e605879d16146ffe184a71e218721a40c0',
     'prompt-counter.ps1': 'bcb6375090dcbf716c62e0232f61772a69d83ced289ad5ed7d37126246237cde',
 }
+# The V2 runners are recognized the same way (install_v3 legacy_hashes): every release from
+# v3.0.0 to v3.11.0 shipped these bytes, so a refactor here blocks the stock V2 upgrade.
+RELEASED_V2_RUNNERS = {
+    'compile.py': '23af64eb892283b907de63fcb9241208a3edf13b4f2e41ff4cecb2a1a8570150',
+    'flush.py': 'f36f8eb4da19222c7a70ea2659b140595834ce7a52483a6549bcab869e2fb404',
+}
 
 
 class ReleasedLegacyHooksTest(unittest.TestCase):
@@ -46,6 +52,12 @@ class ReleasedLegacyHooksTest(unittest.TestCase):
         for name, expected in RELEASED_V2_HOOKS.items():
             with self.subTest(name=name):
                 data = (ROOT / 'template/.claude/hooks' / name).read_bytes()
+                self.assertEqual(hashlib.sha256(data).hexdigest(), expected)
+
+    def test_legacy_runner_templates_keep_their_released_bytes(self):
+        for name, expected in RELEASED_V2_RUNNERS.items():
+            with self.subTest(name=name):
+                data = (ROOT / 'template/.claude/scripts' / name).read_bytes()
                 self.assertEqual(hashlib.sha256(data).hexdigest(), expected)
 
 
