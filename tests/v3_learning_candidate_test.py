@@ -208,5 +208,31 @@ class LearningCandidateLedgerTest(unittest.TestCase):
         self.assertNotIn("Project A learning", texts_b)
 
 
+
+class InstalledLearnCommandTest(unittest.TestCase):
+    """The release installs only beyin_v3*.py; `learn` must run from an installed vault (#151)."""
+
+    def test_learn_runs_in_an_installed_vault(self):
+        from v3_package_helpers import install, isolated_env
+        tmp = tempfile.TemporaryDirectory(prefix='learn-installed-')
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        vault, state = root / 'Örnek Beyin', root / 'state'
+        vault.mkdir()
+        env = isolated_env(root / 'home')
+        result = install(vault, state, env)
+        self.assertEqual(result.returncode, 0, result.stderr.decode('utf-8', errors='replace'))
+        self.assertFalse((vault / '.claude/scripts/_portalock.py').exists())
+        command = [sys.executable, str(vault / 'beyin.py')]
+        staged = subprocess.run(command + ['learn', '--candidate', 'Kurulu kasada aday'], cwd=vault, env=env,
+                                capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(staged.returncode, 0, staged.stdout + staged.stderr)
+        self.assertEqual(json.loads(staged.stdout)['candidate'], 'Kurulu kasada aday')
+        listed = subprocess.run(command + ['learn', '--list'], cwd=vault, env=env,
+                                capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
+        self.assertEqual([c['candidate'] for c in json.loads(listed.stdout)['candidates']], ['Kurulu kasada aday'])
+
+
 if __name__ == '__main__':
     unittest.main()

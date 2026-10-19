@@ -6,34 +6,74 @@ Cross-process concurrency safety via advisory file locks.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import time
 
-from _portalock import exclusive
-
 LEARNING_STATE_FILE = "learning-state.jsonl"
 LEARNING_LOCK_FILE = "learning-state.lock"
 
 
-def _lock_handle(state_dir: Path):
+@contextmanager
+def _ledger_lock(state_dir: Path, timeout: float = 10.0, step: float = 0.05):
+    """Serialize ledger writers with an OS advisory lock.
+
+    Inline on purpose: the release packages only beyin_v3*.py, so the source tree's
+    _portalock.py helper is missing from an installed vault (#151). The lock file stays,
+    since unlinking a held lock file lets a later process lock a new inode.
+    """
     lock_file = Path(state_dir) / LEARNING_LOCK_FILE
     lock_file.parent.mkdir(parents=True, exist_ok=True)
-    return open(lock_file, "a+", encoding="utf-8")
+    if lock_file.is_symlink():
+        raise OSError("learning ledger lock must not be a symlink")
+    handle = open(lock_file, "a+b")
+    acquired = False
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(step)
+        yield
+    finally:
+        if acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        handle.close()
 
 
 def _atomic_append(file_path: Path, record: dict) -> None:
     file_path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(record, ensure_ascii=False) + "\n"
-    with _lock_handle(file_path.parent) as lock_f:
-        with exclusive(lock_f):
-            with open(file_path, "a", encoding="utf-8") as f:
-                f.write(line)
-                f.flush()
-                os.fsync(f.fileno())
+    with _ledger_lock(file_path.parent):
+        with open(file_path, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
 
 
 def _normalize_session(session: str | None) -> str:
@@ -148,30 +188,29 @@ def resolve_candidates(state: Path, session: str, target_status: str = "distille
     count = 0
     target_session = _normalize_session(session)
     try:
-        with _lock_handle(ledger.parent) as lock_f:
-            with exclusive(lock_f):
-                with open(ledger, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            item = json.loads(line)
-                            if item.get("session") in (target_session, "cli") and item.get("status") == "candidate":
-                                item["status"] = target_status
-                                item["resolved_at"] = datetime.now(timezone.utc).isoformat()
-                                count += 1
-                            records.append(item)
-                        except Exception:
-                            continue
-                # Atomic rewrite
-                temp = ledger.parent / (ledger.name + ".tmp")
-                with open(temp, "w", encoding="utf-8") as out:
-                    for rec in records:
-                        out.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                    out.flush()
-                    os.fsync(out.fileno())
-                os.replace(temp, ledger)
+        with _ledger_lock(ledger.parent):
+            with open(ledger, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                        if item.get("session") in (target_session, "cli") and item.get("status") == "candidate":
+                            item["status"] = target_status
+                            item["resolved_at"] = datetime.now(timezone.utc).isoformat()
+                            count += 1
+                        records.append(item)
+                    except Exception:
+                        continue
+            # Atomic rewrite
+            temp = ledger.parent / (ledger.name + ".tmp")
+            with open(temp, "w", encoding="utf-8") as out:
+                for rec in records:
+                    out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(temp, ledger)
     except OSError:
         return 0
     return count
