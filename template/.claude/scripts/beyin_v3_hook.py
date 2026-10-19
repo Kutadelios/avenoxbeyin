@@ -336,7 +336,7 @@ def enqueue_event(vault, state, payload, harness):
                 "session": hashlib.sha256(str(payload.get("session_id", "unknown")).encode()).hexdigest()[:24]}
     # Keep a bounded label and opaque identity, never the full project path.
     from beyin_v3_bridge import origin
-    project = origin(payload, harness)
+    project = origin(payload, harness, vault)
     if project:
         metadata.update(project)
     if payload.get('no_memory') is True:

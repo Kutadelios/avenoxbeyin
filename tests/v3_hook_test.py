@@ -1053,6 +1053,29 @@ class HookInstallerTest(unittest.TestCase):
         self.assertIn('Makaleler/uzun.md', response['hookSpecificOutput']['additionalContext'])
         self.assertIn('Makaleler/uzun.md', (self.state / 'touch-log.tsv').read_text(encoding='utf-8'))
 
+    def test_hook_resolves_active_project_from_json_and_junctions(self):
+        self.seed()
+        # Tests basic json mapping and ensures fallback doesn't crash on deleted dirs
+        (self.vault / '.beyin-projects.json').write_text(json.dumps({
+            "folders": {"custom/path": "mapped-project"}
+        }))
+        cwd = self.vault / 'custom' / 'path' / 'inside'
+        cwd.mkdir(parents=True)
+        # Should resolve and respond correctly
+        self.invoke(dict(self.payload, cwd=str(cwd)))
+        queued = list((self.state / 'hook-queue').glob('*.json'))
+        self.assertTrue(queued)
+        event_data = json.loads(queued[-1].read_text(encoding='utf-8'))
+        self.assertEqual(event_data.get('project'), 'mapped-project')
+
+        deleted_cwd = self.vault / 'projects' / 'deleted-proj'
+        deleted_cwd.mkdir(parents=True)
+        cwd_path = str(deleted_cwd)
+        import shutil
+        shutil.rmtree(cwd_path)
+        # Should fallback gracefully without crashing
+        self.invoke(dict(self.payload, cwd=cwd_path))
+
     def test_is_synthetic_prompt_detection(self):
         # Prefix heuristics
         for prefix in (
