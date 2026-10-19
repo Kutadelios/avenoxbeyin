@@ -3214,6 +3214,9 @@ def popup(vault, context=None, state=None, root=None, session=None):
     stop_escape = lambda: None
 
     def close():
+        # Escape commits cancellation before another queued Return can run
+        # during the fade animation and save a card or enqueue an agent job.
+        saving['on'] = True
         def fade(alpha):
             if alpha <= 0:
                 root.destroy()
@@ -6337,6 +6340,21 @@ def _agent_codex_flags(mcp_off=()):
     return flags
 
 
+def _agent_codex_permissions():
+    """Deny native filesystem reads as well as writes for this invocation.
+
+    apply_patch validates existing content before checking write approval. The
+    documented named profile reaches that read through the filesystem sandbox;
+    legacy -s read-only would select a different profile and reopen the oracle.
+    Use a fresh name so deep config merging cannot inherit a user's narrower
+    filesystem grants. MCP and trusted lifecycle hooks retain their own scope.
+    Measured with official Linux Codex 0.155.1, 0.160.0 and 0.163.0.
+    """
+    name = 'beyin_yakala_' + secrets.token_hex(16)
+    return ['-c', 'permissions.' + name + '.filesystem={":root"="deny"}',
+            '-c', 'default_permissions=' + json.dumps(name)]
+
+
 def _agent_codex_features(prefix, vault, *, restricted=False):
     """Validate the plain feature table before using any feature name in --disable.
 
@@ -6405,7 +6423,7 @@ def _agent_preflight(client, prefix, vault=None):
             raise ValueError('Claude Code 2.1.259 veya sonrasi gerekli; yerel surum dogrulanamadi.')
         return ()
     rc, output, error = _run([*prefix, '--help'], 15, cwd=str(vault) if vault else None)
-    required = ('--disable', '--ask-for-approval')
+    required = ('--disable', '--ask-for-approval', '--strict-config')
     if rc or any(flag not in output for flag in required):
         raise ValueError('Ajan CLI gerekli guvenlik bayraklarini desteklemiyor: ' + client)
     if client == 'codex':
@@ -6481,7 +6499,7 @@ def _agent_command(vault, state, job, config):
                 '--session-id', job['session_id'], '--name', 'Yakala-' + job['id'][:8],
                 '--output-format', 'stream-json', '--verbose', '--max-turns', '24',
                 '--max-budget-usd', str(config['max_budget_usd']), *config['extra_args']]
-    # No writable vault/Downloads sandbox root, shell, apps, or existing MCP/plugin.
+    # No native readable/writable roots, shell, apps, or existing MCP/plugin.
     # Only exec supports --ignore-rules; interactive runs retain the same disabled shell tools.
     # General hosted search is also an outbound channel for private note contents.
     # Network access and local writes both go through the bounded bridge.
@@ -6491,14 +6509,17 @@ def _agent_command(vault, state, job, config):
                 ('mcp_servers.yakala.enabled', True),
                 ('mcp_servers.yakala.args', helper[1:]), ('mcp_servers.yakala.required', True),
                 ('mcp_servers.yakala.tool_timeout_sec', 60)]
-    command = [*prefix, *_agent_codex_flags(job.get('codex_mcp_off') or ())]
+    # Named permission profiles are beta: strict loading also checks top-level
+    # config keys, so a removed profile selector cannot be silently ignored.
+    command = [*prefix, '--strict-config', *_agent_codex_flags(job.get('codex_mcp_off') or ()),
+               *_agent_codex_permissions()]
     for key, value in settings:
         # JSON strings/arrays/booleans form a valid TOML value for these scalar-only settings.
         command += ['-c', key + '=' + json.dumps(value, ensure_ascii=True)]
     if _agent_windowed(config):
-        return _agent_windows_argv([*command, '-C', str(vault), '-s', 'read-only',
+        return _agent_windows_argv([*command, '-C', str(vault),
                                     *config['extra_args'], '--', _agent_prompt(vault, job)])
-    return [*command, 'exec', '-C', str(vault), '-s', 'read-only', '--ignore-rules', '--json',
+    return [*command, 'exec', '-C', str(vault), '--ignore-rules', '--json',
             '--skip-git-repo-check', '-o', str(folder / 'last-message.txt'), *config['extra_args'], '-']
 
 
