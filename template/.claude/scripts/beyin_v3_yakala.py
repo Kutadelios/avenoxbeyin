@@ -266,7 +266,7 @@ def canonical(url):
 
 def _value(raw):
     raw = raw.strip()
-    if raw.startswith('"'):
+    if raw.startswith(('"', '[')):
         try:
             return json.loads(raw)
         except ValueError:
@@ -445,16 +445,16 @@ def _capture_ids(meta):
     return [item for item in value if isinstance(item, str) and re.fullmatch(r'[a-f0-9]{32}', item)] if isinstance(value, list) else []
 
 
-def capture(vault, url=None, text=None, files=(), why='', app=None, title=None, tool='masaustu', state=None, capture_id=None):
+def capture(vault, url=None, text=None, files=(), why='', app=None, title=None, tool='masaustu', state=None, capture_id=None, extra_urls=()):
     if capture_id is None or os.name != 'nt':
-        return _capture(vault, url, text, files, why, app, title, tool, state)
+        return _capture(vault, url, text, files, why, app, title, tool, state, extra_urls=extra_urls)
     if not isinstance(capture_id, str) or not re.fullmatch(r'[a-f0-9]{32}', capture_id):
         raise ValueError('Gecersiz yakalama kimligi.')
     with _WindowsCommitLock(vault):
         for card in cards(vault, state):
             if capture_id in _capture_ids(card['meta']):
                 return dict(status='ayni_yakalama', id=card['id'], path=card['path'].relative_to(vault).as_posix())
-        return _capture(vault, url, text, files, why, app, title, tool, state, capture_id)
+        return _capture(vault, url, text, files, why, app, title, tool, state, capture_id, extra_urls)
 
 
 def _write_capture_card(path, meta, body, vault, copied):
@@ -470,8 +470,8 @@ def _write_capture_card(path, meta, body, vault, copied):
         raise
 
 
-def _capture(vault, url=None, text=None, files=(), why='', app=None, title=None, tool='masaustu', state=None, capture_id=None):
-    """Write one card; a repeated URL only gains the new reason. No network."""
+def _capture(vault, url=None, text=None, files=(), why='', app=None, title=None, tool='masaustu', state=None, capture_id=None, extra_urls=()):
+    """Write one card; a repeated URL gains notes and explicitly selected attachments. No network."""
     vault = Path(vault)
     if os.name == 'nt' and not vault.is_dir():
         raise ValueError('Vault bulunamadi; tasindiysa yeni konumunda yakala kur komutunu calistir: ' + str(vault))
@@ -485,6 +485,7 @@ def _capture(vault, url=None, text=None, files=(), why='', app=None, title=None,
             pass  # a local or malformed link stays what it was: copied text, never fetched
     if url:
         _safe_source_url(url)  # Capturing stays offline.
+    extra_urls = _extra_urls(url, extra_urls)
     why = (why or '').strip()
     files = [Path(f).expanduser() for f in files]
     if not (url or text or files):
@@ -500,29 +501,40 @@ def _capture(vault, url=None, text=None, files=(), why='', app=None, title=None,
                 addition = '\n\n## Yeniden yakalandi (' + stamp.strftime('%Y-%m-%d %H:%M') + ')\n' + (why or '_(not yok)_')
                 if text:
                     addition += '\n\n' + _quote(text)
-                copied = _capture_files(vault, folder, files) if os.name == 'nt' else []
+                merged = _extra_urls(url, (card['meta'].get('ek_urller') or []) + extra_urls)
+                if merged:
+                    card['meta']['ek_urller'] = merged
+                    links = '\n'.join('- ' + item for item in merged)
+                    if _section(body, 'Ek bağlantılar'):
+                        body = _without_section(body, 'Ek bağlantılar', links)
+                    else:
+                        addition += '\n\n## Ek bağlantılar\n\n' + links
+                copied = _capture_files(vault, folder, files)
                 if copied:
                     addition += '\n\n## Dosyalar\n\n' + '\n'.join('- [[' + item + ']]' for item in copied)
-                if os.name == 'nt' and (text or copied):
+                if text or copied:
                     card['meta']['visibility'] = 'private'
                 if capture_id:
                     identifiers = _capture_ids(card['meta'])
                     card['meta']['yakalama_idleri'] = identifiers + [capture_id]
                 _write_capture_card(card['path'], card['meta'], body + addition, vault, copied)
                 return {'status': 'mevcut_karta_eklendi', 'id': card['id'], 'path': str(card['path'].relative_to(vault))}
-    # Windows: a page/hovered link with an attached picture stays a link card, so `isle` still fetches it.
-    kind = kind_of(url, () if url and os.name == 'nt' else files, app)
+    # A page with an attached picture stays a link card, so `isle` still fetches it.
+    kind = kind_of(url, () if url else files, app)
     if not title:
-        title = (files[0].name if files else None) or (url if url else _first_line(text))
+        title = url or (files[0].name if files else _first_line(text))
     copied = _capture_files(vault, folder, files)
     name = stamp.strftime('%Y-%m-%d-%H%M') + '-' + (url_slug(url) if url and title == url else slug(title))
     path = _unique(folder / (name + '.md'))
     meta = {'tur': 'yakala', 'durum': 'bekliyor', 'kaynak_turu': kind, 'baslik': _first_line(title, 160),
             'url': url, 'yakalandi': stamp.isoformat(timespec='seconds'), 'arac': tool, 'uygulama': app,
-            'visibility': 'private' if kind in ('mail', 'metin', 'dosya') or (os.name == 'nt' and (text or files)) else 'internal'}
+            'visibility': 'private' if kind in ('mail', 'metin', 'dosya') or text or files else 'internal'}
     body = ['# ' + _first_line(title, 160), '', '## Neden', '', why or '_(not yok)_']
     if url:
         body += ['', '## Kaynak', '', url]
+    if extra_urls:
+        meta['ek_urller'] = extra_urls
+        body += ['', '## Ek bağlantılar', ''] + ['- ' + item for item in extra_urls]
     if text:
         body += ['', '## Secim', '', _quote(text)]
     if copied:
@@ -531,6 +543,20 @@ def _capture(vault, url=None, text=None, files=(), why='', app=None, title=None,
         meta['yakalama_idleri'] = [capture_id]
     _write_capture_card(path, meta, '\n'.join(body), vault, copied)
     return {'status': 'yakalandi', 'id': path.stem, 'kaynak_turu': kind, 'path': path.relative_to(vault).as_posix()}
+
+
+def _extra_urls(url, values):
+    """Validate every attachment offline, keeping the primary URL's identity stable."""
+    if not isinstance(values, (list, tuple)):
+        raise ValueError('Ek bağlantılar bir liste olmalı.')
+    seen, result = {canonical(url)}, []
+    for value in values:
+        _safe_source_url(value)
+        key = canonical(value)
+        if key not in seen:
+            result.append(value)
+            seen.add(key)
+    return result
 
 
 def _capture_files(vault, folder, files):
@@ -1176,6 +1202,8 @@ def process(vault, card_ids=None, allow_audio=True, retry=False, state=None):
         entry = {'id': card['id'], 'kart': card['path'].relative_to(vault).as_posix(),
                  'kaynak_turu': meta.get('kaynak_turu'), 'baslik': meta.get('baslik'),
                  'neden': _section(body, 'Neden'), 'url': meta.get('url')}
+        if meta.get('ek_urller'):
+            entry['ek_urller'] = meta['ek_urller']
         try:
             if info.get('title') and (not meta.get('baslik') or str(meta.get('baslik')).startswith(('http://', 'https://'))):
                 body = re.sub(r'^# .*$', lambda _m: '# ' + _first_line(info['title'], 160), body, count=1, flags=re.M)
@@ -3061,6 +3089,11 @@ def _popup_position(work, width, height):
     return left + max(0, (right - left - width) // 2), top + max(0, min(int((bottom - top) * 0.22), bottom - top - height))
 
 
+def _popup_bounds(work):
+    left, top, right, bottom = work
+    return min(600, right - left - 32), bottom - top - 32
+
+
 def _clipboard_sequence():
     import ctypes
     user32 = ctypes.WinDLL('user32')
@@ -3101,6 +3134,9 @@ def windows_sources(context, clip, fresh, image=None, shot=None):
     sources = []
 
     def add(kind, value, label, on, key, title=None, picture=None):
+        if kind == 'url' and value and any(source['kind'] == 'url' and canonical(source['value']) == canonical(value)
+                                          for source in sources):
+            return
         if value:
             sources.append(dict(kind=kind, value=value, label=label, on=bool(on), key=key, title=title, image=picture))
     copied_url = tab_url(clip) if re.match(r'^https?://', clip, re.I) else None
@@ -3113,12 +3149,13 @@ def windows_sources(context, clip, fresh, image=None, shot=None):
     add('url', hovered, 'İmlecin altındaki bağlantı', True, 'i', context.get('baslik_imlec'))
     add('url', page, 'Etkin sayfa', not hovered, 's', context.get('baslik'))
     add('url', context.get('url_alinti'), 'Alıntılanan gönderi', False, 'a')
-    same = next((source for source in sources if source['kind'] == 'url' and source['value'] == copied_url), None)
+    same = next((source for source in sources if source['kind'] == 'url' and copied_url and
+                 canonical(source['value']) == canonical(copied_url)), None)
     if copied_url and not same:
         add('url', copied_url, 'Pano bağlantısı', clipboard_leads, 'p')
     elif same and fresh:
         same['clipboard'] = True  # the copied link is this source, whatever its position
-    if clip and not copied_url:
+    if clip and not copied_url and fresh:
         add('text', clip, 'Pano metni', copied, 'm')
     for picture, label, on, key in ((image, 'Pano görüntüsü', fresh_image, 'g'),
                                     # Whatever window was in front (chat, mail, a password manager) is never attached
@@ -3127,7 +3164,7 @@ def windows_sources(context, clip, fresh, image=None, shot=None):
         if picture:
             add('file', picture['path'], label, on, key, picture=picture)
     for index, path in enumerate(context.get('dosyalar') or []):
-        add('file', path, Path(path).name, True, str(index + 1))
+        add('file', path, Path(path).name, True, str(index + 1) if index < 9 else '')
     for source in sources:
         source['clipboard'] = source.get('clipboard', False) or source['key'] in ('p', 'm', 'g')
     return sources
@@ -3135,21 +3172,21 @@ def windows_sources(context, clip, fresh, image=None, shot=None):
 
 def _source_toggle(sources, chosen):
     chosen['on'] = not chosen['on']
-    if chosen['on'] and chosen['kind'] == 'url':
-        for source in sources:
-            if source is not chosen and source['kind'] == 'url':
-                source['on'] = False
 
 
 def _source_arguments(sources):
     selected = [source for source in sources if source['on']]
-    url = next((source for source in selected if source['kind'] == 'url'), {})
-    return dict(url=url.get('value'), title=url.get('title'),
+    priority = {'i': 0, 's': 1, 'a': 2, 'p': 3}
+    urls = sorted((source for source in selected if source['kind'] == 'url'),
+                  key=lambda source: priority.get(source['key'], 4))
+    url = urls[0] if urls else {}
+    extras = [source['value'] for source in urls[1:]]
+    return dict(url=url.get('value'), title=url.get('title'), extra_urls=extras,
                 text='\n'.join(source['value'] for source in selected if source['kind'] == 'text') or None,
                 files=[source['value'] for source in selected if source['kind'] == 'file'])
 
 
-def _browser_source_choices(context, clip='', image=None):
+def _browser_source_choices(context, clip='', image=None, fresh=False):
     """Offer a verified desktop hover and its page without hiding clipboard alternatives.
 
     macOS/Linux readers bind the hover to a committed page. Their ordinary page-only,
@@ -3161,51 +3198,93 @@ def _browser_source_choices(context, clip='', image=None):
     if not page or not hovered or page == hovered:
         return None
     verified = {'url': page, 'baslik': context.get('baslik'),
-                'url_imlec': hovered, 'baslik_imlec': context.get('baslik_imlec')}
-    choices = windows_sources(verified, clip, True, image=image)
-    labels = {'i': 'Imlecin altindaki baglanti', 's': 'Etkin sayfa', 'p': 'Pano baglantisi',
+                'url_imlec': hovered, 'baslik_imlec': context.get('baslik_imlec'),
+                'url_alinti': _opera_url(context.get('url_alinti'))}
+    choices = windows_sources(verified, clip, fresh, image=image)
+    labels = {'i': 'Imlecin altindaki baglanti', 's': 'Etkin sayfa', 'a': 'Alintilanan gonderi', 'p': 'Pano baglantisi',
               'm': 'Pano metni', 'g': 'Pano goruntusu'}
     for choice in choices:
         choice['label'] = labels[choice['key']]
     return choices
 
 
-def _windows_source_cards(canvas, root, sources, y, width, pad, key_label='Alt'):
-    """Each source has a visible keyboard toggle; URL choices are mutually exclusive."""
-    labels = []
+def _source_shortcut(event):
+    """AltGr is text input; Windows virtual keys survive Turkish I and Caps Lock."""
+    if getattr(event, 'state', 0) & 4:
+        return ''
+    code = getattr(event, 'keycode', 0)
+    if os.name == 'nt' and (65 <= code <= 90 or 48 <= code <= 57):
+        return chr(code).lower()
+    key = getattr(event, 'keysym', '').lower()
+    return {'ı': 'i', 'i̇': 'i', 'idotless': 'i', 'iabovedot': 'i'}.get(key, key)
+
+
+def _windows_source_cards(canvas, root, sources, y, width, pad, key_label='Alt', entry=None, reveal=None):
+    """Independent source tiles; consume shortcuts before Entry's class bindings."""
+    tiles, shortcuts = [], {}
+    P = PALETTE
 
     def paint():
-        for source, label in labels:
-            text = ('[x] ' if source['on'] else '[ ] ') + source['label'] + ' | ' + key_label + '+' + source['key'].upper()
-            canvas.itemconfigure(label, text=text, fill=PALETTE['text'] if source['on'] else PALETTE['muted'])
+        for source, box, check, tick, label in tiles:
+            on = source['on']
+            canvas.itemconfigure(box, fill=P['selected'] if on else P['card'],
+                                 outline=P['accent'] if on else P['card_line'])
+            canvas.itemconfigure(check, fill=P['accent'] if on else P['card'],
+                                 outline=P['accent'] if on else P['faint'])
+            canvas.itemconfigure(tick, state='normal' if on else 'hidden')
+            canvas.itemconfigure(label, fill=P['text'] if on else P['soft'])
 
-    for source in sources:
-        label = canvas.create_text(pad, y + 12, anchor='w', font=_font(12, 'bold'))
+    for index, source in enumerate(sources):
+        items = []
+        box = _round_rect(canvas, pad, y, width - pad, y + 62, 10, width=1)
+        check = _round_rect(canvas, pad + 14, y + 15, pad + 30, y + 31, 4, width=1)
+        tick = canvas.create_text(pad + 22, y + 23, text='✓', fill=P['accent_text'], font=_font(10, 'bold'))
+        right = width - pad - 14
+        if source['key']:
+            badge = key_label + '+' + source['key'].upper()
+            badge_w = 76 if key_label == 'Option' else 54
+            items.append(_round_rect(canvas, right - badge_w, y + 12, right, y + 32, 5,
+                                     fill=P['key'], outline=P['key_line']))
+            items.append(canvas.create_text(right - badge_w / 2, y + 22, text=badge, fill=P['muted'], font=_font(9)))
+            right -= badge_w + 12
+        label = canvas.create_text(pad + 42, y + 22, anchor='w', font=_font(12, 'bold'),
+                                   text=_fit(canvas, source['label'], _font(12, 'bold'), right - pad - 42))
         picture = source.get('image')
-        thumb = _image_thumb(root, picture, (70, 38)) if picture else None
-        right = width - pad
+        thumb = _image_thumb(root, picture, (48, 30)) if picture else None
+        detail_right = width - pad - 14
         if thumb:
             picture['thumb'] = thumb
-            canvas.create_image(right, y + 24, image=thumb, anchor='e')
-            right -= 80
-        # A link shows the address itself, so what will be saved can be checked before Enter.
+            items.append(canvas.create_image(right, y + 32, image=thumb, anchor='e'))
+            detail_right = right - 58
         value = source['value'] if source['kind'] == 'url' else (source.get('title') or source['value'])
         if picture:
             value = '%d×%d' % (picture['width'], picture['height'])
             if picture.get('method'):
                 value += ' · ' + picture['method']
-        detail = canvas.create_text(pad + 16, y + 34, anchor='w', font=_font(11), fill=PALETTE['muted'],
-                                    text=_fit(canvas, _first_line(value, 200), _font(11), right - pad - 16))
+        detail = canvas.create_text(pad + 42, y + 44, anchor='w', font=_font(10), fill=P['muted'],
+                                    text=_fit(canvas, _first_line(value, 200), _font(10), detail_right - pad - 42))
 
-        def toggle(_event=None, chosen=source):
+        def toggle(_event=None, chosen=source, row=index):
             _source_toggle(sources, chosen)
             paint()
+            if reveal:
+                reveal(row)
             return 'break'
-        for item in (label, detail):
+        for item in [box, check, tick, label, detail] + items:
             canvas.tag_bind(item, '<Button-1>', toggle)
-        root.bind('<Alt-' + source['key'] + '>', toggle)
-        labels.append((source, label))
-        y += 52
+        if source['key']:
+            shortcuts[source['key']] = toggle
+        tiles.append((source, box, check, tick, label))
+        y += 70
+
+    def shortcut(event):
+        toggle = shortcuts.get(_source_shortcut(event))
+        if toggle:
+            return toggle()
+
+    root.bind('<Alt-KeyPress>', shortcut)
+    if entry is not None:
+        entry.bind('<Alt-KeyPress>', shortcut)
     paint()
     return y
 
@@ -3855,9 +3934,9 @@ def gather_context():
 
 # ---------------------------------------------------------------- popup
 
-PALETTE = {'bg': '#0A0E17', 'card': '#111827', 'card_line': '#1E293B', 'line': '#172033', 'text': '#F1F5F9',
-           'soft': '#CBD5E1', 'muted': '#64748B', 'faint': '#3F4C63', 'accent': '#F5C84C', 'accent_text': '#1A1405',
-           'key': '#151D2C', 'key_line': '#26324A', 'ok': '#6EE7A8'}
+PALETTE = {'bg': '#F5F2EB', 'card': '#FFFDFA', 'card_line': '#DDD7CD', 'line': '#E3DDD3', 'text': '#302D29',
+           'soft': '#565149', 'muted': '#716A60', 'faint': '#8A8175', 'accent': '#AD593D', 'accent_text': '#FFFFFF',
+           'key': '#EEE9E0', 'key_line': '#DDD7CD', 'selected': '#F5E7DC', 'ok': '#AD593D'}
 KIND_LABEL = {'youtube': 'VİDEO', 'x': 'TWEET', 'mail': 'MAİL', 'github': 'REPO', 'pdf': 'PDF', 'makale': 'SAYFA'}
 
 
@@ -4403,24 +4482,33 @@ def popup(vault, context=None, state=None, root=None, session=None):
     if sources is not None:
         url, files, clip_text = None, [], ''  # Source rows below own their explicit selections.
 
-    P, W, pad = PALETTE, 640, 26
+    work = (0, 0, root.winfo_screenwidth(), root.winfo_screenheight())
+    if windows:
+        try:
+            work = _win_monitor(context.get('hwnd') or 0) or work
+        except Exception:
+            pass
+    P, pad = PALETTE, 24
+    W, max_height = _popup_bounds(work)
     _window_chrome(root)
     canvas = tk.Canvas(root, width=W, highlightthickness=0, bd=0, bg=P['bg'])
     canvas.pack(fill='both', expand=True)
 
-    # Header: brand mark, name, where it came from.
-    y = 30
-    canvas.create_oval(pad, y - 6, pad + 12, y + 6, fill=P['accent'], outline='')
-    canvas.create_text(pad + 22, y, text='Beyne at', anchor='w', fill=P['text'], font=_font(13, 'bold'))
+    # Warm surfaces and one accent keep the content in front.
+    y = 28
+    canvas.create_text(pad, y, text='Beyne at', anchor='w', fill=P['text'], font=_font(15, 'bold'))
     source = context.get('uygulama') or ''
     if source:
-        canvas.create_text(W - pad, y, text=_fit(canvas, source, _font(12), 260), anchor='e', fill=P['muted'], font=_font(12))
+        canvas.create_text(W - pad - (64 if windows else 0), y, text=_fit(canvas, source, _font(10), W // 3),
+                           anchor='e', fill=P['muted'], font=_font(10))
 
     # Main field: large, borderless, with a placeholder.
-    y = 64
-    entry = tk.Entry(root, font=_font(21), fg=P['text'], bg=P['bg'], insertbackground=P['accent'], insertwidth=2,
+    y = 60
+    _round_rect(canvas, pad, y, W - pad, y + 52, 12, fill=P['card'], outline=P['card_line'])
+    entry = tk.Entry(root, font=_font(16), fg=P['text'], bg=P['card'], insertbackground=P['accent'], insertwidth=2,
+                     selectbackground=P['selected'], selectforeground=P['text'],
                      relief='flat', bd=0, highlightthickness=0)
-    canvas.create_window(pad, y, window=entry, anchor='nw', width=W - 2 * pad, height=40)
+    canvas.create_window(pad + 14, y + 8, window=entry, anchor='nw', width=W - 2 * pad - 28, height=36)
     placeholder_text = 'Neden kaydediyorsun?' if (url or files or clip_text or sources) else 'Aklındakini yaz…'
     hint = {'on': False}
 
@@ -4455,13 +4543,41 @@ def popup(vault, context=None, state=None, root=None, session=None):
     entry.bind('<KeyRelease>', after_key)
     entry.bind('<Button-1>', lambda _e: (entry.focus_set(), entry.icursor(0), 'break')[-1] if hint['on'] else None)
     show_hint()
-    y += 56
-    canvas.create_line(pad, y, W - pad, y, fill=P['line'])
-    y += 16
+    y += 70
 
     if sources is not None:
-        y = _windows_source_cards(canvas, root, sources, y, W, pad,
-                                  key_label='Option' if sys.platform == 'darwin' and os.name != 'nt' else 'Alt')
+        content_height = 70 * len(sources)
+        viewport = min(content_height, max(62, min(420, max_height - y - 92)))
+        scrolling = content_height > viewport
+        canvas.create_text(pad, y + 6, anchor='w', text='Kaynaklar · Birlikte seçebilirsin',
+                           fill=P['muted'], font=_font(10))
+        y += 24
+        rows = tk.Canvas(root, width=W - 2 * pad, height=viewport, highlightthickness=0, bd=0, bg=P['bg'])
+        canvas.create_window(pad, y, window=rows, anchor='nw', width=W - 2 * pad, height=viewport)
+        rows.configure(scrollregion=(0, 0, W - 2 * pad, content_height))
+
+        def reveal(row):
+            if scrolling:
+                rows.yview_moveto(min(row * 70, content_height - viewport) / content_height)
+
+        _windows_source_cards(rows, root, sources, 0, W - 2 * pad, 1,
+                              key_label='Option' if sys.platform == 'darwin' and os.name != 'nt' else 'Alt',
+                              entry=entry, reveal=reveal)
+        if scrolling:
+            def scroll(event):
+                step = -1 if getattr(event, 'num', 0) == 4 or getattr(event, 'delta', 0) > 0 else 1
+                rows.yview_scroll(step, 'units')
+                return 'break'
+            root.bind('<MouseWheel>', scroll)
+            root.bind('<Button-4>', scroll)
+            root.bind('<Button-5>', scroll)
+            for key, step in (('<Prior>', -1), ('<Next>', 1)):
+                def page(_event=None, step=step):
+                    rows.yview_scroll(step, 'pages')
+                    return 'break'
+                root.bind(key, page)
+                entry.bind(key, page)
+        y += viewport + 8
 
     # Preview card.
     if files or url or clip_text:
@@ -4521,10 +4637,14 @@ def popup(vault, context=None, state=None, root=None, session=None):
     # Footer: status on the left, key hints on the right.
     y += 8
     footer_y = y + 14
-    status = canvas.create_text(pad, footer_y, anchor='w', fill=P['muted'], font=_font(12),
-                                text='Tab: panoyu ekle' if clip_text and (url or files) else
-                                _hotkey_hint(vault, state) if (url or files or clip_text or image) else
-                                _empty_capture_hint(vault, state))
+    footer_text = (('Kaydır · PgUp/PgDn' if scrolling else
+                    'Option ile kaynak seç' if sys.platform == 'darwin' else 'Alt ile kaynak seç') if sources else
+                   'Tab: panoyu ekle' if clip_text and (url or files) else
+                   _hotkey_hint(vault, state) if (url or files or clip_text or image) else
+                   _empty_capture_hint(vault, state))
+    status_width = W - 2 * pad - (220 if W >= 520 else 110)
+    status = canvas.create_text(pad, footer_y, anchor='w', fill=P['muted'], font=_font(10),
+                                text=_fit(canvas, footer_text, _font(10), status_width))
     right = W - pad
 
     def keycap(x_right, key, label):
@@ -4537,7 +4657,8 @@ def popup(vault, context=None, state=None, root=None, session=None):
         canvas.create_text(x2 - key_w / 2, footer_y, text=key, fill=P['soft'], font=_font(11, 'bold'))
         return x2 - key_w - 18
     right = keycap(right, '↵', 'Kaydet')
-    keycap(right, 'esc', 'Kapat')
+    if W >= 520:
+        keycap(right, 'esc', 'Kapat')
     height = footer_y + 28
     canvas.configure(height=height)
     result = {}
@@ -4563,9 +4684,11 @@ def popup(vault, context=None, state=None, root=None, session=None):
             return 'break'
         text = clip_text if include['on'] else None
         title = context.get('baslik') if url else None
+        extra_urls = []
         if sources is not None:
             chosen = _source_arguments(sources)
             url, files, text, title = chosen['url'], chosen['files'], chosen['text'], chosen['title']
+            extra_urls = chosen['extra_urls']
         why = '' if hint['on'] else entry.get().strip()
         if not (url or files or text or why):
             canvas.itemconfigure(status, text='Önce bir şey yaz', fill=P['accent'])
@@ -4575,16 +4698,17 @@ def popup(vault, context=None, state=None, root=None, session=None):
         saving['on'] = True
         try:
             result.update(capture(vault, url=url, text=text, files=files, why=why, app=context.get('uygulama'),
-                                  title=title, state=state, **({'capture_id': capture_id} if windows else {})))
+                                  title=title, state=state, extra_urls=extra_urls,
+                                  **({'capture_id': capture_id} if windows else {})))
         except Exception as exc:
             saving['on'] = False
-            canvas.itemconfigure(status, text=_fit(canvas, 'Kaydedilemedi: ' + str(exc), _font(12), 300), fill=P['accent'])
+            canvas.itemconfigure(status, text=_fit(canvas, 'Kaydedilemedi: ' + str(exc), _font(10), status_width), fill=P['accent'])
             return 'break'
         if windows:
             if any(item.get('clipboard') and item['on'] for item in sources):
                 _clipboard_saved(vault, sequence, state, context.get('clipboard_generation'))
             stop_escape()
-        entry.configure(state='disabled', disabledbackground=P['bg'], disabledforeground=P['muted'])
+        entry.configure(state='disabled', disabledbackground=P['card'], disabledforeground=P['muted'])
         canvas.itemconfigure(status, text='✓  Beyne atıldı', fill=P['ok'], font=_font(12, 'bold'))
         root.after(260, close)
         return 'break'
@@ -4601,7 +4725,7 @@ def popup(vault, context=None, state=None, root=None, session=None):
     root.bind('<Escape>', dismiss if windows else lambda _e: close())
     if windows:
         root.protocol('WM_DELETE_WINDOW', dismiss)
-        close_label = canvas.create_text(W - pad, 58, text='× Kapat', anchor='e', fill=P['soft'], font=_font(11))
+        close_label = canvas.create_text(W - pad, 28, text='× Kapat', anchor='e', fill=P['soft'], font=_font(10))
         canvas.tag_bind(close_label, '<Button-1>', dismiss)
 
     # Drag the borderless window by any empty canvas spot; items with their own click binding keep it.
@@ -4632,15 +4756,7 @@ def popup(vault, context=None, state=None, root=None, session=None):
     canvas.bind('<ButtonRelease-1>', drag_end)
 
     root.update_idletasks()
-    x = (root.winfo_screenwidth() - W) // 2
-    top = max(80, int(root.winfo_screenheight() * 0.22))
-    if windows:
-        try:
-            work = _win_monitor(context.get('hwnd') or 0)
-            if work:
-                x, top = _popup_position(work, W, height)
-        except Exception:
-            pass
+    x, top = _popup_position(work, W, height)
     root.geometry('%dx%d' % (W, height) if windows else '%dx%d+%d+%d' % (W, height, x, top))
     try:
         root.attributes('-alpha', 0.0)
@@ -6148,8 +6264,7 @@ def _collect_windows(context, vault, state, cancel=None):
         context = windows_enrich(context, cancel)
         if cancel and cancel.is_set():
             return None
-        link = context.get('url') or context.get('url_imlec')
-        shot = window_image(context, cancel=cancel) if not (context.get('dosyalar') or link) else None
+        shot = window_image(context, cancel=cancel)
         sources = windows_sources(context, clip, fresh, image, shot)
         success = True
         return dict(context=context, clip=clip, image=image, shot=shot, sequence=sequence, sources=sources)
@@ -6274,6 +6389,7 @@ Windows'ta komutlardaki `python3` yerine `py -3` yaz.
 2. **Her `cikarildi` kartı oku.** Kartı ve `ham` dosyasını (`.ham/<id>.md`) oku. Uzun transkriptte
    önce bölüm başlıklarına bak, sonra nedenle ilgili kısmı oku. `ajan-okusun` yönteminde dosyayı
    kendin aç. Mail kartında Gmail/Outlook bağlantın varsa thread'in tamamını oradan oku.
+   İsteğe bağlı `ek_urller` ve `## Ek bağlantılar` seçilen diğer adresleri taşır; `isle` ana `url`'yi çıkarır.
 3. **Dersleri bağla.** Kaynak başına 1-5 somut ders çıkar. Önce `knowledge/index.md` ve ilgili
    kavramı oku; mevcut notu geliştir, yoksa `beyin` skill'indeki kuralla `knowledge/concepts/<konu>.md`
    oluştur. Her dersin altında kaynak satırı: kart bağlantısı, URL ve videoda zaman damgası
