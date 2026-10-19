@@ -167,6 +167,102 @@ class BatchPreviewTest(BatchFiles):
         self.assertFalse(self.state.exists())
 
 
+class BatchSelectedSourceTest(BatchFiles):
+    primary = 'https://example.org/primary'
+    selected = 'https://example.net/selected'
+    unselected = 'https://example.com/body-only'
+
+    def selected_card(self, values=None):
+        self.configure()
+        _, card = self.card(url=self.primary)
+        meta = dict(card['meta'], ek_urller=[self.selected] if values is None else values)
+        yakala.write_card(card['path'], meta, card['body'] + '\n\n' + self.unselected)
+        return card
+
+    def running_member(self):
+        job = self.members(self.submit())[0]
+        job['state'] = 'running'
+        yakala._agent_prepare_runtime(self.vault, self.state, job)
+        return job
+
+    def test_selected_secondary_is_frozen_in_each_job_and_restricted_fetch_can_use_it(self):
+        self.selected_card([self.selected, self.primary, self.selected])
+        job = self.running_member()
+        fetched = {'url': self.selected, 'links': [], 'text': 'Synthetic public source'}
+        with patch.object(yakala, '_agent_fetch_source', return_value=fetched) as fetch:
+            result = yakala._agent_tool_call(self.vault, self.state, job['id'],
+                                            'fetch_source', {'url': self.selected})
+        self.assertEqual(result['url'], self.selected)
+        fetch.assert_called_once_with(self.selected)
+        self.assertEqual(job['extra_urls'], [self.selected])
+        self.assertIn(self.selected, yakala._agent_prompt(self.vault, job))
+
+    def test_body_query_and_later_card_edit_cannot_expand_a_batch_members_sources(self):
+        card = self.selected_card()
+        job = self.running_member()
+        later = 'https://example.org/later-selection'
+        self.mutate_card(card, ek_urller=[self.selected, later])
+        with patch.object(yakala, '_agent_fetch_source') as fetch:
+            for value in (self.unselected, later, self.selected + '?private=CANARY'):
+                with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'not authorized'):
+                    yakala._agent_tool_call(self.vault, self.state, job['id'], 'fetch_source', {'url': value})
+        fetch.assert_not_called()
+
+    def test_invalid_secondary_metadata_is_a_read_only_preview_error(self):
+        card = self.selected_card()
+        original_meta, original_body = yakala.read_card(card['path'])
+        oversized = ['https://example.org/' + str(index) + '/' + 'x' * 8000 for index in range(9)]
+        for values in (self.selected, [None], ['file:///private'], [self.selected] * 64,
+                       [self.selected + '/' + 'x' * 8192], oversized):
+            with self.subTest(values_type=type(values).__name__, size=len(values)):
+                yakala.write_card(card['path'], dict(original_meta, ek_urller=values), original_body)
+                before = card['path'].read_bytes()
+                result = self.bulk()
+                self.assertFalse(result['gonderilebilir'])
+                self.assertTrue(result['kartlar'][0]['hata'])
+                self.assertEqual(card['path'].read_bytes(), before)
+                self.no_submissions()
+
+    def test_invalid_later_member_blocks_all_jobs_cards_and_manifest_before_send(self):
+        self.configure()
+        _, first = self.card(text='First valid source')
+        _, invalid = self.card(text='Later invalid source')
+        self.mutate_card(first, yakalandi='2026-01-01T00:00:00+00:00')
+        self.mutate_card(invalid, yakalandi='2026-01-02T00:00:00+00:00', ek_urller=['file:///private'])
+        before = [card['path'].read_bytes() for card in (first, invalid)]
+        with self.assertRaisesRegex(ValueError, 'hicbir is gonderilmedi'):
+            self.submit()
+        self.assertEqual(before, [card['path'].read_bytes() for card in (first, invalid)])
+        self.no_submissions()
+
+    def oversized_selection(self):
+        values = ['https://example.org/' + str(index) + '/' + 'x' * 8128 for index in range(8)]
+        selected = self.selected_card(values)
+        _, first = self.card(text='First valid source')
+        self.mutate_card(first, yakalandi='2026-01-01T00:00:00+00:00')
+        self.mutate_card(selected, yakalandi='2026-01-02T00:00:00+00:00')
+        self.assertEqual(yakala._agent_extra_source_urls(values, self.primary), values)
+        return first, selected
+
+    def test_combined_utf8_size_is_a_read_only_preview_error_for_only_oversized_member(self):
+        cards = self.oversized_selection()
+        before = [card['path'].read_bytes() for card in cards]
+        result = self.bulk(request='\U0001f642' * yakala.AGENT_MAX_REQUEST)
+        self.assertFalse(result['gonderilebilir'])
+        self.assertEqual(result['kartlar'][0]['hata'], '')
+        self.assertRegex(result['kartlar'][1]['hata'], 'is kaydi.*buyuk')
+        self.assertEqual(before, [card['path'].read_bytes() for card in cards])
+        self.no_submissions()
+
+    def test_combined_utf8_size_blocks_the_whole_send_before_manifest_job_or_card_write(self):
+        cards = self.oversized_selection()
+        before = [card['path'].read_bytes() for card in cards]
+        with self.assertRaisesRegex(ValueError, 'hicbir is gonderilmedi'):
+            self.submit(request='\U0001f642' * yakala.AGENT_MAX_REQUEST)
+        self.assertEqual(before, [card['path'].read_bytes() for card in cards])
+        self.no_submissions()
+
+
 class BatchQueueTest(BatchFiles):
     def test_manifest_every_job_and_card_are_durable_before_one_wakeup(self):
         self.configure()
@@ -381,6 +477,37 @@ class BatchQueueTest(BatchFiles):
         self.assertEqual(yakala.find_card(self.vault, originals[1]['id'], self.state)['meta']['durum'], 'bekliyor')
         self.assertEqual(yakala.find_card(self.vault, originals[2]['id'], self.state)['meta']['durum'], 'bekliyor')
         self.assertFalse(yakala.agent_batch_status(self.vault, self.state, result['batch_id'])['bitti'])
+
+    def test_later_card_is_rechecked_after_intent_and_previous_member_publication(self):
+        self.configure()
+        _, first = self.card(text='First source before concurrent edit')
+        _, second = self.card(text='Second source before concurrent edit')
+        self.mutate_card(first, yakalandi='2026-01-01T00:00:00+00:00')
+        self.mutate_card(second, yakalandi='2026-01-02T00:00:00+00:00')
+        publish = yakala._agent_json
+        edited = None
+
+        def concurrent_edit(path, payload):
+            nonlocal edited
+            publish(path, payload)
+            if path.name == 'job.json' and payload['card_id'] == first['id'] and payload['state'] == 'queued':
+                manifests = list((yakala._agent_root(self.state) / 'batches').glob('*.json'))
+                self.assertEqual(len(manifests), 1)
+                intent = yakala._agent_batch_load(self.vault, self.state, manifests[0].stem)
+                self.assertEqual(intent['state'], 'preparing')
+                self.assertEqual([item['card_id'] for item in intent['items']], [first['id'], second['id']])
+                self.mutate_card(second, ek_urller=['https://example.org/late-edit'])
+                edited = second['path'].read_bytes()
+
+        with patch.object(yakala, '_agent_json', side_effect=concurrent_edit):
+            result = self.submit()
+        self.assertEqual(result['status'], 'toplu_kismi')
+        self.assertIn('Kart gonderim sirasinda degisti', result['submission_error'])
+        self.assertEqual(result['sayilar']['queued'], 1)
+        self.assertEqual(result['sayilar']['kayit_yok'], 1)
+        self.assertEqual(len(yakala._agent_jobs(self.vault, self.state)), 1)
+        self.assertEqual(second['path'].read_bytes(), edited)
+        self.spawned.assert_not_called()
 
     def test_hard_crash_keeps_initial_manifest_with_all_intended_identities(self):
         self.configure()
