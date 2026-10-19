@@ -27,6 +27,16 @@ bir `read`/`write` girdisinin derin birleştirme yoluyla miras kalmasını önl�
 128 bit rastgeleliğin çakışmayı pratikte ihmal edilebilir kılması bir olasılık
 değerlendirmesidir; bütün sistem durumlarını tarayarak ispatlanmış benzersizlik değildir.
 
+POSIX ön kontrolü `allowed_permission_profiles`, `allowed_sandbox_modes` veya
+`remote_sandbox_config` varsa işi başlatmadan reddeder. Codex 0.163.0, izin
+listesinde olmayan rastgele profil yerine yönetilen varsayılana sessizce
+dönebildiği için `--strict-config` yeterli değildir [S7]. `CODEX_HOME`
+(varsayılan `~/.codex`), `/etc/codex`, proje/üst dizin config'leri ve profil
+parçaları taranır; yönetilen dosyalardaki izin seçicileri de reddedilir.
+Okunamayan/bozuk config, dolu bulut yönetim önbelleği veya macOS yönetim
+tercihi varsa güvenli profil varsayılmaz. İki görünümde de kart ASCII Türkçe
+açıklamayla `onay-bekliyor` olur; Windows `-s read-only` yolu değişmez.
+
 **Windows ayrı bir uyumluluk yolu kullanır: `-s read-only`.** Kullanıcının
 19.10.2026 tarihli gerçek Windows 11 / Codex 0.155.1 denemesinde önceki düzeltme
 (`dc2a1bc2`, fork #9) `AGENTS.md` yüklenirken durdu; model olay dosyası boş kaldı.
@@ -34,7 +44,7 @@ Windows `elevated` sandbox kök okuma izni istiyor. Bu nedenle Windows komutuna
 root-deny profili verilmez; `gizli` ve `pencere` aynı salt okuma seçicisini
 kullanır. Yazma engeli ve diğer araç kapıları korunur, fakat **Windows'ta
 `apply_patch` içerik tahmini kanalı kapanmış sayılmaz**. Yeni dalın native Windows
-başlangıcı henüz ölçülmedi; aşağıdaki uyumluluk bölümü bu ayrımı açıklar [S12–S14].
+başlangıcı henüz ölçülmedi; aşağıdaki uyumluluk bölümü bu ayrımı açıklar [S12-S14].
 
 `--strict-config` bilinmeyen üst düzey ayarları hata yapar. Desteklenmeyen bayraklar
 ve eski/ön sürümler zaten ön kontrolde reddedilir. En eski ikili ölçümü **0.155.1**
@@ -181,7 +191,7 @@ dalın kullanıcı ölçümüdür; düzeltilmiş dalın kabul ölçümü değild
 | Seçenek | Kaynak ve karar |
 | --- | --- |
 | Windows'ta root-deny | `elevated` kök okuma izni ön koşulunu sağlamaz; bildirilen gerçek başlangıç hatasının nedeni. Windows komutundan kaldırıldı. |
-| `:root=read` ve vault/home/state için exact-path deny | `elevated` kaynak testi bu tür alt yol reddini kabul eder. `unelevated` deny-read desteklemez. Kısıtlı profil AGENTS keşfi/okumasını sandbox içinden yapar; izin/metadata hatası başlangıcı durdurabilir. Gerekli başlangıç/runtime yollarını açmadan çalışacağı native ölçülmedi; bu yolları açmak ve listelenmeyen yollar da genel oracle kapanışı sağlamaz. Varsayılan seçilmedi [S12–S14]. |
+| `:root=read` ve vault/home/state için exact-path deny | `elevated` kaynak testi bu tür alt yol reddini kabul eder. `unelevated` deny-read desteklemez. Kısıtlı profil AGENTS keşfi/okumasını sandbox içinden yapar; izin/metadata hatası başlangıcı durdurabilir. Gerekli başlangıç/runtime yollarını açmadan çalışacağı native ölçülmedi; bu yolları açmak ve listelenmeyen yollar da genel oracle kapanışı sağlamaz. Varsayılan seçilmedi [S12-S14]. |
 | MXC | Güncel belge uyumlu Windows 11 cihazı/politikası ister; tek komutlu MXC denemesi 0.162.0+ içindir. `prefer_mxc` destek yoksa legacy seçimine dönebilir. 0.155.1 desteğinin yerine geçirilmedi; MXC altında root-deny başarısı ölçülmedi [S12]. |
 | Windows `-s read-only` | Önceki çalışan Windows akışıyla uyum için seçildi. Native yazma izni verilmez; içerik tahmini sınırı açık kalır. |
 | Linux/macOS root-deny | Kod yolu korunur. Gerçek ikili kanıtı Linux'a aittir; macOS Seatbelt ölçümü değildir. |
