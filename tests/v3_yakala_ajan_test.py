@@ -90,6 +90,22 @@ class AgentFiles(unittest.TestCase):
 
         return patch.object(yakala, '_agent_process_identity', side_effect=identity)
 
+    def assert_codex_filesystem_policy(self, argv):
+        """Check the platform contract without claiming native sandbox enforcement."""
+        if yakala.os.name == 'nt':
+            self.assertIn('-s', argv)
+            self.assertEqual(argv[argv.index('-s') + 1], 'read-only')
+            self.assertNotIn('--sandbox', argv)
+            self.assertFalse(any(item.startswith(('permissions.', 'default_permissions=')) for item in argv))
+            return None
+        self.assertNotIn('-s', argv)
+        self.assertNotIn('--sandbox', argv)
+        selected = next(item for item in argv if item.startswith('default_permissions='))
+        profile = json.loads(selected.split('=', 1)[1])
+        self.assertRegex(profile, r'^beyin_yakala_[0-9a-f]{32}$')
+        self.assertIn('permissions.' + profile + '.filesystem={":root"="deny"}', argv)
+        return profile
+
 
 class AgentConfigurationTest(AgentFiles):
     def test_default_is_off_and_reading_settings_does_not_create_state(self):
@@ -751,15 +767,12 @@ class AgentCommandTest(AgentFiles):
         for flag in ('--bare', '--dangerously-skip-permissions', 'bypassPermissions'):
             self.assertNotIn(flag, argv)
 
-    def test_codex_template_denies_native_reads_and_never_claims_a_preset_thread_id(self):
+    def test_codex_template_uses_platform_permissions_and_never_claims_a_preset_thread_id(self):
         argv, request, result, job, prefix = self.command('codex')
         self.assertEqual(argv[:len(prefix)], prefix)
         self.assertNotIn(request, argv)
         self.assertIn('exec', argv)
-        self.assertNotIn('-s', argv)  # A legacy sandbox selector would discard the named profile.
-        selected = next(item for item in argv if item.startswith('default_permissions='))
-        profile = json.loads(selected.split('=', 1)[1])
-        self.assertIn('permissions.' + profile + '.filesystem={":root"="deny"}', argv)
+        self.assert_codex_filesystem_policy(argv)
         self.assertIn('never', argv)
         self.assertIn('--ignore-rules', argv)
         self.assertIn('--json', argv)
@@ -838,6 +851,110 @@ class AgentNetworkOptionTest(AgentFiles):
             self.configure('claude', ag='hepsi')
 
 
+class AgentSelectedSourceTest(AgentFiles):
+    """Popup metadata grants exact sources once, under the existing card/queue locks."""
+
+    primary = 'https://example.org/primary'
+    selected = 'https://example.net/selected'
+    unselected = 'https://example.com/body-only'
+
+    def selected_card(self, values=None):
+        self.configure('claude')
+        saved, card = self.card(url=self.primary)
+        meta = dict(card['meta'], ek_urller=[self.selected] if values is None else values)
+        yakala.write_card(card['path'], meta, card['body'] + '\n\n' + self.unselected)
+        return saved, card
+
+    def start(self, saved, delivery_id=None):
+        result = yakala.enqueue_agent(self.vault, self.state, saved['id'], 'Compare selected sources.',
+                                      delivery_id=delivery_id)
+        job = yakala._agent_load_job(self.vault, self.state, result['job_id'])
+        job['state'] = 'running'
+        yakala._agent_prepare_runtime(self.vault, self.state, job)
+        return job
+
+    def test_selected_secondary_url_is_frozen_and_available_to_restricted_fetch(self):
+        saved, card = self.selected_card([self.selected, self.primary, self.selected])
+        job = self.start(saved)
+        self.assertEqual(job['extra_urls'], [self.selected])
+        self.assertIn(self.selected, yakala._agent_prompt(self.vault, job))
+        fetched = {'url': self.selected, 'links': [], 'text': 'Synthetic public source'}
+        with patch.object(yakala, '_agent_fetch_source', return_value=fetched) as fetch:
+            result = yakala._agent_tool_call(self.vault, self.state, job['id'],
+                                            'fetch_source', {'url': self.selected})
+        self.assertEqual(result['url'], self.selected)
+        fetch.assert_called_once_with(self.selected)
+
+    def test_body_model_and_later_card_edit_do_not_expand_a_retried_job(self):
+        saved, card = self.selected_card()
+        delivery = 'a' * 32
+        job = self.start(saved, delivery)
+        later = 'https://example.org/later-selection'
+        meta, body = yakala.read_card(card['path'])
+        meta['ek_urller'] = [self.selected, later]
+        yakala.write_card(card['path'], meta, body)
+        retry = yakala.enqueue_agent(self.vault, self.state, saved['id'], 'Compare selected sources.',
+                                     delivery_id=delivery)
+        self.assertEqual(retry['job_id'], job['id'])
+        restored = yakala._agent_load_job(self.vault, self.state, job['id'])
+        self.assertEqual(restored['extra_urls'], [self.selected])
+        with patch.object(yakala, '_agent_fetch_source') as fetch:
+            for value in (self.unselected, later, self.selected + '?private=CANARY'):
+                with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'not authorized'):
+                    yakala._agent_tool_call(self.vault, self.state, job['id'], 'fetch_source', {'url': value})
+        fetch.assert_not_called()
+
+    def test_legacy_job_without_secondary_sources_still_authorizes_its_primary(self):
+        self.configure('claude')
+        _, job, _ = self.queued(url=self.primary)
+        job.pop('extra_urls', None)
+        job['state'] = 'running'
+        yakala._agent_prepare_runtime(self.vault, self.state, job)
+        self.assertEqual(yakala._agent_source_urls(self.vault, self.state, job), [self.primary])
+        self.assertEqual(yakala._agent_load_job(self.vault, self.state, job['id'])['url'], self.primary)
+
+    def test_invalid_or_oversized_secondary_metadata_fails_before_card_or_job_write(self):
+        saved, card = self.selected_card()
+        original_meta, original_body = yakala.read_card(card['path'])
+        oversized = ['https://example.org/' + str(index) + '/' + 'x' * 8000 for index in range(9)]
+        for values in (self.selected, [None], ['file:///private'], [self.selected] * 64,
+                       [self.selected + '/' + 'x' * 8192], oversized):
+            with self.subTest(values_type=type(values).__name__, size=len(values)):
+                yakala.write_card(card['path'], dict(original_meta, ek_urller=values), original_body)
+                before = card['path'].read_bytes()
+                with self.assertRaises(ValueError):
+                    yakala.enqueue_agent(self.vault, self.state, saved['id'], 'Compare selected sources.')
+                self.assertEqual(card['path'].read_bytes(), before)
+                self.assertEqual(yakala._agent_jobs(self.vault, self.state), [])
+        self.spawned.assert_not_called()
+
+    def test_damaged_durable_secondary_sources_are_rejected_before_tools(self):
+        saved, card = self.selected_card()
+        job = self.start(saved)
+        path = yakala._agent_job_dir(self.vault, self.state, job['id']) / 'job.json'
+        with patch.object(yakala, '_agent_fetch_source') as fetch:
+            for values in ('https://example.org/not-a-list', ['file:///private']):
+                with self.subTest(values=values):
+                    yakala._agent_json(path, dict(job, extra_urls=values))
+                    with self.assertRaises(ValueError):
+                        yakala._agent_tool_call(self.vault, self.state, job['id'],
+                                                'fetch_source', {'url': self.primary})
+        fetch.assert_not_called()
+
+    def test_combined_utf8_job_size_is_rejected_before_the_card_becomes_busy(self):
+        values = ['https://example.org/' + str(index) + '/' + 'x' * 8128 for index in range(8)]
+        saved, card = self.selected_card(values)
+        # Every field is individually legal, but the combined durable record
+        # must leave room for runtime identity and the eventual result summary.
+        self.assertEqual(yakala._agent_extra_source_urls(values, self.primary), values)
+        before = card['path'].read_bytes()
+        with self.assertRaisesRegex(ValueError, 'is kaydi.*buyuk'):
+            yakala.enqueue_agent(self.vault, self.state, saved['id'], '\U0001f642' * 16000)
+        self.assertEqual(card['path'].read_bytes(), before)
+        self.assertEqual(yakala._agent_jobs(self.vault, self.state), [])
+        self.spawned.assert_not_called()
+
+
 class AgentWindowViewTest(AgentFiles):
     """gorunum=pencere: interactive clients with the hidden run's tool boundary."""
 
@@ -879,10 +996,7 @@ class AgentWindowViewTest(AgentFiles):
             for flag in ('exec', '--json', '-o', '--ignore-rules', '--skip-git-repo-check', '-', '--session-id'):
                 self.assertNotIn(flag, argv)
             self.assertEqual(argv[argv.index('-a') + 1], 'never')
-            self.assertNotIn('-s', argv)
-            selected = next(item for item in argv if item.startswith('default_permissions='))
-            profile = json.loads(selected.split('=', 1)[1])
-            self.assertIn('permissions.' + profile + '.filesystem={":root"="deny"}', argv)
+            self.assert_codex_filesystem_policy(argv)
             self.assertEqual(argv[argv.index('-C') + 1], str(self.vault))
             for feature in yakala.CODEX_DISABLED:
                 self.assertIn(['--disable', feature], [argv[i:i + 2] for i in range(len(argv) - 1)])
