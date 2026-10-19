@@ -47,17 +47,33 @@ STATUS_ANTIPAIRS = [
         {"dogrulandi", "dogrulanmis", "verified", "passed", "kanitlandi", "onaylandi", "gecerli"},
         {"dogrulanmadi", "dogrulanmamis", "unverified", "failed", "kanitlanmadi", "reddedildi", "gecersiz"},
     ),
-    # Calisiyor / Calismiyor (Operational state)
+    # Calisiyor / Calismiyor (Operational state). "acik", "kapali", "canli" and "devam" name no
+    # state in most Turkish prose ("acik kaynak", "canli yayin", "devam etti"); in a measured
+    # 855-note vault they produced 10 of 13 contradictions between live notes.
     (
-        {"calisiyor", "working", "aktif", "active", "acik", "canli"},
-        {"calismiyor", "broken", "pasif", "inactive", "kapali", "calismadi"},
+        {"calisiyor", "working", "aktif", "active"},
+        {"calismiyor", "broken", "pasif", "inactive", "calismadi"},
     ),
     # Cozuldu / Cozulmedi (Completion state)
     (
         {"cozuldu", "tamamlandi", "bitti", "resolved", "completed", "done"},
-        {"cozulmedi", "bekliyor", "devam", "unresolved", "pending", "in_progress"},
+        {"cozulmedi", "bekliyor", "unresolved", "pending"},
     ),
 ]
+
+
+def _stems(words):
+    """Notes are compared as stems ("doğrulandı" -> "dogruland"), so the table is stemmed the
+    same way; each stem keeps its table spelling for the report."""
+    table = {}
+    for word in sorted(words):
+        stems = _tokens(word)
+        if len(stems) == 1:
+            table.setdefault(next(iter(stems)), word)
+    return table
+
+
+_STATUS_STEMS = [(_stems(positive), _stems(negative)) for positive, negative in STATUS_ANTIPAIRS]
 
 SYSTEM_EXCLUDED_DIRS = {
     '.obsidian', '.git', '.claude', '.agents', '.kiro', 'node_modules', '.venv', 'venv', '__pycache__',
@@ -210,24 +226,21 @@ def _detect_status_conflict(older: dict, newer: dict) -> dict | None:
     older_tokens = older['tokens'] | _tokens(older.get('status', ''))
     newer_tokens = newer['tokens'] | _tokens(newer.get('status', ''))
 
-    for group_pos, group_neg in STATUS_ANTIPAIRS:
-        # Check: older had positive, newer has negative
-        pos_in_older = older_tokens & group_pos
-        neg_in_newer = newer_tokens & group_neg
-        if pos_in_older and neg_in_newer:
+    for positive, negative in _STATUS_STEMS:
+        old_pos, old_neg = older_tokens & positive.keys(), older_tokens & negative.keys()
+        new_pos, new_neg = newer_tokens & positive.keys(), newer_tokens & negative.keys()
+        # Only a flip counts: a note that names both sides ("12 passed, 0 failed") states no
+        # single status, so it neither starts nor ends a contradiction.
+        if old_pos and new_neg and not old_neg and not new_pos:
             return {
-                'older_term': sorted(pos_in_older)[0],
-                'newer_term': sorted(neg_in_newer)[0],
+                'older_term': positive[min(old_pos)],
+                'newer_term': negative[min(new_neg)],
                 'direction': 'positive_to_negative',
             }
-
-        # Check: older had negative, newer has positive
-        neg_in_older = older_tokens & group_neg
-        pos_in_newer = newer_tokens & group_pos
-        if neg_in_older and pos_in_newer:
+        if old_neg and new_pos and not old_pos and not new_neg:
             return {
-                'older_term': sorted(neg_in_older)[0],
-                'newer_term': sorted(pos_in_newer)[0],
+                'older_term': negative[min(old_neg)],
+                'newer_term': positive[min(new_pos)],
                 'direction': 'negative_to_positive',
             }
 

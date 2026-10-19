@@ -314,6 +314,32 @@ class MemoryAuditorTest(unittest.TestCase):
         self.assertEqual(report['notes_scanned'], 1)
         self.assertEqual(report['findings'], [])
 
+    def test_turkish_status_flip_is_found_in_stemmed_text(self):
+        """The #372 example in real Turkish spelling, with no frontmatter status to lean on."""
+        (self.knowledge / 'baglanti-1.md').write_text(
+            "---\nupdated_at: 2026-09-01\n---\n# Bağlantı\nVeritabanı bağlantısı henüz doğrulanmadı. " + self.SHARED,
+            encoding='utf-8')
+        (self.knowledge / 'baglanti-2.md').write_text(
+            "---\nupdated_at: 2026-10-01\n---\n# Bağlantı\nVeritabanı bağlantısı doğrulandı. " + self.SHARED,
+            encoding='utf-8')
+        findings = audit_module.audit_memory(self.vault, state=self.state, min_shared=3)['findings']
+        self.assertEqual([f['type'] for f in findings], ['status_contradiction'])
+        self.assertEqual(findings[0]['conflict'], {'older_term': 'dogrulanmadi', 'newer_term': 'dogrulandi',
+                                                   'direction': 'negative_to_positive'})
+
+    def test_both_sides_or_prose_words_are_not_a_status_flip(self):
+        """Two test logs that both say "passed" and "failed", or "açık kaynak" against "çalışmıyor"."""
+        for old_tail, new_tail in (("12 passed, 0 failed.", "14 passed, 0 failed."),
+                                   ("Açık kaynak kütüphane.", "Alarm servisi çalışmıyor.")):
+            with self.subTest(old=old_tail):
+                (self.knowledge / 'rapor-1.md').write_text(
+                    "---\nupdated_at: 2026-09-01\n---\n" + self.SHARED + old_tail, encoding='utf-8')
+                (self.knowledge / 'rapor-2.md').write_text(
+                    "---\nupdated_at: 2026-10-01\n---\n" + self.SHARED + new_tail, encoding='utf-8')
+                findings = audit_module.audit_memory(self.vault, state=self.state, min_shared=3)['findings']
+                self.assertEqual(len(findings), 1)
+                self.assertNotEqual(findings[0]['type'], 'status_contradiction')
+
     def _cli_result(self, args):
         cmd = [sys.executable, str(self.vault / '.claude/scripts/beyin_v3_cli.py'),
                '--vault', str(self.vault), '--state', str(self.state)] + args
