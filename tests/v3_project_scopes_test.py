@@ -406,14 +406,16 @@ class TestResolveActiveProject(unittest.TestCase):
 
     def test_symlink_loop(self):
         import beyin_v3_projects
-        # Create a symlink loop
-        loop_dir = self.vault / 'loop'
-        loop_dir.mkdir()
+        # A real cycle: a -> b -> a. A link to its own parent resolves normally and is no loop.
+        loop_dir = self.vault / 'projects' / 'dongu'
+        loop_dir.mkdir(parents=True)
         try:
-            os.symlink(loop_dir, loop_dir / 'link')
+            os.symlink(loop_dir / 'b', loop_dir / 'a')
+            os.symlink(loop_dir / 'a', loop_dir / 'b')
         except OSError:
             self.skipTest('symlinks unavailable on this platform')
-        self.assertIsNone(beyin_v3_projects.resolve_active_project(self.vault, loop_dir / 'link'))
+        self.assertIsNone(beyin_v3_projects.resolve_active_project(self.vault, loop_dir / 'a'))
+        self.assertIsNone(beyin_v3_projects.resolve_active_project(self.vault, str(loop_dir / 'a' / 'src')))
 
     def test_ntfs_junction_and_symlinks_resolve_properly(self):
         import beyin_v3_projects
