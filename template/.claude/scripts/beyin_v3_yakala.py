@@ -5849,8 +5849,8 @@ class _AgentFileLock:
             if os.name == 'nt' and sys.platform == 'win32':
                 import msvcrt
                 import time
-                if not self.path.stat().st_size:
-                    self.stream.write(b'0')
+                # Byte locks may extend past EOF. A pre-lock write can collide
+                # with a peer that acquired byte 0 after we observed an empty file.
                 while True:
                     try:
                         self.stream.seek(0)
