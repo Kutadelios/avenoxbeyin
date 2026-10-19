@@ -3326,9 +3326,9 @@ def _windows_source_cards(canvas, root, sources, y, width, pad, key_label='Alt',
         if toggle:
             return toggle()
 
-    root.bind('<Alt-KeyPress>', shortcut)
+    root.bind('<' + key_label + '-KeyPress>', shortcut)
     if entry is not None:
-        entry.bind('<Alt-KeyPress>', shortcut)
+        entry.bind('<' + key_label + '-KeyPress>', shortcut)
     paint()
     return y
 
@@ -3958,8 +3958,12 @@ def _linux_clipboard_context():
 def linux_context():
     context = linux_browser_context()
     copied = _linux_clipboard_context()
+    if copied.get('dosyalar'):
+        # The file preview owns this capture. An unseen browser URL could deduplicate
+        # against an older page card and silently skip copying these files on POSIX.
+        return copied
     if context:
-        # Preserve copied files/text. The popup reads a copied URL as its own source;
+        # Preserve copied text. The popup reads a copied URL as its own source;
         # it must not overwrite the independently attested current browser page.
         context.update({key: value for key, value in copied.items() if key != 'url'})
         return context

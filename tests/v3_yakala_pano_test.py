@@ -5,6 +5,7 @@ strict PNG reader. The popup wiring runs against a scripted stand-in for tkinter
 The real Windows clipboard is exercised only on a Windows CI runner (or with BEYIN_TEST_PANO=1),
 because those tests replace whatever the clipboard holds.
 """
+import contextlib
 import os
 from pathlib import Path
 import re
@@ -504,11 +505,12 @@ class Root(Widget):
 
     def mainloop(self):
         for action, value in self.script:
-            if action == 'key':
-                if value.startswith('<Alt-') and value not in self.bound:
-                    key = value[5:-1]
+            if action in ('key', 'root-key'):
+                if value.startswith(('<Alt-', '<Option-')) and value not in self.bound:
+                    modifier, key = value[1:-1].split('-', 1)
                     event = types.SimpleNamespace(keysym=key, keycode=ord(key.upper()), state=0x20000, char=key)
-                    self.entry.handlers['<Alt-KeyPress>'](event)
+                    handlers = self.bound if action == 'root-key' else self.entry.handlers
+                    handlers['<' + modifier + '-KeyPress>'](event)
                 else:
                     self.bound[value](None)
             elif action == 'alt':
@@ -616,7 +618,7 @@ class PopupWiringTest(ScreenshotFiles, unittest.TestCase):
         self.bitmap = {'image': True, 'png': None, 'dib': make_dib(self.pixels, bits=32)}
         Photo.opened = []
 
-    def popup(self, clip, payload, script, context=None, windows=False, fresh=False, shot=None):
+    def popup(self, clip, payload, script, context=None, windows=False, fresh=False, shot=None, platform=None):
         roots = []
         fake = types.ModuleType('tkinter')
         fake.Tk = lambda: roots.append(Root(script)) or roots[-1]
@@ -624,15 +626,21 @@ class PopupWiringTest(ScreenshotFiles, unittest.TestCase):
         fake.font = types.ModuleType('tkinter.font')
         fake.font.Font = lambda **_options: types.SimpleNamespace(measure=lambda text: len(text) * 6)
         environment = {key: value for key, value in os.environ.items() if key != 'BEYIN_YAKALA_SNAPSHOT'}
-        if not windows and os.name == 'nt':
+        if not windows and os.name == 'nt' and platform is None:
             # On a Windows host the non-Windows model skips the desktop path this way; never on macOS,
             # where the variable starts the development screencapture of the (fake) window.
             environment['BEYIN_YAKALA_SNAPSHOT'] = 'model'
-        system = types.SimpleNamespace(**{**vars(os), 'name': 'nt' if windows else os.name})
+        # Replace only the capture module's os reference; pathlib keeps the host's real os.name.
+        name = 'posix' if platform in ('darwin', 'linux') else ('nt' if windows else os.name)
+        system = types.SimpleNamespace(**{**vars(os), 'name': name})
+        # Grouped so the with statement stays under Python's static nesting limit.
+        platform_patches = contextlib.ExitStack()
+        platform_patches.enter_context(patch.object(sys, 'platform', platform or sys.platform))
+        platform_patches.enter_context(patch.object(yakala, '_style_mac'))
         with patch.dict(sys.modules, {'tkinter': fake, 'tkinter.font': fake.font}), \
                 patch.dict(os.environ, environment, clear=True), \
                 patch.object(yakala, 'os', system), \
-                patch.object(yakala, '_style_mac'), \
+                platform_patches, \
                 patch.object(yakala, '_clipboard', return_value=clip), \
                 patch.object(yakala, '_clipboard_payload', return_value=payload, create=True) as probe, \
                 patch.object(yakala, '_windows_clipboard', return_value={**(payload or {}), 'text': clip, 'sequence': 77}), \
@@ -787,6 +795,59 @@ class PopupWiringTest(ScreenshotFiles, unittest.TestCase):
         result, _, probe = self.popup('https://ornek.com/yazi', self.bitmap, [('key', '<Return>')])
         self.assertEqual(result['kaynak_turu'], 'makale')
         probe.assert_not_called()
+
+    def test_linux_copied_files_are_saved_without_the_previously_captured_browser_url(self):
+        page, hover = 'https://example.com/page', 'https://example.com/hover'
+        previous = yakala.capture(self.vault, url=page)
+        previous_card = self.card(previous)['path'].read_bytes()
+        copied = Path(self.tmp.name) / 'copied document.txt'
+        copied.write_text('copied file contents', encoding='utf-8')
+        with patch.object(yakala, 'linux_browser_context', return_value={
+                'url': page, 'url_imlec': hover, 'baslik': 'Page', 'baslik_imlec': 'Hover',
+                'uygulama': 'Mozilla Firefox', 'url_yontem': 'linux-atspi-x11'}), \
+                patch.object(yakala, '_linux_clipboard_context', return_value={'dosyalar': [str(copied)]}):
+            context = yakala.linux_context()
+        result, root, _ = self.popup(copied.as_uri(), None,
+                                    [('look', None), ('key', '<Return>')], context, platform='linux')
+        self.assertEqual(result['status'], 'yakalandi')
+        self.assertEqual(result['kaynak_turu'], 'dosya')
+        self.assertNotEqual(result['id'], previous['id'])
+        card = self.card(result)
+        self.assertFalse(card['meta'].get('url'))
+        self.assertEqual(card['meta']['baslik'], copied.name)
+        self.assertNotIn(page, card['body'])
+        self.assertNotIn(hover, card['body'])
+        self.assertTrue(any(copied.name in text for text in root.seen[0][1]))
+        self.assertFalse(any(page in text or hover in text for text in root.seen[0][1]))
+        self.assertEqual([path.read_bytes() for path in self.saved_files()], [copied.read_bytes()])
+        self.assertEqual(self.card(previous)['path'].read_bytes(), previous_card)
+
+    def test_browser_shortcuts_use_the_displayed_platform_modifier(self):
+        context = {'url': 'https://example.com/page', 'url_imlec': 'https://example.com/hover',
+                   'baslik': 'Page', 'baslik_imlec': 'Hover'}
+        for platform, modifier in (('darwin', 'Option'), ('linux', 'Alt')):
+            page_key, hover_key = '<' + modifier + '-s>', '<' + modifier + '-i>'
+            # Entry adds the page without dropping the hover; the root shortcut can then
+            # remove the hover. Check the saved selections, not the older radio labels.
+            scenarios = (([], context['url_imlec'], 'Hover', []),
+                         ([('key', page_key)], context['url_imlec'], 'Hover', [context['url']]),
+                         ([('key', page_key), ('root-key', hover_key)], context['url'], 'Page', []))
+            for keys, expected, title, extras in scenarios:
+                with self.subTest(platform=platform, keys=keys), \
+                        patch.object(yakala, 'capture', return_value={'status': 'yakalandi'}) as save:
+                    result, root, _ = self.popup('', None,
+                        [('look', None), *keys, ('key', '<Return>')], context, platform=platform)
+                    for key in ('I', 'S'):
+                        self.assertIn(modifier + '+' + key, root.seen[0][1])
+                    other = 'Alt' if modifier == 'Option' else 'Option'
+                    self.assertNotIn('<' + other + '-KeyPress>', root.bound)
+                    self.assertNotIn('<' + other + '-KeyPress>', root.entry.handlers)
+                    self.assertEqual(result['status'], 'yakalandi')
+                    save.assert_called_once()
+                    self.assertEqual(save.call_args.kwargs['url'], expected)
+                    self.assertEqual(save.call_args.kwargs['title'], title)
+                    self.assertEqual(save.call_args.kwargs['extra_urls'], extras)
+                    self.assertEqual(save.call_args.kwargs['files'], [])
 
     def test_windows_page_link_wins_and_a_fresh_copied_link_stays_selectable(self):
         context = {'url': 'https://example.com/page', 'baslik': 'Page'}

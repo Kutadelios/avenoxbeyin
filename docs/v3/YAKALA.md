@@ -211,8 +211,9 @@ macOS'ta Option+I/Option+S, Linux'ta Alt+I/Alt+S veya satira tiklama kullanilir.
 Pano bağlantısı bu durumda kapalı bir seçenektir. macOS/Linux bu sayfa+imleç yolunda
 pano metninin tazeliğini doğrulamadığından metin kartı sunulmaz; not kutusuna elle
 yazılabilir veya açıkça yapıştırılabilir. Mevcut pano görseli okuyucusu da sayfa varken
-görsel teklif etmez. Dosya seçimi ve yalnız sayfa akışı mevcut davranışını korur.
-Tk olmayan `kdialog`/`zenity`/macOS basit soru yedeginde
+görsel teklif etmez. Linux'ta panodaki yerel dosya listesi tarayıcı bağlamına önceliklidir:
+dosya önizlemesi gösterilir ve yalnız dosyalar kaydedilir; sayfa ve imleç URL'si karta eklenmez.
+Yalnız sayfa akışı mevcut davranışını korur. Tk olmayan `kdialog`/`zenity`/macOS basit soru yedeginde
 imlec ve sayfa secicisi yoktur; dogrulanmis sayfa kullanilir.
 
 Yeni Windows belge okuyucusu 1 saniye; macOS tarayici okuma toplami 2,5 saniye (AX payi en
