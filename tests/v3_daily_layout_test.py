@@ -251,6 +251,49 @@ class DailyLayoutTest(unittest.TestCase):
         self.assertFalse(self.daily('flat').exists())
         self.assertEqual(self.daily('v3').read_bytes(), original)
 
+    def test_state_reset_with_human_flat_daily_retires_unchanged_orphan_v3_view(self):
+        self.receipt()
+        self.assertEqual(self.engine.sync()['status'], 'succeeded')
+        human = b'# My day\r\nHuman journal.\r\n'
+        self.daily('flat').write_bytes(human)
+        preferences.save_daily_layout(self.vault, 'flat')
+        self.engine = SyncEngine(self.vault, self.root / 'rebuilt-state')
+        for _ in range(2):
+            result = self.engine.sync()
+            self.assertEqual(result['status'], 'succeeded', result)
+            self.assertEqual(self.daily('flat').read_bytes(), human)
+            self.assertFalse(self.daily('v3').exists())
+            for layout in ('flat', 'v3'):
+                self.assertNotIn(self.daily(layout).relative_to(self.vault).as_posix(), self.tracked())
+        self.assertFalse((self.vault / 'daily/.archive').exists())
+        self.assertFalse((self.vault / 'daily/v3/.archive').exists())
+
+    def test_state_reset_with_human_flat_daily_preserves_edited_orphan_v3_view(self):
+        self.receipt()
+        self.assertEqual(self.engine.sync()['status'], 'succeeded')
+        original = self.daily('v3').read_bytes() + b'\nHuman addition\r\n'
+        self.daily('v3').write_bytes(original)
+        human = b'# My day\r\nHuman journal.\r\n'
+        self.daily('flat').write_bytes(human)
+        preferences.save_daily_layout(self.vault, 'flat')
+        self.engine = SyncEngine(self.vault, self.root / 'rebuilt-state')
+        for _ in range(2):
+            result = self.engine.sync()
+            self.assertEqual(result['status'], 'degraded', result)
+            self.assertTrue(any(w.get('kind') == 'receipt_view'
+                                and w['source'] == self.daily('v3').relative_to(self.vault).as_posix()
+                                for w in result['warnings']))
+            self.assertEqual(self.daily('v3').read_bytes(), original)
+            self.assertEqual(self.daily('flat').read_bytes(), human)
+            self.assertNotIn(self.daily('flat').relative_to(self.vault).as_posix(), self.tracked())
+        result = self.engine.sync(recover_views=True)
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertFalse(self.daily('v3').exists())
+        self.assertEqual(self.daily('flat').read_bytes(), human)
+        self.assertEqual(len(result['recovered_views']), 1)
+        self.assertEqual((self.vault / result['recovered_views'][0]['archive']).read_bytes(), original)
+        self.assertFalse((self.vault / 'daily/.archive').exists())
+
     def test_legacy_orphan_recorded_as_alias_can_still_be_retired(self):
         preferences.save_daily_layout(self.vault, 'flat')
         self.receipt()

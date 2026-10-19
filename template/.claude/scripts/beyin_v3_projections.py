@@ -647,8 +647,8 @@ def receipt_day(created_at, zone=None):
         return None
 
 
-def _receipt_view_contents(engine, db, warnings=None):
-    """Desired views from immutable receipts, without writing files or tracking state."""
+def _receipt_view_contents(engine, db, warnings=None, *, include_human_daily=False):
+    """Render receipts without side effects; include_human_daily is for comparison only."""
     _hash, _, render = engine.projection_helpers()
     from beyin_v3_preferences import read_daily_layout
     layout = read_daily_layout(engine.root)
@@ -682,7 +682,7 @@ def _receipt_view_contents(engine, db, warnings=None):
         relative = f'daily/{day}.md' if layout == 'flat' else f'daily/v3/{day}.md'
         # Omit human notes before sync claims desired paths as view provenance.
         # Outcomes were collected above and remain available in the shared index.
-        if layout != 'flat' or not _human_daily(engine, relative, tracked, warnings):
+        if include_human_daily or layout != 'flat' or not _human_daily(engine, relative, tracked, warnings):
             desired[relative] = render({'generated': True, 'kind': 'receipt-index'}, '# Recorded outcomes\n\nAgent-authored claims, not independently verified facts.\n\n'+'\n'.join(entries))
     if outcomes:
         desired['knowledge/v3/outcomes.md'] = render({'generated': True, 'kind': 'receipt-index'}, '# Outcome source index\n\nThis index links semantic receipts. It is not an automatic knowledge compiler.\n\n'+''.join(outcomes))
@@ -818,6 +818,7 @@ def _adopt_stale_receipt_views(engine, db, desired, _hash):
                 discovered[relative] = _hash(raw)
         except (ValueError, OSError, UnicodeError):
             continue  # the scan already reported unsafe paths; no new ownership
+    comparison_views = None
     for relative, observed_hash in discovered.items():
         if relative in desired:
             continue
@@ -827,6 +828,12 @@ def _adopt_stale_receipt_views(engine, db, desired, _hash):
         alternate = ('daily/' + relative[len('daily/v3/'):] if relative.startswith('daily/v3/')
                      else 'daily/v3/' + relative[len('daily/'):] if relative.startswith('daily/') else None)
         expected = desired.get(alternate)
+        if expected is None and alternate is not None:
+            # A human-owned target is absent from the write plan, but its
+            # deterministic receipt bytes can still prove the old view unchanged.
+            if comparison_views is None:
+                comparison_views = _receipt_view_contents(engine, db, include_human_daily=True)
+            expected = comparison_views.get(alternate)
         owned_hash = observed_hash if expected is not None and observed_hash == _hash(expected) else ''
         db.execute('INSERT OR IGNORE INTO receipt_views VALUES (?,?)', (relative, owned_hash))
 
