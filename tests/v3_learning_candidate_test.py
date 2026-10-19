@@ -191,6 +191,22 @@ class LearningCandidateLedgerTest(unittest.TestCase):
         self.assertNotIn(secret_token, rec["candidate"])
         self.assertIn("[REDACTED]", rec["candidate"])
 
+    def test_a_secret_is_never_stored_raw_when_redaction_cannot_finish(self):
+        secret_token = "sk-" + "b" * 30
+        ledger = self.state / "learning-state.jsonl"
+        # The health counter cannot be written: the candidate is still stored redacted.
+        (self.state / "secret-filter.sqlite3").mkdir()  # a directory: sqlite3 cannot open it
+        rec = learning.stage_candidate(self.state, "sess-sec", f"Use API token {secret_token} for auth")
+        self.assertNotIn(secret_token, rec["candidate"])
+        self.assertNotIn(secret_token, ledger.read_text(encoding="utf-8"))
+        # The filter itself cannot run: the candidate is refused, nothing raw reaches the ledger.
+        (self.state / "secret-patterns.txt").write_text("ab\n", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            learning.stage_candidate(self.state, "sess-sec", f"Use API token {secret_token} for auth")
+        self.assertNotIn(secret_token, ledger.read_text(encoding="utf-8"))
+        with self.assertRaises(ValueError):
+            learning.stage_candidate(self.state, "sess-sec", "   ")
+
     def test_untrusted_or_private_source_rejected(self):
         from contextlib import closing
         import sqlite3

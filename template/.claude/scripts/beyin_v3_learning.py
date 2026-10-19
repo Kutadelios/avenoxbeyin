@@ -119,14 +119,17 @@ def stage_candidate(state: Path, session: str, candidate: str, source: str = "",
     _check_source_trust(state, source)
 
     cand_text = str(candidate).strip()
-    try:
-        from beyin_v3_secrets import redact, record as record_redactions
-        redacted_text, count = redact(cand_text, state)
-        if count > 0:
+    if not cand_text:
+        raise ValueError("candidate text required")
+    # Fail closed: a filter that cannot run (an invalid secret-patterns.txt) refuses the
+    # candidate instead of storing it raw. Only the aggregate health counter is best effort.
+    from beyin_v3_secrets import redact, record as record_redactions
+    cand_text, count = redact(cand_text, state)
+    if count > 0:
+        try:
             record_redactions(state, count)
-        cand_text = redacted_text
-    except Exception:
-        pass
+        except Exception:
+            pass
 
     norm_session = _normalize_session(session)
     record_id = hashlib.sha256(f"{norm_session}:{time.time()}:{cand_text}".encode("utf-8")).hexdigest()[:16]
