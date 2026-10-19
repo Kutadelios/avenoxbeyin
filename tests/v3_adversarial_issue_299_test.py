@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 import tempfile
+import socket
 import sys
 import os
 
@@ -85,6 +86,22 @@ class TestYakalaHardenings(unittest.TestCase):
         self.assertIn('--markdown', args[:-2])
         self.assertIn('--lang', args[:-2])
         self.assertIn('tr', args[:-2])
+
+    def test_6_stdlib_checks_the_starting_address_once(self):
+        # One check of the starting URL before the request; redirects and the connection check on their own.
+        checked, real_check = [], beyin_v3_yakala._safe_network_url
+
+        def check(url):
+            checked.append(url)
+            return real_check(url)
+
+        def public(host, port, *args, **kwargs):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('8.8.8.8', port))]
+        with patch.object(beyin_v3_yakala, '_safe_network_url', side_effect=check), \
+                patch.object(socket, 'getaddrinfo', side_effect=public), \
+                patch.object(socket, 'create_connection', side_effect=OSError('offline fixture')):
+            self.assertIsNone(beyin_v3_yakala.via_stdlib('http://example.com/page'))
+        self.assertEqual(checked, ['http://example.com/page'])
 
 if __name__ == '__main__':
     unittest.main()

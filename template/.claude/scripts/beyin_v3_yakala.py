@@ -1017,9 +1017,6 @@ def via_stdlib(url):
     from html.parser import HTMLParser
     from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-    _safe_source_url(url)
-    _safe_network_url(url)
-
     class PublicRedirects(HTTPRedirectHandler):
         def redirect_request(self, request, fp, code, msg, headers, new_url):
             _safe_network_url(new_url)
