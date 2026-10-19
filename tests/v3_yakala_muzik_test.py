@@ -313,6 +313,61 @@ class MusicCredentialsTest(MusicFiles):
 
 
 class MusicReplayAndServiceTest(MusicFiles):
+    def test_expired_worker_lease_during_extraction_stops_before_media_request(self):
+        self.token()
+        job = self.new_job(extract=True, upload=True)
+        _, extract, download, local, service = self.fake_flow(job)
+
+        def expire(*_args):
+            current = yakala._agent_load_job(self.vault, self.state, job['id'])
+            current['runtime_deadline_ns'] = 0
+            yakala._agent_json(yakala._agent_job_dir(self.vault, self.state, job['id']) / 'job.json', current)
+            return {'url': MEDIA, 'protocol': 'https'}
+
+        extract.side_effect = expire
+        result = yakala._agent_music_tool(self.vault, self.state, job, 'music_identify')
+        self.assertEqual(result['status'], 'unavailable')
+        for call in (download, local, service):
+            call.assert_not_called()
+
+    def test_dead_worker_after_sampling_cannot_start_a_provider_post(self):
+        self.token()
+        job = self.new_job(extract=True, upload=True)
+        _, _, _, local, service = self.fake_flow(job)
+
+        def lose_worker(*_args):
+            current = yakala._agent_load_job(self.vault, self.state, job['id'])
+            current['worker_identity'] = dict(current['worker_identity'], birth='different-worker')
+            yakala._agent_json(yakala._agent_job_dir(self.vault, self.state, job['id']) / 'job.json', current)
+            return fixture_wav()
+
+        local.side_effect = lose_worker
+        result = yakala._agent_music_tool(self.vault, self.state, job, 'music_identify')
+        self.assertEqual(result['status'], 'unavailable')
+        service.assert_not_called()
+        self.assertFalse((yakala._agent_job_dir(self.vault, self.state, job['id']) /
+                          'music-provider-attempt.json').exists())
+
+    def test_worker_lease_is_checked_after_durable_provider_marker(self):
+        self.token()
+        job = self.new_job(extract=True, upload=True)
+        *_, service = self.fake_flow(job)
+        original_create = yakala._agent_create_json
+
+        def expire_after_marker(path, value):
+            original_create(path, value)
+            if Path(path).name == 'music-provider-attempt.json':
+                current = yakala._agent_load_job(self.vault, self.state, job['id'])
+                current['runtime_deadline_ns'] = 0
+                yakala._agent_json(Path(path).parent / 'job.json', current)
+
+        with mock.patch.object(yakala, '_agent_create_json', side_effect=expire_after_marker):
+            result = yakala._agent_music_tool(self.vault, self.state, job, 'music_identify')
+        self.assertEqual(result['status'], 'unavailable')
+        service.assert_not_called()
+        self.assertTrue((yakala._agent_job_dir(self.vault, self.state, job['id']) /
+                         'music-provider-attempt.json').exists())
+
     def test_missing_service_performs_no_extract_download_or_upload(self):
         job = self.new_job(extract=True, upload=True)
         with mock.patch.object(yakala, '_agent_music_info', return_value={}), mock.patch.object(yakala, '_agent_music_ytdlp') as external:

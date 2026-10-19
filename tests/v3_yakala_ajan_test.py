@@ -1241,6 +1241,14 @@ class AgentEventsTest(AgentFiles):
         self.assertTrue(result['ok'])
         self.assertFalse(result['denied'])
 
+    def test_claude_error_result_reports_its_reason_not_the_subtype(self):
+        # Real Claude Code 2.1.x: a usage limit ends with subtype 'success', is_error true.
+        result = self.events('claude', [{'type': 'result', 'subtype': 'success', 'is_error': True,
+                                         'session_id': str(uuid.uuid4()),
+                                         'result': "You've hit your session limit"}])
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['error'], "You've hit your session limit")
+
     def test_claude_result_error_is_not_a_success(self):
         result = self.events('claude', [{'type': 'result', 'subtype': 'error_during_execution', 'is_error': True,
                                          'session_id': str(uuid.uuid4()), 'errors': ['limit exceeded']}])

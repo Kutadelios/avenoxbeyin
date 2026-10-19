@@ -937,7 +937,11 @@ tam sarki indirme yolu acmaz.
   degildir. TLS sertifika kontrolunu yt-dlp yapar; vekil hedefin sayisal IP'sini
   dogrular ve sabitler. Vekil kapaninca tum tuneller kapatilir.
 - Tek arac cagrisinin asama sureleri: sayfa 7 sn, yt-dlp 18 sn, medya 10 sn,
-  ffmpeg 5 sn, AudD 7 sn; ortak son tarih 50 sn'dir. DNS son tarihi ve
+  ffmpeg 5 sn, AudD 7 sn; ortak son tarih 50 sn veya calisan isinin kalan
+  suresinden kisa olanidir. Yeni bir ag/yerel islem asamasindan once ve AudD
+  deneme kaydi kalici yazildiktan sonra calisanin PID + baslangic kimligi ile
+  is suresi yeniden dogrulanir. Calisan sona erdiyse yeni medya istegi veya
+  ses yuklemesi baslatilmaz. Baslamis bir HTTP istegi geri alinamaz. DNS son tarihi ve
   soketi son tarihte kapatan bekci, yavas DNS/baslik akisini da durdurur.
   OS DNS cagrisi iptal edilemezse surec basina en fazla dort daemon cozumleyici
   kalabilir; bunlar baglanti acamaz ve tamamlanana kadar yeni DNS kapasitesini
