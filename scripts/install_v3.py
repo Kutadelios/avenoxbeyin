@@ -214,7 +214,9 @@ def conflict_case(current):
     return "deleted" if current is None else "content differs"
 
 
-def semantic_unchanged(name, baseline, current, previous, kept=(), user_excluded=()):
+def semantic_unchanged(name, baseline, current, previous=None, *args, **kwargs):
+    kept = args[0] if len(args) > 0 else kwargs.get("kept", ())
+    user_excluded = args[1] if len(args) > 1 else kwargs.get("user_excluded", ())
     if baseline is None or current is None: return False
     if line_endings_only(baseline, current): return True
     # The owned-region comparisons below must not see line endings either: a CRLF rewrite

@@ -750,6 +750,7 @@ def _retire_stale_views(engine, db, desired, _hash, recover_views=False, recover
     file is never touched and stays a visible conflict until the person moves or deletes it.
     """
     conflicts = []
+    to_delete = []
     for relative, tracked in db.execute('SELECT path, hash FROM receipt_views ORDER BY path').fetchall():
         if relative in desired:
             continue
@@ -763,7 +764,7 @@ def _retire_stale_views(engine, db, desired, _hash, recover_views=False, recover
             conflicts.append({'source': relative, 'reason': 'stale receipt view unreadable; preserved'})
             continue
         if current is None and not path.exists():
-            db.execute('DELETE FROM receipt_views WHERE path=?', (relative,))
+            to_delete.append(relative)
             continue
         if current != tracked:
             if recover_views:
@@ -773,7 +774,7 @@ def _retire_stale_views(engine, db, desired, _hash, recover_views=False, recover
                 except (OSError, ValueError):
                     conflicts.append({'source': relative, 'reason': 'receipt view recovery failed; preserved'})
                     continue
-                db.execute('DELETE FROM receipt_views WHERE path=?', (relative,))
+                to_delete.append(relative)
                 if recovered is not None:
                     recovered.append({'source': relative, 'archive': archive_path.relative_to(engine.root).as_posix(),
                                       'status': 'archived_and_retired'})
@@ -787,7 +788,9 @@ def _retire_stale_views(engine, db, desired, _hash, recover_views=False, recover
         except OSError:
             conflicts.append({'source': relative, 'reason': 'stale receipt view could not be removed'})
             continue
-        db.execute('DELETE FROM receipt_views WHERE path=?', (relative,))
+        to_delete.append(relative)
+    if to_delete:
+        db.executemany('DELETE FROM receipt_views WHERE path=?', [(p,) for p in to_delete])
     return conflicts
 
 
