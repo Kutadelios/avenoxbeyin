@@ -1,4 +1,4 @@
-# Yakala: Codex `apply_patch` okuma sınırı
+# Yakala: Codex `apply_patch` okuma sınırı ve Windows uyumluluğu
 
 Araştırma ve Linux ölçümü: **19 Ekim 2026 UTC**. İlgili upstream PR: [#384](https://github.com/avenoxai/avenoxbeyin/pull/384).
 
@@ -9,9 +9,10 @@ doğrulamasını tek başına engellemiyor. `-a never -s read-only` altında do�
 bağlamı yazma politikasına kadar ilerlerken yanlış bağlam doğrulamada hata veriyor.
 Bu ayrım güncel kararlı Codex **0.163.0** ile de tekrarlandı.
 
-Desteklenen bir çözüm bulundu: Codex'in belgelenmiş **adlı izin profili**, yama
-doğrulamasının kullandığı dosya sistemi okumasını da kısıtlıyor. Yakala her komutta
-yeni bir `beyin_yakala_<32 hex karakter>` adı üretip şu iki `-c` ayarını veriyor:
+Linux'ta ölçülen çözüm, Codex'in belgelenmiş **adlı izin profili** ile yama
+doğrulamasının kullandığı dosya sistemi okumasını da kısıtlıyor. Yakala Linux ve
+macOS'ta her komutta yeni bir `beyin_yakala_<32 hex karakter>` adı üretip şu iki
+`-c` ayarını veriyor; macOS native doğrulaması henüz yapılmadı:
 
 ```text
 permissions.beyin_yakala_<rastgele>.filesystem={":root"="deny"}
@@ -25,6 +26,15 @@ config dosyası değişmiyor. Rastgele ad, aynı adlı kullanıcı profilinden d
 bir `read`/`write` girdisinin derin birleştirme yoluyla miras kalmasını önlüyor.
 128 bit rastgeleliğin çakışmayı pratikte ihmal edilebilir kılması bir olasılık
 değerlendirmesidir; bütün sistem durumlarını tarayarak ispatlanmış benzersizlik değildir.
+
+**Windows ayrı bir uyumluluk yolu kullanır: `-s read-only`.** Kullanıcının
+19.10.2026 tarihli gerçek Windows 11 / Codex 0.155.1 denemesinde önceki düzeltme
+(`dc2a1bc2`, fork #9) `AGENTS.md` yüklenirken durdu; model olay dosyası boş kaldı.
+Windows `elevated` sandbox kök okuma izni istiyor. Bu nedenle Windows komutuna
+root-deny profili verilmez; `gizli` ve `pencere` aynı salt okuma seçicisini
+kullanır. Yazma engeli ve diğer araç kapıları korunur, fakat **Windows'ta
+`apply_patch` içerik tahmini kanalı kapanmış sayılmaz**. Yeni dalın native Windows
+başlangıcı henüz ölçülmedi; aşağıdaki uyumluluk bölümü bu ayrımı açıklar [S12–S14].
 
 `--strict-config` bilinmeyen üst düzey ayarları hata yapar. Desteklenmeyen bayraklar
 ve eski/ön sürümler zaten ön kontrolde reddedilir. En eski ikili ölçümü **0.155.1**
@@ -76,8 +86,8 @@ yalnız incelenen sürümler için kaynak ve çalıştırma kanıtıyla söylenm
 
 Bağımsız, sadece `apply_patch` aracını kapatan güncel bir CLI anahtarı bulunmadı;
 bu sonuç incelenen config şeması, CLI yardım metni, özellik listesi ve kayıt
-koduyla sınırlıdır. Dosya okuma tahmin kanalını kapatan belgelenmiş profil
-bulunduğu için Codex deposuna issue açılması bu düzeltmenin ön koşulu değildir.
+koduyla sınırlıdır. POSIX profili Linux'ta kanalı kapatır; Windows salt okuma
+uyumluluk yolunda bu bulgu açık kalır. Codex deposunda issue açılmadı.
 
 ## Gerçek ikiliyle test
 
@@ -91,14 +101,9 @@ BEYIN_CODEX_EVIDENCE=/absolute/path/to/codex-boundary.json \
 python3 -m unittest tests.v3_yakala_codex_boundary_test -v
 ```
 
-PowerShell örneği; `.cmd` npm sarmalayıcısı yerine gerçek `codex.exe` yolunu ver:
-
-```powershell
-$env:BEYIN_CODEX_BINARY = 'C:\CodexTest\codex.exe'
-$env:BEYIN_CODEX_EVIDENCE = "$PWD\codex-boundary-windows.json"
-py -3 -m unittest tests.v3_yakala_codex_boundary_test -v
-Remove-Item Env:BEYIN_CODEX_BINARY, Env:BEYIN_CODEX_EVIDENCE
-```
+Bu iki native regresyon POSIX root-deny sözleşmesini sınar. Windows'ta açık bir
+platform gerekçesiyle atlanır; atlama, Windows başlangıcı veya okuma izolasyonu
+başarısı olarak sayılamaz. Windows kabul denemeleri aşağıda ayrıca listelenir.
 
 Test yeni geçici `CODEX_HOME`, vault, state ve zararsız notlar oluşturur. Yalnız
 `127.0.0.1` üzerinde Responses protokolü taklit edilir; model hesabı, API anahtarı
@@ -140,11 +145,17 @@ kısıtlı başlar [S2, S6].
 | 0.163.0 | 15.10.2026 21:30:38 | 2/2 gerçek CLI regresyonu geçti; test başına 28 patch + 5 MCP + hook |
 | 0.164.0-alpha.3 | 17.10.2026 04:03:25 | Yalnız kaynak karşılaştırması; gerçek ikili çalıştırılmadı, Yakala ön sürümü reddeder |
 
-Üç ikilideki toplam **6 başarılı gerçek CLI testine** ek olarak
-`v3_yakala_ajan*_test.py` keşfi **261 test** çalıştırdı:
-**259 başarı, 2 Windows'a özgü atlama**. Bunlar yeni gerçek Codex testinden
-ayrıdır. Test sayısı, `subTest` döngülerindeki her kontrolü ayrı test saymaz.
-Bu rapor tam V3 birleşim testinin yerini almaz.
+Windows uyumluluk değişikliği sonrasında, **19.10.2026 UTC** tarihinde aynı
+altı Linux CLI testi `nobody` / UID 65534 ile yeniden geçti: sürüm başına iki
+test, sırasıyla **25.313**, **19.736** ve **19.640 saniye**. Toplam 168 patch,
+30 gerçek MCP çağrısı ve altı hafıza hook'u denetlendi; config hash'leri korundu.
+
+Güncellenen komut beklentileri ve mevcut Codex ön kontrolleri için **20 hedefli
+test, 20 başarı / 0.086 saniye** ölçüldü. Bu koşuya dahil platform/görünüm
+matrisi eski kodda iki Windows alt kontrolünde başarısızdı (**1 test / 2 fail,
+0.020 saniye**); düzeltmeden sonra **1 test / 1 başarı, 0.025 saniye** oldu.
+Matris de Linux'ta UID 65534 ile çalıştı. `subTest` döngülerindeki her kontrol
+ayrı test sayılmaz; bu sayılar tam V3 birleşim testinin yerini almaz.
 
 ### İkili bütünlüğü
 
@@ -157,25 +168,50 @@ SHA-256 değerleri GitHub release API'sindeki `digest` alanıyla eşleşti.
 0.163.0 beb339e8ecd9ba057a6bb2dc81ad8ca474812edfbf0fc5056ca818797648dde4
 ```
 
-## Windows ve macOS'ta kalan doğrulama
+## Windows uyumluluğu ve kalan native doğrulama
 
-Linux ölçümü, Windows MXC/elevated/unelevated veya macOS Seatbelt çalıştırması
-değildir. Resmî belge desteklenmeyen bazı politikaların reddedileceğini belirtir;
-bir kuruluma özel gerçek sonuç yine ölçülmelidir [S2]. İzin profilini gevşeten
-bir otomatik geri dönüş eklenmedi.
+19.10.2026 UTC kaynak incelemesinde aynı `elevated` ön koşulu Codex **0.155.1**,
+**0.163.0**, **0.164.0-alpha.3** ve `main` **89461ea6** içinde bulundu:
+``elevated Windows sandbox requires effective `:root` read access`` [S13, S15].
+Kullanıcının bildirdiği başlangıç hatası bu koşulla örtüşür; Linux'ta Windows
+sandbox çalıştırılmış değildir. Kullanıcı aynı makinede eski `69ac79c` dalının
+`-s read-only` ile iki görünümde de `completed` olduğunu bildirdi. Bu, önceki
+dalın kullanıcı ölçümüdür; düzeltilmiş dalın kabul ölçümü değildir.
 
-1. Gerçek ikili regresyonunu kullanılan CLI sürümünde çalıştır; Windows,
-   Python, Codex, sandbox türü ve dosya sistemi bilgisini kaydet.
-2. Native Windows'ta `gizli` ve `pencere` görünümlerinde aynı doğru/yanlış
-   bağlam denemelerini yap. UNC, farklı sürücü, büyük/küçük harf ve 8.3 yol
-   yazımı gibi platforma özgü yolları ayrıca ölç.
-3. Normal, önceden güvenilmiş gerçek hafıza hook'larının çalıştığını ve
-   `read_note → write_note → complete → receipt → Last-Session` zincirini
-   masaüstünde doğrula. Sentetik test yalnız MCP teslimine kadar gider;
-   receipt/Last-Session yayınını veya toast davranışını ölçmez.
-4. Etkin kullanıcı MCP/eklenti ve eski sandbox ayarı bulunan ayrı test
-   profilinde araç sınırını/config hash'ini doğrula. İzin derleme hatası varsa
-   bunu açık uyumluluk hatası olarak kaydet; daha geniş kök izniyle gizleme.
+| Seçenek | Kaynak ve karar |
+| --- | --- |
+| Windows'ta root-deny | `elevated` kök okuma izni ön koşulunu sağlamaz; bildirilen gerçek başlangıç hatasının nedeni. Windows komutundan kaldırıldı. |
+| `:root=read` ve vault/home/state için exact-path deny | `elevated` kaynak testi bu tür alt yol reddini kabul eder. `unelevated` deny-read desteklemez. Kısıtlı profil AGENTS keşfi/okumasını sandbox içinden yapar; izin/metadata hatası başlangıcı durdurabilir. Gerekli başlangıç/runtime yollarını açmadan çalışacağı native ölçülmedi; bu yolları açmak ve listelenmeyen yollar da genel oracle kapanışı sağlamaz. Varsayılan seçilmedi [S12–S14]. |
+| MXC | Güncel belge uyumlu Windows 11 cihazı/politikası ister; tek komutlu MXC denemesi 0.162.0+ içindir. `prefer_mxc` destek yoksa legacy seçimine dönebilir. 0.155.1 desteğinin yerine geçirilmedi; MXC altında root-deny başarısı ölçülmedi [S12]. |
+| Windows `-s read-only` | Önceki çalışan Windows akışıyla uyum için seçildi. Native yazma izni verilmez; içerik tahmini sınırı açık kalır. |
+| Linux/macOS root-deny | Kod yolu korunur. Gerçek ikili kanıtı Linux'a aittir; macOS Seatbelt ölçümü değildir. |
+
+Platform seçimi komut hazırlanırken yapılır; başlangıç hatasından sonra izin
+genişletip otomatik yeniden deneme yoktur. Kullanıcının `windows.sandbox`,
+`prefer_mxc`, proje/hook güveni ve config dosyaları değiştirilmez. Genel kabuk,
+görüntü okuma, alt ajan, app/eklenti ve diğer MCP kapatma kontrolleri, `-a never`,
+`--strict-config`, işin ağ seçimi ve güvenilen Yakala MCP köprüsü korunur.
+
+Kalan kabul ölçümleri:
+
+1. **Windows:** güncel dalı kurup gerçek Codex 0.155.1 ile önce `gizli`, sonra
+   `pencere`, `ag: kisitli` ve zararsız bir kart kullan. `AGENTS.md` başlangıcının,
+   normal güvenilmiş hafıza hook'larının ve
+   `read_note → write_note → complete → receipt → Last-Session` zincirinin
+   tamamlandığını doğrula. İki görünüm için ayrı job kimliği ve gerçek sonucu
+   kaydet; bu belge henüz başarı iddia etmez.
+2. **Windows:** CLI sürümü, Windows sürümü, sandbox türü ve dosya sistemi
+   bilgisiyle etkin araç/config durumunu kaydet. `apply_patch` yazmasının
+   engellendiğini zararsız dosyada ölç; doğru/yanlış bağlam farkının kapandığı
+   varsayımını kullanma. UNC, farklı sürücü ve 8.3 alias kapsamı ölçülmedi.
+3. **macOS:** yukarıdaki iki gerçek CLI regresyonunu seçilen resmî ikiliyle
+   çalıştır; normal hafıza başlangıcını ayrıca doğrula. Linux sonucu bu ölçümün
+   yerine geçmez.
+
+Komut matrisi testi Linux'ta üç platform ve iki görünümü taklit eder; gerçek
+Windows/macOS sandbox'ını çalıştırmaz. Mevcut POSIX ikili testleri model hesabı
+olmadan MCP teslimine kadar gider; receipt/Last-Session yayınını ve masaüstü
+bildirimini ölçmez.
 
 Normal hook'lar ve Yakala MCP güvenilen yerel koddur ve kendi dosya erişimini
 sürdürür. Profil bu kodları veya CLI'nin başlangıç bağlamı yüklemesini genel
@@ -219,6 +255,18 @@ resmî repo salt okunur `git` checkout ile incelendi.
   [features/lib.rs](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/features/src/lib.rs).
 - **[S11] Strict config yükleme:**
   [config/loader/mod.rs](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/config/src/loader/mod.rs).
+- **[S12] Windows sandbox türleri, deny-read sınırları ve MXC gereksinimleri:**
+  [Windows sandbox](https://learn.chatgpt.com/docs/windows/windows-sandbox).
+- **[S13] Elevated kök okuma şartı ve alt yol reddi testi:**
+  [0.155.1 resolved_permissions.rs](https://github.com/openai/codex/blob/be2951ea34f0d295ed0becf97079f92fa5f6950e/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs),
+  [0.163.0 resolved_permissions.rs](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs),
+  [unelevated sınırı](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/windows-sandbox-rs/src/lib.rs).
+- **[S14] AGENTS keşfi/okuması ve başlangıç hata yolu:**
+  [0.155.1 agents_md.rs](https://github.com/openai/codex/blob/be2951ea34f0d295ed0becf97079f92fa5f6950e/codex-rs/core/src/agents_md.rs),
+  [0.163.0 agents_md.rs](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/src/agents_md.rs).
+- **[S15] Sonraki kaynaklarda aynı koşul:**
+  [0.164.0-alpha.3](https://github.com/openai/codex/blob/bd43893f3db678fcb7124296905a65b2dfa9dac0/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs),
+  [19.10.2026 tarihinde okunan main](https://github.com/openai/codex/blob/89461ea6833832b0551ce24ee32205824d5c108d/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs).
 
 İncelenen tag'lerin çözülmüş commit'leri:
 

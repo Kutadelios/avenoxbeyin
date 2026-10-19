@@ -1,8 +1,9 @@
-"""Optional real-Codex regression: no account, hosted model, or network source.
+"""Optional POSIX real-Codex regression: no account, hosted model, or network source.
 
 Set BEYIN_CODEX_BINARY to an official Codex executable, then run this module.
 A loopback-only Responses fixture drives the real CLI and real Yakala MCP bridge.
 Default repository CI skips this test because Codex is not a project dependency.
+Windows uses a read-only compatibility profile, not the read-deny contract tested here.
 """
 import hashlib
 import http.server
@@ -21,6 +22,7 @@ from tests.v3_yakala_ajan_test import AgentFiles, yakala
 
 
 @unittest.skipUnless(os.environ.get('BEYIN_CODEX_BINARY'), 'Optional official Codex binary not configured')
+@unittest.skipIf(os.name == 'nt', 'Windows uses read-only compatibility; this tests the POSIX root-deny profile')
 class CodexNativeReadBoundaryTest(AgentFiles):
     def trust_fixture_hook(self, binary, env, config_file):
         """Review only the synthetic hook through Codex's own discovery output."""

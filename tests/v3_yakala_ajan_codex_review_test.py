@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import subprocess
+import types
 import unittest
 from unittest.mock import patch
 
@@ -149,27 +150,32 @@ class CodexFeatureReviewTest(AgentFiles):
         with self.assertRaisesRegex(ValueError, 'MCP sunuculari'):
             self.preflight(mcp_enabled=True, fail_mcp_disable=True)
 
-    def test_window_and_headless_commands_deny_images_both_agent_generations_and_writes(self):
+    def test_platform_and_view_matrix_keeps_tool_limits_and_compatible_filesystem_policy(self):
         self.configure('codex')
         _, job, _ = self.queued(url='https://example.com/post')
         names = set()
-        for view in ('gizli', 'pencere'):
-            with self.subTest(view=view), patch.object(yakala, '_agent_window_supported', return_value=True), \
+        for os_name, platform, view in (
+                (name, platform, view)
+                for name, platform in (('nt', 'win32'), ('posix', 'linux'), ('posix', 'darwin'))
+                for view in ('gizli', 'pencere')):
+            system = types.SimpleNamespace(**{**vars(yakala.os), 'name': os_name})
+            runtime = types.SimpleNamespace(**{**vars(yakala.sys), 'platform': platform})
+            with self.subTest(platform=platform, view=view), \
+                    patch.object(yakala, 'os', system), patch.object(yakala, 'sys', runtime), \
+                    patch.object(yakala, '_agent_window_supported', return_value=True), \
                     patch.object(yakala, '_agent_executable', return_value=['codex']):
                 job['config']['gorunum'] = view
                 argv = yakala._agent_command(self.vault, self.state, job, job['config'])
                 self.assertIn('--strict-config', argv)
-                self.assertNotIn('-s', argv)
-                self.assertNotIn('--sandbox', argv)
-                selected = next(item for item in argv if item.startswith('default_permissions='))
-                profile = json.loads(selected.split('=', 1)[1])
-                self.assertRegex(profile, r'^beyin_yakala_[0-9a-f]{32}$')
-                names.add(profile)
-                self.assertIn('permissions.' + profile + '.filesystem={":root"="deny"}', argv)
+                profile = self.assert_codex_filesystem_policy(argv)
+                if profile is not None:
+                    names.add(profile)
                 self.assertEqual(argv[argv.index('-a') + 1], 'never')
                 self.assertIn('agents.enabled=false', argv)
-                for feature in ('view_image', 'multi_agent', 'multi_agent_v2'):
+                for feature in FEATURES:
                     self.assertIn(['--disable', feature], [argv[i:i + 2] for i in range(len(argv))])
+                self.assertIn('mcp_servers.yakala.enabled=true', argv)
+                self.assertIn('mcp_servers.yakala.required=true', argv)
                 self.assertIn('web_search="disabled"', argv)
                 self.assertNotIn('apply_patch_freeform', argv)  # removed, not a security switch
                 self.assertNotIn('code_mode', argv)
@@ -178,7 +184,7 @@ class CodexFeatureReviewTest(AgentFiles):
                 if view == 'pencere':
                     self.assertEqual(argv[-2], '--')
         # A name copied from the user's config must not contribute narrower read/write grants.
-        self.assertEqual(len(names), 2)
+        self.assertEqual(len(names), 4)
 
 
 class AgentClientOptionsReviewTest(AgentFiles):
