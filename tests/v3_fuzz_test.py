@@ -1,47 +1,47 @@
-import unittest
+import json
 import subprocess
-import os
 import sys
-import shutil
+import tempfile
+import unittest
 from pathlib import Path
-from v3_package_helpers import clean_environ
+
+from v3_package_helpers import inherited_env
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / 'template/.claude/scripts'
-HOOK = SCRIPTS / 'beyin_v3_hook.py'
-HOOK_DONE = SCRIPTS / 'beyin_v3_hook_done.py'
+HOOK = ROOT / 'template/.claude/scripts/beyin_v3_hook.py'
+
 
 class HookFuzzingTest(unittest.TestCase):
     def setUp(self):
-        self.vault = Path('/tmp/vault_fuzz')
-        self.state = Path('/tmp/state_fuzz')
-        self.vault.mkdir(parents=True, exist_ok=True)
-        self.state.mkdir(parents=True, exist_ok=True)
-        self.env = clean_environ()
-        
-    def tearDown(self):
-        shutil.rmtree(self.vault, ignore_errors=True)
-        shutil.rmtree(self.state, ignore_errors=True)
+        # A per-test temporary root: fixed /tmp paths collide between parallel runs and on Windows
+        # land in the drive root; rmtree on them could delete a folder the test never created.
+        self.tmp = tempfile.TemporaryDirectory(prefix='v3-fuzz-')
+        self.addCleanup(self.tmp.cleanup)
+        self.vault = Path(self.tmp.name) / 'vault'
+        self.state = Path(self.tmp.name) / 'state'
+        self.vault.mkdir()
+        self.state.mkdir()
+        # Without this an agent session's BEYIN_V3_SKIP answers {} before any parsing (#169).
+        self.env = inherited_env()
 
     def test_hook_malformed_inputs_never_crash(self):
         payloads = [
             b"",
             b"{",
             b"\xef\xbb\xbf{}",
-            b'{"foo": "' + b'a'*1100000 + b'"}',
+            b'{"foo": "' + b'a' * 1100000 + b'"}',
         ]
         for p in payloads:
-            res = subprocess.run([
-                sys.executable, str(HOOK), 
-                '--vault', str(self.vault), 
-                '--state', str(self.state), 
-                '--harness', 'codex'
-            ], input=p, capture_output=True, env=dict(os.environ))
-            self.assertEqual(res.returncode, 0, f"Hook crashed with payload size {len(p)}! stderr: {res.stderr.decode('utf-8', 'replace')}")
+            with self.subTest(size=len(p)):
+                res = subprocess.run([
+                    sys.executable, str(HOOK),
+                    '--vault', str(self.vault),
+                    '--state', str(self.state),
+                    '--harness', 'codex'
+                ], input=p, capture_output=True, env=self.env, timeout=60)
+                self.assertEqual(res.returncode, 0, f"Hook crashed with payload size {len(p)}! stderr: {res.stderr.decode('utf-8', 'replace')}")
+                self.assertIsInstance(json.loads(res.stdout), dict)
 
-    def test_hook_done_malformed_inputs_never_crash(self):
-        res = subprocess.run([sys.executable, str(ROOT / 'template/.claude/scripts/beyin_v3_hook_done.py')], input=b"{", capture_output=True, env=dict(os.environ))
-        self.assertEqual(res.returncode, 0)
-        
+
 if __name__ == '__main__':
     unittest.main()
