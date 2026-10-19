@@ -159,7 +159,10 @@ class IngestServerTest(unittest.TestCase):
     def test_symlink_default_inbox_cannot_create_external_file(self):
         outside = Path(self.tmp.name) / 'outside'
         outside.mkdir()
-        (self.vault / '000-Inbox').symlink_to(outside, target_is_directory=True)
+        try:
+            (self.vault / '000-Inbox').symlink_to(outside, target_is_directory=True)
+        except OSError:
+            self.skipTest('symlinks are unavailable')
         with self.assertRaises(ValueError):
             ingest_server.save_capture(self.vault, 'capture')
         self.assertEqual(list(outside.iterdir()), [])
