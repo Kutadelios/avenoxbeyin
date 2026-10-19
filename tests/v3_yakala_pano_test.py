@@ -606,6 +606,10 @@ class PopupWiringTest(ScreenshotFiles, unittest.TestCase):
         platform_patches = contextlib.ExitStack()
         platform_patches.enter_context(patch.object(sys, 'platform', platform or sys.platform))
         platform_patches.enter_context(patch.object(yakala, '_style_mac'))
+        if platform in ('darwin', 'linux') and os.name == 'nt':
+            # The commit lock's OS primitive belongs to the real host; Windows has no fcntl.
+            platform_patches.enter_context(
+                patch.object(yakala, '_WindowsCommitLock', lambda _vault: contextlib.nullcontext()))
         with patch.dict(sys.modules, {'tkinter': fake, 'tkinter.font': fake.font}), \
                 patch.dict(os.environ, environment, clear=True), \
                 patch.object(yakala, 'os', system), \
