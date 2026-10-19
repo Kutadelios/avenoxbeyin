@@ -5,11 +5,15 @@ two real Python MCP dispatchers sharing one job directory and its OS-owned tool 
 """
 import contextlib
 import ctypes as C
+import errno
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
+import types
 import unittest
 import uuid
 from unittest.mock import Mock, patch
@@ -154,6 +158,101 @@ print(ok)
         later = subprocess.run(args, capture_output=True, timeout=20)
         self.assertEqual(later.returncode, 0, later.stderr.decode('utf-8', 'replace'))
         self.assertEqual(int(later.stdout), 0)
+
+    def test_windows_contender_waits_without_writing_the_locked_byte(self):
+        # Model Windows mandatory byte locks on every host: the peer owns byte 0
+        # of an empty file, so an initialization write must fail before locking.
+        path = self.job_folder / 'empty-tools.lock'
+        path.touch()
+        held, events = {'peer': True, 'self': False}, []
+
+        def fdopen(*args, **kwargs):
+            stream = os.fdopen(*args, **kwargs)
+            guarded = Mock(wraps=stream)
+
+            def write(data):
+                if held['peer']:
+                    raise PermissionError(errno.EACCES, 'byte 0 is locked by the peer')
+                return stream.write(data)
+
+            guarded.write.side_effect = write
+            return guarded
+
+        def locking(fd, mode, size):
+            self.assertEqual(os.lseek(fd, 0, os.SEEK_CUR), 0)
+            self.assertEqual(size, 1)
+            if mode == 0:
+                self.assertTrue(held['self'])
+                held['self'] = False
+                events.append('unlocked')
+            elif held['peer']:
+                events.append('contended')
+                raise PermissionError(errno.EACCES, 'byte 0 is locked by the peer')
+            else:
+                held['self'] = True
+                events.append('acquired')
+
+        def release_peer(_):
+            self.assertEqual(events, ['contended'])
+            held['peer'] = False
+            events.append('peer-released')
+
+        windows_os = types.SimpleNamespace(**{**vars(os), 'name': 'nt', 'fdopen': fdopen})
+        windows_sys = types.SimpleNamespace(**{**vars(sys), 'platform': 'win32'})
+        crt = types.SimpleNamespace(LK_NBLCK=2, LK_UNLCK=0, locking=locking)
+        with patch.object(y, 'os', windows_os), patch.object(y, 'sys', windows_sys), \
+                patch.dict(sys.modules, {'msvcrt': crt}), patch.object(time, 'sleep', side_effect=release_peer):
+            with y._AgentFileLock(path):
+                self.assertTrue(held['self'])
+                events.append('critical-section')
+        self.assertEqual(events, ['contended', 'peer-released', 'acquired', 'critical-section', 'unlocked'])
+
+    @unittest.skipUnless(sys.platform == 'win32', 'real Windows byte-range locking')
+    def test_windows_child_waits_for_a_locked_empty_file(self):
+        import msvcrt
+
+        path, waited = self.job_folder / 'empty-tools.lock', self.job_folder / 'waited'
+        script = '''
+import msvcrt, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import beyin_v3_yakala as y
+original = msvcrt.locking
+def observed(fd, mode, size):
+    try:
+        return original(fd, mode, size)
+    except OSError as exc:
+        if mode == msvcrt.LK_NBLCK and exc.errno in (13, 36):
+            Path(sys.argv[3]).touch()
+        raise
+msvcrt.locking = observed
+with y._AgentFileLock(Path(sys.argv[2])):
+    print('acquired')
+'''
+        with path.open('w+b', buffering=0) as holder:
+            # The CRT supports locking beyond EOF; keep the file empty and held
+            # until the real child has observed contention, without a race timer.
+            msvcrt.locking(holder.fileno(), msvcrt.LK_NBLCK, 1)
+            try:
+                child = subprocess.Popen([sys.executable, '-c', script, str(fixtures.SCRIPTS), str(path), str(waited)],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+                def cleanup():
+                    if child.poll() is None:
+                        child.kill()
+                    child.wait(timeout=20)
+
+                self.addCleanup(cleanup)
+                deadline = time.monotonic() + 20
+                while not waited.exists() and child.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                observed_contention = waited.exists()
+            finally:
+                msvcrt.locking(holder.fileno(), msvcrt.LK_UNLCK, 1)
+        output, error = child.communicate(timeout=20)
+        self.assertEqual(child.returncode, 0, error.decode('utf-8', 'replace'))
+        self.assertTrue(observed_contention, 'the child must wait while the parent owns byte 0')
+        self.assertEqual(output.strip(), b'acquired')
 
     def test_completion_and_other_calls_are_serialized(self):
         entered, release, writing = threading.Event(), threading.Event(), threading.Event()
