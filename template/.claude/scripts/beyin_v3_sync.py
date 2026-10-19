@@ -775,6 +775,7 @@ class SyncEngine:
         # taking their identities so aliases on case-insensitive volumes are also
         # excluded, without treating distinct case-sensitive files as the same note.
         view_paths = self.receipt_view_sources = set(receipt_views)
+        self.discovered_receipt_views = {}
         view_identities = set(alias_identities)
         for relative in view_paths:
             try:
@@ -837,9 +838,9 @@ class SyncEngine:
                         raise ValueError('task has embedded frontmatter; reconcile metadata and body explicitly')
                     if metadata.get('kind') == 'receipt' or metadata.get('generated') is True:
                         if (metadata.get('generated') is True and metadata.get('kind') == 'receipt-index' and
-                                not is_receipt_view_source(relative) and
                                 is_receipt_view_source(relative, proven=True)):
                             view_paths.add(relative)
+                            self.discovered_receipt_views[relative] = _hash(raw)
                         continue
                     record = dict(metadata, source=relative, text=body)
                     record.setdefault('id', 'md-' + _hash(relative)[:24])
@@ -1048,8 +1049,9 @@ class SyncEngine:
             old_payloads = dict(db.execute('SELECT id, payload FROM records'))
             cache = _SignatureCache(db, old_sources, old_payloads, full=full)
             records, warnings, conflicts = self._scan(cache, view_paths, alias_identities)
+            canonical_view_paths.update(self.discovered_receipt_views)
             warnings.extend(state_regression_warnings)
-            warnings.extend(receipt_warnings)
+            warnings.extend(issue for issue in receipt_warnings if issue not in warnings)
             conflicts.extend(recovery_conflicts + receipt_conflicts)
             deleted = 0
             for id in old_owned - records.keys():
@@ -1098,12 +1100,13 @@ class SyncEngine:
                     continue
             # Include the deletion event just written, and already-deleted snapshots
             # at these proven paths. Audit payloads remain immutable.
-            quarantine_receipt_view_history(db, self.receipt_view_sources)
+            provenance_durable = quarantine_receipt_view_history(self, db, self.receipt_view_sources, warnings)
             db.execute('INSERT OR REPLACE INTO metadata VALUES (?,?)',
                        (RECEIPT_VIEW_SOURCES_ROW, _json(sorted(self.receipt_view_sources))))
             recovered_views = [] if recover_views else None
             view_issues = project_receipts(self, db, warnings, recover_views=recover_views,
-                                          recovered=recovered_views, desired=desired_views)
+                                          recovered=recovered_views, desired=desired_views,
+                                          allow_view_writes=provenance_durable)
             for issue in view_issues:
                 if is_receipt_view_conflict(issue):
                     warnings.append(dict(issue, kind='receipt_view'))

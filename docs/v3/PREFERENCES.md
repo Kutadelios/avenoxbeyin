@@ -27,6 +27,31 @@ Elle düzenlenmiş görünüm korunur ve `sync` ile `doctor` görünür uyarı v
 kayıpsız arşivleyip görünümü yeniden üretir veya eski görünümü kaldırır. Bu komut da
 takip edilmeyen insan günlüğüne dokunmaz.
 
+`preferences --human` etkin düzeni ve hedef yol kalıbını gösterir. Flat hedefi sembolik
+bağlantıysa hedef dosyaya dokunulmaz; `sync` kaynak uyarısı ile diğer notları işlemeye
+devam eder. State yeniden kurulduktan sonra eski düzende kalan `generated: true` ve
+`kind: receipt-index` görünümleri de bulunur. Baytları yeni düzende üretilecek içerikle
+aynıysa emekliye ayrılır; eşleşmiyorsa elle değiştirilmiş olabilecekleri için korunur
+ve yalnız `--recover-views` ile kayıpsız arşivlenir. Flat dosya adı tek başına sahiplik
+kanıtı değildir; state ve generated başlığı birlikte kaybolmuşsa insan notu sayılır.
+
+Üretilmiş bir görünüme dayandığı için bağlamdan dışlanan receipt'in kimlik kanıtı
+`receipts/<event-id-sha256>.md.view-provenance.json` içinde kalır. Receipt Markdown'ı
+değişmez; işaret özet metni veya not içeriği taşımaz. State silinip yeniden kurulduğunda
+ya da başka makineye geçildiğinde bu receipt dışarıda kalır; aynı eski günlük yolunu
+sonradan kullanan insan notuna dayanan **yeni kimlikli** receipt'ler görünür olabilir.
+`receipts/` eşitlenirken bu JSON dosyalarını da eşitle ve geçmiş kanıtı korumak için
+silme. İşaret bozuksa sessizce onarılmaz; ilgili receipt dışarıda tutulur, uyarı verilir
+ve mevcut görünümler korunur. İşaret yazılamadığında veya POSIX dizin `fsync` başarısız
+olduğunda da görünümün son kopyası silinmez; sorun giderilip `sync` yeniden çalıştırılır.
+Windows'ta Python'un standart API'siyle dizin `fsync` yoktur; dosya `fsync` ve atomik
+yenileme uygulanır. Eski motorlar yeni JSON işaretlerini okuyamaz; dosya biçimi onları
+bozmasa da state kaybından sonraki bu dışlama güvencesi için tüm makineleri güncelle.
+Önceki sürümden kalan SQLite dışlama satırları ilk `sync` sırasında bu işaretlere
+aktarılır. Güncellemeden önce hem state hem eski görünümün kanıtı zaten kaybolmuşsa
+geçmiş güvenle çıkarılamaz; eski state veya vault yedeği gerekir. İnsan günlüklerini
+yanlışlıkla gizlememek için yalnız dosya adından geçmiş sahiplik uydurulmaz.
+
 ## Hafıza dosyası sınırları
 
 `Last-Session.md` varsayılan olarak 3.000, `Threads.md` 8.000 karakterle sınırlıdır.

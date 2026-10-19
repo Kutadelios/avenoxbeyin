@@ -86,6 +86,14 @@ class PreferencesTest(unittest.TestCase):
             self.assertEqual(path.read_text(encoding='utf-8'), raw)
             self.assertFalse((self.vault / '.beyin-preferences.json').exists())
 
+    def test_human_preferences_shows_active_daily_layout(self):
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        import beyin_entry
+        for layout, expected in (('flat', 'daily/YYYY-MM-DD.md'), ('v3', 'daily/v3/YYYY-MM-DD.md')):
+            result = self.cli('preferences', '--daily-layout', layout)
+            self.assertIn('Daily duzeni: ' + layout + ' (' + expected + ')',
+                          beyin_entry.human_result(result, 'preferences'))
+
     def test_invalid_settings_do_not_replace_user_preferences(self):
         prefs.save(self.vault, {}, 'economical')
         before = (self.vault / '.beyin-preferences.json').read_bytes()

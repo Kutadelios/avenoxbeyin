@@ -207,6 +207,225 @@ class DailyLayoutTest(unittest.TestCase):
         self.assertIn('human-derived', self.visible())
         self.assertNotIn('view-derived', self.visible())
 
+    def test_retired_flat_receipt_provenance_survives_state_reset_and_human_reuse(self):
+        preferences.save_daily_layout(self.vault, 'flat')
+        self.receipt()
+        self.engine.sync()
+        source = self.daily('flat').relative_to(self.vault).as_posix()
+        receipt_source = self.receipt('view-derived', [source])
+        immutable = (self.vault / receipt_source).read_bytes()
+        self.engine.sync()
+        preferences.save_daily_layout(self.vault, 'v3')
+        self.engine.sync()
+        self.assertFalse(self.daily('flat').exists())
+        self.daily('flat').write_bytes(b'# New human journal\n')
+        self.receipt('human-derived', [source])
+        self.assertEqual(self.engine.sync()['status'], 'succeeded')
+        self.engine = SyncEngine(self.vault, self.root / 'rebuilt-state')
+        self.assertEqual(self.engine.sync()['status'], 'succeeded')
+        self.assertIn('human-derived', self.visible())
+        self.assertNotIn('view-derived', self.visible())
+        with self.engine.store._connect() as db:
+            from datetime import date
+            recap = projections.recent_receipts(db, vault=self.vault, today=date.fromisoformat(self.day))
+        self.assertNotIn(receipt_source, [item['source'] for item in recap['items']])
+        self.assertEqual((self.vault / receipt_source).read_bytes(), immutable)
+        other = self.root / 'copied-vault'
+        shutil.copytree(self.vault, other)
+        copied = SyncEngine(other, self.root / 'copied-state')
+        self.assertEqual(copied.sync()['status'], 'succeeded')
+        with copied.store._connect() as db:
+            visible = [event['event_id'] for _, event in projections.latest_receipts(db, other)]
+        self.assertIn('human-derived', visible)
+        self.assertNotIn('view-derived', visible)
+
+    def test_state_reset_retires_unchanged_orphan_flat_view(self):
+        preferences.save_daily_layout(self.vault, 'flat')
+        self.receipt()
+        self.engine.sync()
+        original = self.daily('flat').read_bytes()
+        preferences.save_daily_layout(self.vault, 'v3')
+        self.engine = SyncEngine(self.vault, self.root / 'rebuilt-state')
+        result = self.engine.sync()
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertFalse(self.daily('flat').exists())
+        self.assertEqual(self.daily('v3').read_bytes(), original)
+
+    def test_legacy_orphan_recorded_as_alias_can_still_be_retired(self):
+        preferences.save_daily_layout(self.vault, 'flat')
+        self.receipt()
+        self.engine.sync()
+        note = self.daily('flat')
+        source = note.relative_to(self.vault).as_posix()
+        preferences.save_daily_layout(self.vault, 'v3')
+        self.engine = SyncEngine(self.vault, self.root / 'rebuilt-state')
+        # The original implementation kept an orphan only in its alias table
+        # after one sync. Upgrading that already-built state must repair it too.
+        with self.engine.store._connect() as db:
+            db.execute('CREATE TABLE receipt_view_aliases(source TEXT PRIMARY KEY, identity TEXT NOT NULL)')
+            db.execute('INSERT INTO receipt_view_aliases VALUES (?,?)',
+                       (source, json.dumps({'identity': self.engine._source_identity(note),
+                                            'sha256': hashlib.sha256(note.read_bytes()).hexdigest()})))
+        result = self.engine.sync()
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertFalse(note.exists())
+
+    def test_state_reset_orphan_flat_edit_is_preserved_until_explicit_recovery(self):
+        preferences.save_daily_layout(self.vault, 'flat')
+        self.receipt()
+        self.engine.sync()
+        original = self.daily('flat').read_bytes() + b'\nHuman addition\r\n'
+        self.daily('flat').write_bytes(original)
+        preferences.save_daily_layout(self.vault, 'v3')
+        self.engine = SyncEngine(self.vault, self.root / 'rebuilt-state')
+        result = self.engine.sync()
+        self.assertEqual(result['status'], 'degraded', result)
+        self.assertTrue(any(w.get('kind') == 'receipt_view' for w in result['warnings']))
+        self.assertEqual(self.daily('flat').read_bytes(), original)
+        result = self.engine.sync(recover_views=True)
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertFalse(self.daily('flat').exists())
+        self.assertEqual(len(result['recovered_views']), 1)
+        self.assertEqual((self.vault / result['recovered_views'][0]['archive']).read_bytes(), original)
+
+    def test_flat_symlink_is_warned_and_skipped_without_failing_sync(self):
+        preferences.save_daily_layout(self.vault, 'flat')
+        self.receipt()
+        note = self.daily('flat')
+        note.parent.mkdir()
+        target = self.root / 'outside.md'
+        target.write_bytes(b'# Outside journal\n')
+        try:
+            note.symlink_to(target)
+        except OSError as exc:
+            self.skipTest('Symlinks unavailable: ' + str(exc))
+        for recover in (False, True):
+            result = self.engine.sync(recover_views=recover)
+            self.assertEqual(result['status'], 'degraded', result)
+            self.assertEqual(result['conflicts'], [])
+            self.assertTrue(any(w['source'] == 'daily/' + self.day + '.md'
+                                and ('symlink' in w['reason'] or 'outside vault' in w['reason'])
+                                for w in result['warnings']))
+            self.assertTrue(note.is_symlink())
+            self.assertEqual(target.read_bytes(), b'# Outside journal\n')
+            self.assertTrue((self.vault / 'knowledge/v3/outcomes.md').is_file())
+            self.assertIn('seed', self.visible())
+
+    def test_tracked_flat_replaced_by_symlink_is_preserved_with_warning(self):
+        preferences.save_daily_layout(self.vault, 'flat')
+        self.receipt()
+        self.engine.sync()
+        note = self.daily('flat')
+        note.unlink()
+        target = self.vault / 'notes/source.md'
+        original = target.read_bytes()
+        try:
+            note.symlink_to(target)
+        except OSError as exc:
+            self.skipTest('Symlinks unavailable: ' + str(exc))
+        result = self.engine.sync(recover_views=True)
+        self.assertEqual(result['status'], 'degraded', result)
+        self.assertEqual(result['conflicts'], [])
+        self.assertTrue(note.is_symlink())
+        self.assertEqual(target.read_bytes(), original)
+
+    def test_quarantine_marker_write_failure_preserves_view_and_retries(self):
+        import beyin_v3_sync as sync
+        preferences.save_daily_layout(self.vault, 'flat')
+        self.receipt()
+        self.engine.sync()
+        source = self.daily('flat').relative_to(self.vault).as_posix()
+        self.receipt('view-derived', [source])
+        original = self.daily('flat').read_bytes()
+        preferences.save_daily_layout(self.vault, 'v3')
+        atomic = sync.atomic
+        def fail_marker(path, content):
+            if str(path).endswith(projections.RECEIPT_VIEW_RECEIPT_SUFFIX):
+                raise OSError('injected provenance write failure')
+            return atomic(path, content)
+        with patch.object(sync, 'atomic', fail_marker):
+            result = self.engine.sync()
+        self.assertEqual(result['status'], 'degraded', result)
+        self.assertTrue(any('receipt quarantine provenance unavailable' in w['reason'] for w in result['warnings']))
+        self.assertEqual(self.daily('flat').read_bytes(), original)
+        self.assertNotIn('view-derived', self.visible())
+        self.assertEqual(self.engine.sync()['status'], 'succeeded')
+        self.assertFalse(self.daily('flat').exists())
+
+    def test_pre_upgrade_quarantine_rows_are_backfilled_after_view_retirement(self):
+        preferences.save_daily_layout(self.vault, 'flat')
+        self.receipt()
+        self.engine.sync()
+        source = self.daily('flat').relative_to(self.vault).as_posix()
+        self.receipt('view-derived', [source])
+        self.engine.sync()
+        preferences.save_daily_layout(self.vault, 'v3')
+        self.engine.sync()
+        marker = self.vault / 'receipts' / (hashlib.sha256(b'view-derived').hexdigest() +
+                                          projections.RECEIPT_VIEW_RECEIPT_SUFFIX)
+        marker.unlink()  # the old version had only the existing SQLite quarantine row
+        self.daily('flat').write_bytes(b'# New human journal\n')
+        self.receipt('human-derived', [source])
+        self.assertEqual(self.engine.sync()['status'], 'succeeded')
+        self.assertTrue(marker.is_file())
+        self.engine = SyncEngine(self.vault, self.root / 'rebuilt-state')
+        self.assertEqual(self.engine.sync()['status'], 'succeeded')
+        self.assertNotIn('view-derived', self.visible())
+        self.assertIn('human-derived', self.visible())
+
+    @unittest.skipUnless(os.name == 'posix', 'Directory fsync barriers require POSIX')
+    def test_quarantine_directory_fsync_failure_keeps_view_until_durable(self):
+        import stat
+        preferences.save_daily_layout(self.vault, 'flat')
+        self.receipt()
+        self.engine.sync()
+        source = self.daily('flat').relative_to(self.vault).as_posix()
+        self.receipt('view-derived', [source])
+        original = self.daily('flat').read_bytes()
+        preferences.save_daily_layout(self.vault, 'v3')
+        receipts_inode = (self.vault / 'receipts').stat().st_ino
+        fsync = os.fsync
+        def fail_directory(fd):
+            info = os.fstat(fd)
+            if stat.S_ISDIR(info.st_mode) and info.st_ino == receipts_inode:
+                raise OSError('injected receipts directory durability failure')
+            return fsync(fd)
+        with patch('os.fsync', fail_directory):
+            result = self.engine.sync()
+        self.assertEqual(result['status'], 'degraded', result)
+        self.assertEqual(self.daily('flat').read_bytes(), original)
+        self.assertTrue(any('provenance not durable' in w['reason'] for w in result['warnings']))
+        self.assertEqual(self.engine.sync()['status'], 'succeeded')
+        self.assertFalse(self.daily('flat').exists())
+        self.engine = SyncEngine(self.vault, self.root / 'rebuilt-state')
+        self.engine.sync()
+        self.assertNotIn('view-derived', self.visible())
+
+    def test_damaged_quarantine_marker_stays_fail_closed_without_hiding_new_human_receipts(self):
+        preferences.save_daily_layout(self.vault, 'flat')
+        self.receipt()
+        self.engine.sync()
+        source = self.daily('flat').relative_to(self.vault).as_posix()
+        self.receipt('view-derived', [source])
+        self.engine.sync()
+        preferences.save_daily_layout(self.vault, 'v3')
+        self.engine.sync()
+        self.daily('flat').write_bytes(b'# New human journal\n')
+        self.receipt('human-derived', [source])
+        self.engine.sync()
+        marker = self.vault / 'receipts' / (hashlib.sha256(b'view-derived').hexdigest() +
+                                          projections.RECEIPT_VIEW_RECEIPT_SUFFIX)
+        invalid_schema = json.dumps({'schema': True, 'kind': 'receipt-view-quarantine',
+                                     'event_id_sha256': hashlib.sha256(b'view-derived').hexdigest()})
+        for malformed in ('{broken', '[]', invalid_schema, 'x' * 5000):
+            marker.write_text(malformed, encoding='utf-8')
+            self.engine = SyncEngine(self.vault, self.root / ('rebuilt-' + str(len(malformed))))
+            result = self.engine.sync()
+            self.assertEqual(result['status'], 'degraded', result)
+            self.assertEqual(marker.read_text(encoding='utf-8'), malformed)
+            self.assertNotIn('view-derived', self.visible())
+            self.assertIn('human-derived', self.visible())
+
     def test_flat_archive_alias_sidecar_survives_state_rebuild(self):
         preferences.save_daily_layout(self.vault, 'flat')
         self.receipt()
@@ -271,6 +490,10 @@ class DailyLayoutTest(unittest.TestCase):
         self.assertTrue((self.vault / 'daily' / local_name).is_file())
         self.assertFalse((self.vault / 'daily/v3' / local_name).exists())
         self.assertEqual(preferences.read_daily_layout(self.vault), 'flat')
+        human = subprocess.run([sys.executable, str(self.vault / 'beyin.py'), 'preferences', '--human'],
+                               capture_output=True, text=True, encoding='utf-8', env=inherited_env(), timeout=60)
+        self.assertEqual(human.returncode, 0, human.stderr)
+        self.assertIn('Daily duzeni: flat (daily/YYYY-MM-DD.md)', human.stdout)
 
     def test_flat_name_alone_is_not_view_provenance(self):
         source = 'daily/' + self.day + '.md'
