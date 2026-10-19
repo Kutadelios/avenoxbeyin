@@ -28,7 +28,9 @@ class LearningCandidateLedgerTest(unittest.TestCase):
         self.state = self.root / 'state'
         self.state.mkdir()
         self.engine = SyncEngine(self.vault, self.state)
-        self.env = dict(os.environ, PYTHONIOENCODING='utf-8')
+        # The agent session running the suite must not name the fixture's session (#169, #212).
+        from v3_package_helpers import inherited_env
+        self.env = inherited_env(PYTHONIOENCODING='utf-8')
 
     def test_stage_and_list_candidates(self):
         session = "session-1234567890abcdef"
@@ -141,28 +143,47 @@ class LearningCandidateLedgerTest(unittest.TestCase):
         payload_edit = {'session_id': session_id, 'hook_event_name': 'PostToolUse'}
         hook.receipt_reminder(payload_edit, self.state, 'claude', 'PostToolUse', vault=self.vault)
 
-        # 2. Write receipt with 'Öğrenilen: yok'
+        # 2. Stage candidate via CLI without --session flag (a shell without a session variable)
         time.sleep(0.02)
-        self.engine.receipt('cli-int-1', 'Fixed edge case.\nÖğrenilen: yok',
-                            ['notes/task.md'], 'claude', session=session_hash)
-
-        # 3. Stop hook blocks because no candidate is staged yet
-        payload_stop = {'session_id': session_id, 'hook_event_name': 'Stop'}
-        res = hook.receipt_reminder(payload_stop, self.state, 'claude', 'Stop', vault=self.vault)
-        self.assertIsNotNone(res)
-        self.assertEqual(res.get('decision'), 'block')
-
-        # 4. Stage candidate via CLI without --session flag
         res_cli = subprocess.run([
             sys.executable, str(ROOT / 'scripts/beyin_v3.py'),
             '--vault', str(self.vault), '--state', str(self.state),
             'learn', '--candidate', 'Connection pooling must handle timeouts gracefully'
         ], capture_output=True, text=True, check=True, env=self.env, timeout=30)
-        self.assertEqual(res_cli.returncode, 0)
+        self.assertEqual(json.loads(res_cli.stdout)['session'], 'cli')
 
-        # 5. Stop hook now passes because CLI candidate was detected
-        res2 = hook.receipt_reminder(payload_stop, self.state, 'claude', 'Stop', vault=self.vault)
-        self.assertIsNone(res2)
+        # 3. Write receipt with 'Öğrenilen: yok'
+        self.engine.receipt('cli-int-1', 'Fixed edge case.\nÖğrenilen: yok',
+                            ['notes/task.md'], 'claude', session=session_hash)
+
+        # 4. The first Stop passes: the CLI candidate staged in this edit window was detected.
+        # (A second Stop would pass anyway once .kdone exists, so it proves nothing.)
+        payload_stop = {'session_id': session_id, 'hook_event_name': 'Stop'}
+        res = hook.receipt_reminder(payload_stop, self.state, 'claude', 'Stop', vault=self.vault)
+        self.assertIsNone(res)
+
+    def test_candidate_from_before_the_edit_window_does_not_answer_for_a_new_session(self):
+        # A "cli" candidate carries no session. One staged days ago must not silence the
+        # existing knowledge reminder, nor the new challenge, for every later session.
+        learning.stage_candidate(self.state, 'cli', 'Eski bir Codex oturumunda kaydedilen aday')
+        ledger = self.state / 'learning-state.jsonl'
+        old = json.loads(ledger.read_text(encoding='utf-8'))
+        old['created_at'] = '2026-10-01T09:00:00+00:00'
+        ledger.write_text(json.dumps(old, ensure_ascii=False) + '\n', encoding='utf-8')
+        cases = {
+            'declared': ('Öğrenilen: WAL zaman aşımı en az 5 sn olmalı', hook.KNOWLEDGE_REMINDER),
+            'bare-yok': ('Öğrenilen: yok', hook.NO_LEARNING_CHALLENGE_REMINDER),
+        }
+        for name, (line, reason) in cases.items():
+            with self.subTest(name):
+                session_id = 'new-session-' + name
+                session_hash = hashlib.sha256(session_id.encode('utf-8')).hexdigest()[:24]
+                hook.receipt_reminder({'session_id': session_id}, self.state, 'claude', 'PostToolUse', vault=self.vault)
+                time.sleep(0.02)
+                self.engine.receipt('old-cli-' + name, 'İş bitti.\n' + line, ['notes/task.md'], 'claude',
+                                    session=session_hash)
+                res = hook.receipt_reminder({'session_id': session_id}, self.state, 'claude', 'Stop', vault=self.vault)
+                self.assertEqual(res, {'decision': 'block', 'reason': reason})
 
     def test_secret_redaction_in_candidate(self):
         secret_token = "sk-" + "a" * 30

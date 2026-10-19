@@ -244,10 +244,11 @@ def _is_bare_no_learning(summary):
     return False
 
 
-def _has_staged_candidates(state, session):
+def _has_staged_candidates(state, session, since):
+    """Candidates staged in this edit window; an older entry must not answer for a new session."""
     try:
         from beyin_v3_learning import has_candidates
-        return has_candidates(state, session)
+        return has_candidates(state, session, since=since)
     except Exception:
         return False
 
@@ -353,7 +354,7 @@ def receipt_reminder(payload, state, harness, event, vault=None):
         has_learning = _has_declared_learning(summary)
         is_bare_no_learning = _is_bare_no_learning(summary)
         knowledge_saved = marker.get("knowledge") is True or _has_knowledge_update(vault, receipt, since)
-        candidates_staged = _has_staged_candidates(state, session)
+        candidates_staged = _has_staged_candidates(state, session, since)
 
         if not kdone.exists() and not knowledge_saved and not candidates_staged:
             if has_learning:

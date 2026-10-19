@@ -145,8 +145,20 @@ def stage_candidate(state: Path, session: str, candidate: str, source: str = "",
     return record
 
 
-def list_candidates(state: Path, session: str | None = None, status: str = "candidate", scope: str | None = None) -> list[dict]:
-    """Read learning candidates matching session, status, and scope."""
+def _created_at(item: dict) -> float | None:
+    try:
+        return datetime.fromisoformat(item["created_at"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def list_candidates(state: Path, session: str | None = None, status: str = "candidate", scope: str | None = None,
+                    since: float | None = None) -> list[dict]:
+    """Read learning candidates matching session, status, and scope.
+
+    `since` (epoch seconds) keeps only candidates staged at or after that moment. A "cli"
+    candidate carries no session, so without it one old entry would match every later session.
+    """
     ledger = Path(state) / LEARNING_STATE_FILE
     if not ledger.is_file():
         return []
@@ -166,6 +178,10 @@ def list_candidates(state: Path, session: str | None = None, status: str = "cand
                         continue
                     if scope and item.get("scope") not in (scope, "global"):
                         continue
+                    if since is not None:
+                        created = _created_at(item)
+                        if created is None or created < since:
+                            continue
                     results.append(item)
                 except Exception:
                     continue
@@ -174,9 +190,10 @@ def list_candidates(state: Path, session: str | None = None, status: str = "cand
     return results
 
 
-def has_candidates(state: Path, session: str | None = None, scope: str | None = None) -> bool:
-    """True if active candidates exist for this session (or overall)."""
-    return len(list_candidates(state, session=session, status="candidate", scope=scope)) > 0
+def has_candidates(state: Path, session: str | None = None, scope: str | None = None,
+                   since: float | None = None) -> bool:
+    """True if active candidates exist for this session (or overall), staged at or after `since`."""
+    return len(list_candidates(state, session=session, status="candidate", scope=scope, since=since)) > 0
 
 
 def resolve_candidates(state: Path, session: str, target_status: str = "distilled") -> int:
