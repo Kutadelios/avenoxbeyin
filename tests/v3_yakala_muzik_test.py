@@ -56,7 +56,8 @@ class MusicFiles(AgentFiles):
         return job
 
     def token(self):
-        source = Path(self.tmp.name) / 'audd-input.txt'
+        # macOS temp names can start with /var while the real directory is /private/var.
+        source = Path(self.tmp.name).resolve() / 'audd-input.txt'
         source.write_text(TOKEN, encoding='utf-8')
         result = yakala.configure_agent_music(self.vault, self.state, 'audd', source)
         self.assertNotIn(TOKEN, json.dumps(result))
