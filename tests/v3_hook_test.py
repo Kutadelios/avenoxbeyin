@@ -1216,6 +1216,7 @@ runpy.run_path({str(HOOK)!r}, run_name='__main__')
         self.assertTrue(self.hook.is_synthetic_prompt({'prompt': [{'type': 'text', 'text': '<task-notification>\n<task-id>x</task-id>'}]}))
         self.assertFalse(self.hook.is_synthetic_prompt({'prompt': [{'type': 'text', 'text': 'Nebula calibration'}]}))
         self.assertFalse(self.hook.is_synthetic_prompt({'prompt': None}))
+        self.seed()
         resp = self.lifecycle('UserPromptSubmit', 'channel-sess', 'claude', prompt='Nebula calibration',
                               origin={'kind': 'channel', 'server': 'telegram'})
         self.assertIn('Synthetic Reviewer', resp['hookSpecificOutput']['additionalContext'])
