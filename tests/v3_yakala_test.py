@@ -351,7 +351,8 @@ class YakalaUnitTest(unittest.TestCase):
         class Canvas:  # stands in for a Tk canvas: the cache lives on it
             pass
         first, second = Canvas(), Canvas()
-        with patch('tkinter.font.Font', Font):
+        tkfont = Mock(Font=Font)
+        with patch.dict(sys.modules, {'tkinter': Mock(font=tkfont), 'tkinter.font': tkfont}):
             self.assertEqual(yakala._fit(first, 'kisa', ('f', 12), 100), 'kisa')
             self.assertEqual(yakala._fit(first, 'abcdefghijkl', ('f', 12), 60), 'abcde…')
             self.assertEqual(yakala._fit(first, 'ab   cdefgh', ('f', 12), 60), 'ab…')
