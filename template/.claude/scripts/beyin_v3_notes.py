@@ -169,9 +169,8 @@ def locked(engine, timeout=15):
     lock = folder / 'writer.lock'
     _unlinked(lock)
     with lock.open('a+b') as handle:
-        if os.fstat(handle.fileno()).st_size == 0:
-            handle.write(b'\0')
-            handle.flush()
+        # Windows can lock byte zero beyond EOF. Do not write a sentinel before
+        # acquisition: another handle may already own that byte of an empty file.
         deadline = time.monotonic() + timeout
         while True:
             try:

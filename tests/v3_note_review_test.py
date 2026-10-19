@@ -81,6 +81,41 @@ print(json.dumps(result))
             self.engine.note_create('notes/new.md', 'competing writer')
         self.assertEqual((self.vault / 'notes/new.md').read_bytes(), b'note-edit writer')
 
+    def test_empty_lock_waits_without_writing_before_acquisition(self):
+        # A byte-range lock may extend beyond EOF. Its owner need not write a
+        # sentinel: Windows rejects another handle's write to the locked byte.
+        folder = self.vault / notes.LOCAL_DIRECTORY
+        folder.mkdir(exist_ok=True)
+        lock = folder / 'writer.lock'
+        code = '''import os, sys
+with open(sys.argv[1], 'a+b') as handle:
+    handle.seek(0)
+    if os.name == 'nt':
+        import msvcrt
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    print('locked-empty', flush=True)
+    sys.stdin.read()
+'''
+        child = subprocess.Popen([sys.executable, '-c', code, str(lock)],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, env=self.env)
+        try:
+            self.assertEqual(child.stdout.readline().strip(), 'locked-empty')
+            self.assertEqual(lock.stat().st_size, 0)
+            with self.assertRaisesRegex(notes.NoteConflict, 'writer busy'):
+                with notes.locked(self.engine, timeout=0.1):
+                    self.fail('the empty lock was held by another process')
+            self.assertEqual(lock.stat().st_size, 0)
+        finally:
+            output, errors = child.communicate('', timeout=10)
+        self.assertEqual(child.returncode, 0, output + errors)
+        # Closing the owner's descriptor releases the same persistent lock.
+        with notes.locked(self.engine, timeout=0.1):
+            self.assertEqual(lock.stat().st_size, 0)
+
     def pending_creation(self):
         path = self.vault / 'notes/new.md'
         original = sync._safe_replace
