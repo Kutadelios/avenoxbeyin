@@ -4461,7 +4461,7 @@ def popup(vault, context=None, state=None, root=None, session=None):
 
     if sources is not None:
         y = _windows_source_cards(canvas, root, sources, y, W, pad,
-                                  key_label='Option' if sys.platform == 'darwin' else 'Alt')
+                                  key_label='Option' if sys.platform == 'darwin' and os.name != 'nt' else 'Alt')
 
     # Preview card.
     if files or url or clip_text:
