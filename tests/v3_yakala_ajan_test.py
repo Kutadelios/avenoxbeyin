@@ -60,6 +60,16 @@ class AgentFiles(unittest.TestCase):
         notify = patch.object(yakala, '_agent_notify', return_value=None)
         notify.start()
         self.addCleanup(notify.stop)
+        # Preflight tests must not read the developer/CI host's managed policies.
+        codex_config = patch.object(yakala, '_agent_codex_config_files', return_value=())
+        self.codex_config_files = codex_config.start()
+        self.addCleanup(codex_config.stop)
+        codex_home = patch.object(yakala, '_agent_codex_home', return_value=base / 'codex-home')
+        self.codex_home = codex_home.start()
+        self.addCleanup(codex_home.stop)
+        codex_mdm = patch.object(yakala, '_agent_codex_mdm_preflight')
+        codex_mdm.start()
+        self.addCleanup(codex_mdm.stop)
 
     def configure(self, client='claude', **values):
         values.setdefault('downloads_dir', str(self.downloads))
