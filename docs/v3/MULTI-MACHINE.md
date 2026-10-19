@@ -170,7 +170,11 @@ python3 beyin.py note-edit --file istek.json
 ```
 
 Windows'ta `python3` yerine `py -3` kullan. `note-read` JSON olarak `source`,
-`sha256`, `content` verir; dosya yoksa son iki alan `null` olur. `content`, UTF-8 BOM
+`sha256`, `content` verir; dosya yoksa son iki alan `null` olur. `source`, mevcut
+dosya ve üst klasörlerin diskteki gerçek yazımıdır; büyük/küçük harf veya Windows
+kısa ad takma adıyla istek verilmişse girişten farklı olabilir. Sonraki istekte
+bu dönen yolu kullan. Kanonik yol için yönetilen, gizli ve hariç tutulan kaynak
+kuralları yeniden denetlenir. `content`, UTF-8 BOM
 ve CRLF dahil okunan metni korur; hash ham baytların SHA-256 özetidir. İsteği bu
 okumadan oluştur, satır sonlarını dönüştürme:
 
@@ -183,10 +187,19 @@ birden çok düzenleme sırayla uygulanır. Mevcut dosyada tam `content` verilme
 Yeni dosyada `expected_sha256: null` ve `content` kullan, `edits` verme.
 `--file -` (varsayılan) JSON'u stdin'den okur. Çıktı her zaman JSON'dur:
 `written` veya `unchanged` çıkış 0, `conflict` çıkış 2, `error` çıkış 1.
+Eksik kaynak argümanı, eksik `--file` değeri ve bilinmeyen seçenek gibi komut
+kullanım hataları `usage_error` ve çıkış 64 verir; `note-read` / `note-edit`
+için bunlar da stdout'ta JSON'dur. `--help` olağan yardım metnini gösterir.
 Çakışmada yeniden oku ve diğer ajanın metnini koruyarak hedefli düzenlemeyi yeniden
 kur. Sadece hash'i yenileyip eski metni yeniden yazma; doğrudan dosya yazımıyla
-korumayı atlama. İndeks geri okuması başarısızsa kaynak yazılmış olabilir; mesajı
-kontrol et, yeniden oku ve `sync` çalıştır.
+korumayı atlama. Atomik değiştirme tamamlandıktan sonraki dosya denetimi, dizin
+fsync, sync veya veritabanı hatası `conflict` / çıkış 2 ve `write_occurred: true`
+verir. Bu sonuç ayrıca kanonik `source`, yazılan baytların `written_sha256` özeti,
+varsa `backup` yolu ve `cause` hata türünü taşır. Yazım gerçekleşmiştir; başka
+bir editör sonradan değiştirmiş olabileceğinden bu hash güncel içerik garantisi
+değildir. Önce `note-read` ile yeniden oku ve `sync` çalıştır; aynı düzenlemeyi
+körü körüne tekrarlama. Bu durumda başarı bildirimi ve oturum işaretleyicisi
+üretilmez.
 
 Kilit ve önceki baytların base64 JSON yedekleri vault içindeki
 `.beyin-note-write/` altındadır. MSIX uygulamaları AppData'yı sanallaştırabildiği
@@ -197,9 +210,19 @@ satırını ekle; araç ayrıca bu yerel klasörde `*` içeren bir `.gitignore` 
 Yedekler hassas not metni taşıyabilir, eşitleme ve Git dışında kalmalıdır;
 otomatik yedek temizliği yoktur. `writer.lock` kalıcıdır, açık yazarlar varken silme.
 
-OS kilidi en çok 15 saniye bekler ve süreç kapanınca bırakılır. Kilit altında
+OS kilidi en çok 15 saniye bekler ve süreç kapanınca bırakılır. `note-create`
+de varlık denetimi, kaynak yazımı ve indeks geri okumasında aynı kilidi alır;
+farklı state kökleri kullanan istemciler de aynı yeni notu sessizce ezemez.
+Başarısız `note-create` işleminden kalan journal'ın `sync` ile yeniden
+oynatılması da bu kilide dahildir. Kilit başka yazardaysa geri kazanım beklemeden
+`conflict` raporlanır ve journal korunur; yazarı bitirdikten sonra `sync` yeniden
+çalıştırılır. Böylece veritabanı işlemi açıkken başka yazarın kilidi beklenmez.
+Kilit altında
 hash kontrolü, tekil hedef denetimi, tam bayt yedeği, geçici dosyaya yazım ve atomik
 değiştirme yapılır; değiştirmeden hemen önce ve sonra kaynak yeniden okunur.
+POSIX'te kaynak dosyanın üst dizini değiştirmeden sonra fsync edilir; bu adım
+başarısızsa yazılmış fakat doğrulanamamış sonuç döner. Windows'ta bu stdlib
+API'siyle dizin fsync yapılmaz; platformun rename ve dosya flush davranışı geçerlidir.
 Başarılı yazım ilgili V3 indeksini günceller. Claude Code oturum kimliği varsa
 receipt hatırlatma penceresi açılır; otomatik receipt gönderilmez.
 

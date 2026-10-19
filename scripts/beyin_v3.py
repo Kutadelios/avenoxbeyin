@@ -28,6 +28,11 @@ def default_state(vault: Path) -> Path:
 
 
 SOURCE_WRITE_COMMANDS = ("note-create", "note-edit", "task-create", "task-update")
+NOTE_JSON_COMMANDS = ("note-read", "note-edit")
+
+
+class NoteUsageError(ValueError):
+    pass
 
 
 def mark_session_edit(state: Path) -> None:
@@ -739,8 +744,16 @@ def recap_bounds_inverted(since, until):
     return first > last
 
 
-def parser():
-    root = argparse.ArgumentParser(description=__doc__)
+def parser(note_namespace=None):
+    class ResultParser(argparse.ArgumentParser):
+        def error(self, message):
+            # argparse assigns the root command before parsing the subparser.
+            # The shared namespace also covers unknown options reported by root.
+            if getattr(note_namespace, 'command', None) in NOTE_JSON_COMMANDS:
+                raise NoteUsageError(message)
+            super().error(message)
+
+    root = ResultParser(description=__doc__)
     root.add_argument("--vault", required=True, type=Path, help="Existing vault directory")
     root.add_argument("--state", type=Path, help="Local state directory outside the vault")
     sub = root.add_subparsers(dest="command", required=True)
@@ -892,8 +905,16 @@ def parser():
 def main(argv=None, return_result=False):
     if hasattr(sys.stdin, "reconfigure"):
         sys.stdin.reconfigure(encoding="utf-8-sig")
-    argument_parser = parser()
-    args = argument_parser.parse_args(argv)
+    args = argparse.Namespace()
+    argument_parser = parser(note_namespace=args)
+    try:
+        args = argument_parser.parse_args(argv, namespace=args)
+    except NoteUsageError as exc:
+        result = {'status': 'usage_error', 'error': type(exc).__name__, 'message': str(exc)}
+        if return_result:
+            return result, 64
+        print(json.dumps(result, ensure_ascii=True))
+        return 64
     receipt_flags = args.command == "receipt" and any(
         getattr(args, name) is not None for name in ("event_id", "summary", "summary_file", "ref", "link", "session"))
     if receipt_flags:
@@ -1497,16 +1518,18 @@ def main(argv=None, return_result=False):
         # No traceback or raw input dump: callers retain their local source files.
         error = {"error": type(exc).__name__, "message": str(exc)}
         code = 1
-        if args.command in ("note-read", "note-edit"):
-            from beyin_v3_notes import NoteConflict
+        if args.command in NOTE_JSON_COMMANDS:
+            from beyin_v3_notes import NoteConflict, NotePartialWrite
             code = 2 if isinstance(exc, NoteConflict) else 1
             error['status'] = 'conflict' if code == 2 else 'error'
+            if isinstance(exc, NotePartialWrite):
+                error.update(exc.details)
         if isinstance(exc, ValueError) and str(exc) in ERROR_HINTS:
             error["hint"] = ERROR_HINTS[str(exc)]
         if return_result:
             return error, code
         print(json.dumps(error, ensure_ascii=True),
-              file=sys.stdout if args.command in ("note-read", "note-edit") else sys.stderr)
+              file=sys.stdout if args.command in NOTE_JSON_COMMANDS else sys.stderr)
         return code
 
 

@@ -12,14 +12,25 @@ from pathlib import Path
 import re
 import stat
 import tempfile
+import threading
 import time
 import uuid
 
 LOCAL_DIRECTORY = '.beyin-note-write'
+_HELD_LOCKS = threading.local()
 
 
 class NoteConflict(Exception):
     pass
+
+
+class NotePartialWrite(NoteConflict):
+    """Replacement completed; the caller must not assume the source is unchanged."""
+    def __init__(self, details, cause):
+        super().__init__('source written but verification failed after replace (' +
+                         type(cause).__name__ + '); reread source and run sync before retrying')
+        self.write_occurred = True
+        self.details = dict(details, write_occurred=True, cause=type(cause).__name__)
 
 
 def _unlinked(path):
@@ -32,7 +43,7 @@ def _unlinked(path):
         raise ValueError('symlink or junction path rejected')
 
 
-def source_path(engine, source):
+def _checked_source(engine, source):
     from beyin_v3_sync import EXCLUDED_DIRS, EXCLUDED_FILES
     if not isinstance(source, str) or not source or '\\' in source or ':' in source:
         raise ValueError('use a vault-relative Markdown path with / separators')
@@ -64,6 +75,50 @@ def source_path(engine, source):
     return path
 
 
+def source_path(engine, source):
+    """Use the directory entry spelling, including case and Windows short aliases.
+
+    A casefolded SQL lookup would conflate distinct files on a case-sensitive
+    volume. Match actual filesystem identity, preferring an exact entry name,
+    and recheck the stored path so an 8.3 alias cannot bypass source exclusions.
+    """
+    path = _checked_source(engine, source)
+    cursor = engine.root
+    for part in path.relative_to(engine.root).parts:
+        candidate = cursor / part
+        _unlinked(candidate)
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            cursor = candidate
+            continue
+        with os.scandir(cursor) as entries:
+            children = list(entries)
+        exact = next((entry for entry in children if entry.name == part), None)
+        if exact is not None:
+            cursor = cursor / exact.name
+            continue
+        # DirEntry.stat reports zero st_ino/st_dev on Windows; use lstat for
+        # both identities instead of its cached FindFirstFile attributes.
+        matches = [entry.name for entry in children
+                   if os.path.samestat(info, (cursor / entry.name).lstat())]
+        if len(matches) != 1:
+            raise ValueError('ambiguous source alias; use the stored path spelling')
+        cursor = cursor / matches[0]
+    return _checked_source(engine, cursor.relative_to(engine.root).as_posix())
+
+
+def _fsync_parent(path):
+    # Windows does not expose directory fsync through this API. On POSIX, a
+    # failed fsync must report a committed but unverified write, not success.
+    if os.name != 'nt':
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
 def _human(text):
     from beyin_v3_sync import parse
     metadata, _ = parse(text)
@@ -81,6 +136,15 @@ def _bytes(path):
 
 @contextmanager
 def locked(engine, timeout=15):
+    # Recovery can run inside note-create/note-edit's sync. Reuse only this
+    # thread's lock; a forked child and other threads still need their own OS lock.
+    held = getattr(_HELD_LOCKS, 'held', None)
+    if held is None:
+        held = _HELD_LOCKS.held = {}
+    key = (os.getpid(), os.path.normcase(str(engine.root)))
+    if key in held:
+        yield held[key]
+        return
     folder = engine.root / LOCAL_DIRECTORY
     _unlinked(folder)
     folder.mkdir(exist_ok=True, mode=0o700)
@@ -116,7 +180,11 @@ def locked(engine, timeout=15):
                     raise NoteConflict('writer busy; reread the source and retry') from exc
                 time.sleep(0.05)
         try:
-            yield folder
+            held[key] = folder
+            try:
+                yield folder
+            finally:
+                held.pop(key, None)
         finally:
             handle.seek(0)
             if os.name == 'nt':
@@ -129,7 +197,9 @@ def read(engine, source):
     from beyin_v3_sync import _hash
     source_path(engine, source)
     with locked(engine):
-        raw = _bytes(source_path(engine, source))
+        path = source_path(engine, source)
+        source = path.relative_to(engine.root).as_posix()
+        raw = _bytes(path)
         text = raw.decode('utf-8') if raw is not None else None
         if text is not None:
             _human(text)
@@ -138,6 +208,18 @@ def read(engine, source):
 
 
 def apply(engine, request):
+    committed = {}
+    try:
+        return _apply(engine, request, committed)
+    except Exception as exc:
+        # Includes cleanup, path checks, directory fsync, sync, DB readback,
+        # diagnostics and lock release. Every exception after replace is explicit.
+        if committed:
+            raise NotePartialWrite(committed, exc) from exc
+        raise
+
+
+def _apply(engine, request, committed):
     from beyin_v3_sync import _hash, _safe_replace
     if not isinstance(request, dict):
         raise ValueError('note-edit request must be an object')
@@ -151,6 +233,7 @@ def apply(engine, request):
         raise ValueError('expected_sha256 must be a SHA-256 hex digest or null')
     with locked(engine) as folder:
         path = source_path(engine, source)  # Revalidate after waiting for the lock.
+        source = path.relative_to(engine.root).as_posix()
         raw = _bytes(path)
         actual = _hash(raw) if raw is not None else None
         if actual != expected:
@@ -200,10 +283,14 @@ def apply(engine, request):
             path = source_path(engine, source)
             if _bytes(path) != raw:
                 raise NoteConflict('external edit detected before replace; source preserved')
+            details = {'source': source, 'written_sha256': _hash(updated),
+                       'backup': backup.relative_to(engine.root).as_posix() if backup else None}
             _safe_replace(temporary, path)
+            committed.update(details)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+        _fsync_parent(path)
         if _bytes(source_path(engine, source)) != updated:
             raise NoteConflict('external edit detected after replace; reread source')
         # Keep the lock through indexing so another participating writer cannot
