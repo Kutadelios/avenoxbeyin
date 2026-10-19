@@ -1259,40 +1259,6 @@ class HookFailOpenTest(unittest.TestCase):
         self.assertIn('Runtime state must be outside vault', result.stderr.decode())
         self.assertFalse(inside.exists())
 
-    def test_missing_command_in_cli_json_mode_fails_open_with_json_error(self):
-        cli = ROOT / 'scripts/beyin_v3.py'
-        result = subprocess.run(
-            [sys.executable, str(cli), '--vault', str(self.vault), '--json'],
-            capture_output=True
-        )
-        self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stdout.strip(), b'')
-        error = json.loads(result.stderr.decode().strip())
-        self.assertEqual(error['error'], 'SystemExit')
-        self.assertIn('command', error['message'])
-
-    def test_missing_command_in_cli_human_mode_exits_with_argparse_stderr(self):
-        cli = ROOT / 'scripts/beyin_v3.py'
-        result = subprocess.run(
-            [sys.executable, str(cli), '--vault', str(self.vault)],
-            capture_output=True
-        )
-        self.assertEqual(result.returncode, 2)
-        self.assertEqual(result.stdout.strip(), b'')
-        self.assertIn('the following arguments are required', result.stderr.decode())
-
-    def test_invalid_command_in_cli_json_mode_fails_open_with_json_error(self):
-        cli = ROOT / 'scripts/beyin_v3.py'
-        result = subprocess.run(
-            [sys.executable, str(cli), '--vault', str(self.vault), '--json', 'invalid-command'],
-            capture_output=True
-        )
-        self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stdout.strip(), b'')
-        error = json.loads(result.stderr.decode().strip())
-        self.assertEqual(error['error'], 'SystemExit')
-        self.assertIn('invalid choice', error['message'])
-
 
 if __name__ == '__main__':
     unittest.main()

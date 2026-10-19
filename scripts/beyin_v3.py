@@ -889,30 +889,7 @@ def main(argv=None, return_result=False):
     if hasattr(sys.stdin, "reconfigure"):
         sys.stdin.reconfigure(encoding="utf-8-sig")
     argument_parser = parser()
-    is_json = "--json" in (argv or sys.argv)
-    if is_json:
-        import io
-        old_stderr = sys.stderr
-        sys.stderr = io.StringIO()
-    try:
-        args = argument_parser.parse_args(argv)
-    except SystemExit as exc:
-        if is_json:
-            stderr_output = sys.stderr.getvalue()
-            sys.stderr = old_stderr
-            msg = "command parsing failed or missing"
-            if "invalid choice" in stderr_output:
-                msg = "invalid choice"
-            error = {"error": "SystemExit", "message": msg}
-            if return_result:
-                return error, 1
-            import json as _json
-            print(_json.dumps(error, ensure_ascii=True), file=sys.stderr)
-            return 1
-        raise
-    finally:
-        if is_json:
-            sys.stderr = old_stderr
+    args = argument_parser.parse_args(argv)
     receipt_flags = args.command == "receipt" and any(
         getattr(args, name) is not None for name in ("event_id", "summary", "summary_file", "ref", "link", "session"))
     if receipt_flags:
