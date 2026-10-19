@@ -1458,6 +1458,7 @@ class AgentRecoveryTest(AgentFiles):
 
         with patch.object(yakala, '_agent_executable', return_value=['fake-claude']), \
                 patch.object(yakala, '_agent_preflight'), patch.object(yakala, '_agent_owned_process', side_effect=launch), \
+                self.window_process_identity(owned.process.pid), \
                 patch.object(yakala, '_agent_kill') as kill, \
                 patch.object(yakala, '_agent_finalize', return_value=('completed', 'must not happen')) as finalize:
             yakala._agent_run_job(self.vault, self.state, job)
@@ -1744,6 +1745,7 @@ class AgentFinalizationTest(AgentFiles):
         owned, launch = self.successful_cli(fixture)
         with patch.object(yakala, '_agent_executable', return_value=['fake-claude']), \
                 patch.object(yakala, '_agent_preflight'), patch.object(yakala, '_agent_owned_process', side_effect=launch), \
+                self.window_process_identity(owned.process.pid), \
                 patch.object(yakala, '_agent_kill') as kill, patch.object(yakala, '_agent_notify') as notify, \
                 self.receipt_process(fixture, source='missing'):
             yakala._agent_run_job(self.vault, self.state, fixture.job)
