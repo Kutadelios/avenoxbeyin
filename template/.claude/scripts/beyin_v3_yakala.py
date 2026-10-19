@@ -3171,7 +3171,7 @@ def _browser_source_choices(context, clip='', image=None):
 
 
 def _windows_source_cards(canvas, root, sources, y, width, pad, key_label='Alt'):
-    """Each source has a visible keyboard toggle; URL choices are mutually exclusive."""
+    """Each source binds its displayed Tk modifier; URL choices are mutually exclusive."""
     labels = []
 
     def paint():
@@ -3203,7 +3203,7 @@ def _windows_source_cards(canvas, root, sources, y, width, pad, key_label='Alt')
             return 'break'
         for item in (label, detail):
             canvas.tag_bind(item, '<Button-1>', toggle)
-        root.bind('<Alt-' + source['key'] + '>', toggle)
+        root.bind('<' + key_label + '-' + source['key'] + '>', toggle)
         labels.append((source, label))
         y += 52
     paint()
@@ -3835,8 +3835,12 @@ def _linux_clipboard_context():
 def linux_context():
     context = linux_browser_context()
     copied = _linux_clipboard_context()
+    if copied.get('dosyalar'):
+        # The file preview owns this capture. An unseen browser URL could deduplicate
+        # against an older page card and silently skip copying these files on POSIX.
+        return copied
     if context:
-        # Preserve copied files/text. The popup reads a copied URL as its own source;
+        # Preserve copied text. The popup reads a copied URL as its own source;
         # it must not overwrite the independently attested current browser page.
         context.update({key: value for key, value in copied.items() if key != 'url'})
         return context

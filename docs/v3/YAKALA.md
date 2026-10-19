@@ -208,8 +208,10 @@ aninin kaydedilmis noktasini temsil etmez.
 **Secim ve sure.** macOS/Linux tam Tk penceresinde, dogrulanmis sayfa ve ondan farkli imlec
 linki varsa `Imlecin altindaki baglanti` varsayilan, `Etkin sayfa` alternatif gelir.
 macOS'ta Option+I/Option+S, Linux'ta Alt+I/Alt+S veya satira tiklama kullanilir.
-Pano metni/gorseli/linki bu durumda istege bagli secenektir. Dosya secimi ve yalniz sayfa
-akisi mevcut davranisini korur. Tk olmayan `kdialog`/`zenity`/macOS basit soru yedeginde
+Pano metni/gorseli/linki bu durumda istege bagli secenektir. Linux'ta panodaki yerel dosya
+listesi tarayici baglamina onceliklidir: dosya onizlemesi gosterilir ve yalniz dosyalar
+kaydedilir; sayfa ve imlec URL'si karta eklenmez. Yalniz sayfa akisi mevcut davranisini
+korur. Tk olmayan `kdialog`/`zenity`/macOS basit soru yedeginde
 imlec ve sayfa secicisi yoktur; dogrulanmis sayfa kullanilir.
 
 Yeni Windows belge okuyucusu 1 saniye; macOS tarayici okuma toplami 2,5 saniye (AX payi en
