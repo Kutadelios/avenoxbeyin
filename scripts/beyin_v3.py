@@ -309,6 +309,16 @@ def jev_status(state: Path):
     return jev_client().status(state)
 
 
+def jev_context_mode(vault):
+    """The vault's context_mode for the Jev notice only. Jev status and its off switch never depend on a
+    valid preferences file: a malformed or newer file (a key this version does not know) gives no notice."""
+    try:
+        import beyin_v3_preferences as preferences
+        return preferences.read(vault).get("context_mode")
+    except (ValueError, OSError):
+        return None
+
+
 def jev_advice(result):
     laya = result.get("provider") == "laya"
     if result.get("automatic_model_calls"):
@@ -1112,16 +1122,14 @@ def main(argv=None, return_result=False):
                 result = jev_client().status(state)
                 if args.check:
                     result["server"] = jev_client().probe(state)
-                import beyin_v3_preferences as preferences
-                result["context_mode"] = preferences.read(vault).get("context_mode")
+                result["context_mode"] = jev_context_mode(vault)
                 result = jev_advice(result)
             else:
                 if args.check:
                     raise ValueError("--check works only with jev status")
                 result = jev_client().set_mode(state, args.mode, enable=args.enable, disable=args.disable,
                                                 provider=args.provider, laya=laya or None)
-                import beyin_v3_preferences as preferences
-                result["context_mode"] = preferences.read(vault).get("context_mode")
+                result["context_mode"] = jev_context_mode(vault)
                 result = jev_advice(result)
                 result["changed"] = True
         elif args.command == "hook-reconcile":

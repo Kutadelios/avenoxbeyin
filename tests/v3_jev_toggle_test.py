@@ -418,6 +418,18 @@ class StatusReportTest(JevToggleTestCase):
         doctor_turn = json.loads(self.cli('doctor').stdout)
         self.assertNotIn('context_mode_notice', doctor_turn['jev'])
 
+    def test_jev_off_and_status_do_not_depend_on_a_valid_preferences_file(self):
+        # The notice reads preferences only for advice: a key a newer version wrote (rollback) or a
+        # hand-edited file must not turn the Jev off switch or status into an error.
+        self.jev('on', '--enable', 'auto_context')
+        (self.vault / '.beyin-preferences.json').write_text('{"context_mode": "session", "future_key": 1}\n',
+                                                             encoding='utf-8')
+        status = self.jev('status')
+        self.assertNotIn('context_mode_notice', status)
+        off = self.jev('off')
+        self.assertEqual(off['mode'], 'off')
+        self.assertTrue(off['changed'])
+
 
 if __name__ == '__main__':
     unittest.main()
