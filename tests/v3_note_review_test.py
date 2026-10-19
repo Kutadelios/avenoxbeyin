@@ -180,6 +180,73 @@ print(json.dumps(result))
         self.assertEqual(self.engine.sync()['status'], 'succeeded')
         self.assertIn(b'pending creation', path.read_bytes())
 
+    def test_recovered_note_stays_reserved_until_committed_journal_cleanup(self):
+        path = self.pending_creation()
+        entry = next(self.engine.journal.glob('*.json'))
+        code = '''import json, sys
+from beyin_v3_sync import SyncEngine
+import beyin_v3_notes as notes
+engine = SyncEngine(sys.argv[1], sys.argv[2])
+original = notes.locked
+notes.locked = lambda engine, timeout=0.1: original(engine, timeout=timeout)
+try:
+    # Reading takes the same reservation, so a busy writer may stop here already.
+    snapshot = engine.note_read('notes/new.md')
+    result = engine.note_edit({'source': snapshot['source'], 'expected_sha256': snapshot['sha256'],
+                              'edits': [{'old': 'pending creation', 'new': 'deliberate update'}]})
+except Exception as exc:
+    result = {'error': type(exc).__name__, 'write_occurred': getattr(exc, 'write_occurred', False)}
+print(json.dumps(result))
+'''
+        original_unlink = Path.unlink
+        child_results = []
+        def unlink(file, *args, **kwargs):
+            if file == entry:
+                # sync has committed, but has not removed the completed intent.
+                # Let a real writer finish its entire attempt in this exact gap.
+                self.assertTrue(entry.exists())
+                with self.engine.store._connect() as db:
+                    row = db.execute('SELECT r.payload FROM records r JOIN markdown_sources m ON r.id=m.id '
+                                     'WHERE m.source=?', ('notes/new.md',)).fetchone()
+                self.assertIsNotNone(row)
+                self.assertEqual(json.loads(row[0])['source_sha256'], sync._hash(path.read_bytes()))
+                child = subprocess.run([sys.executable, '-c', code, str(self.vault), str(self.state)],
+                                       text=True, capture_output=True, timeout=20,
+                                       env=dict(self.env, PYTHONPATH=str(ROOT / 'template/.claude/scripts')))
+                self.assertEqual(child.returncode, 0, child.stderr)
+                child_results.append(json.loads(child.stdout))
+            return original_unlink(file, *args, **kwargs)
+        with patch.object(Path, 'unlink', unlink):
+            self.assertEqual(self.engine.sync()['status'], 'succeeded')
+        self.assertEqual(child_results, [{'error': 'NoteConflict', 'write_occurred': False}])
+        self.assertIn(b'pending creation', path.read_bytes())
+        self.assertFalse(entry.exists())
+        # Once cleanup releases the reservation, the same edit succeeds normally.
+        snapshot = self.engine.note_read('notes/new.md')
+        result = self.engine.note_edit({'source': snapshot['source'], 'expected_sha256': snapshot['sha256'],
+                                        'edits': [{'old': 'pending creation', 'new': 'deliberate update'}]})
+        self.assertEqual(result['status'], 'written')
+        self.assertIn(b'deliberate update', path.read_bytes())
+
+    def test_replayed_note_survives_sync_rollback_and_releases_reservation(self):
+        path = self.pending_creation()
+        entry = next(self.engine.journal.glob('*.json'))
+        with patch.object(self.engine, '_scan_receipts', side_effect=OSError('synthetic scan failure')):
+            with self.assertRaisesRegex(OSError, 'synthetic scan failure'):
+                self.engine.sync()
+        self.assertIn(b'pending creation', path.read_bytes())
+        self.assertTrue(entry.exists())
+        with self.engine.store._connect() as db:
+            self.assertIsNone(db.execute("SELECT value FROM metadata WHERE key='last_sync_time'").fetchone())
+        def other_writer():
+            with notes.locked(self.engine, timeout=0):
+                return True
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            self.assertTrue(pool.submit(other_writer).result(timeout=10))
+        # The durable source already matches the intent; replay remains idempotent.
+        self.assertEqual(self.engine.sync()['status'], 'succeeded')
+        self.assertFalse(entry.exists())
+
     def test_nested_lock_is_reentrant_only_for_the_holding_thread(self):
         def other_thread():
             with self.assertRaises(notes.NoteConflict):

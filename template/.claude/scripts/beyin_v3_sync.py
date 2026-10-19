@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import ExitStack
 from datetime import datetime, timezone
 import json
 import os
@@ -874,8 +875,7 @@ class SyncEngine:
             candidate['same_content'] = None
         return candidate
 
-    def _recover(self, db):
-        from contextlib import nullcontext
+    def _recover(self, db, note_locks=None):
         from beyin_v3_notes import NoteConflict, locked
         completed, conflicts = [], []
         for entry in sorted(self.journal.glob('*.json')):
@@ -884,8 +884,9 @@ class SyncEngine:
                 # Failed note-create operations can leave an intent behind. Its
                 # replay is a note writer too. Never wait here while holding a DB
                 # transaction: another writer may hold the note lock and need it.
-                guard = locked(self, timeout=0) if intent.get('kind') == 'note' else nullcontext()
-                with guard:
+                with ExitStack() as guard:
+                    if intent.get('kind') == 'note':
+                        guard.enter_context(locked(self, timeout=0))
                     path = self._path(intent['source'])
                     actual = _hash(path.read_bytes()) if path.exists() else None
                     desired = _hash(intent['content'])
@@ -894,6 +895,9 @@ class SyncEngine:
                     elif actual != desired:
                         conflicts.append({'source': intent['source'], 'reason': 'recovery conflict; manual edit preserved'})
                         continue
+                    if note_locks is not None:
+                        # Reserve replayed notes until commit AND journal cleanup.
+                        note_locks.enter_context(guard.pop_all())
                 if intent['kind'] == 'receipt':
                     event = intent['event']
                     for ref in event['refs']:
@@ -998,6 +1002,10 @@ class SyncEngine:
 
     def sync(self, full=False, recover_views=False):
         """Index the vault. `full` reads every source: no stored stat signature is taken on trust."""
+        with ExitStack() as note_locks:
+            return self._sync(full, recover_views, note_locks)
+
+    def _sync(self, full, recover_views, note_locks):
         # Serialize recovery, source scan and projection across local processes.
         with self.store._connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -1016,7 +1024,7 @@ class SyncEngine:
                 except (ValueError, TypeError):
                     pass
             db.execute("INSERT OR REPLACE INTO metadata VALUES ('last_sync_time', ?)", (str(now_sec),))
-            completed, recovery_conflicts = self._recover(db)
+            completed, recovery_conflicts = self._recover(db, note_locks)
             receipt_warnings, receipt_conflicts = self._scan_receipts(db)
             desired_views = _receipt_view_contents(self, db, receipt_warnings)
             view_paths = set(desired_views)
