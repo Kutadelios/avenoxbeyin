@@ -208,8 +208,12 @@ aninin kaydedilmis noktasini temsil etmez.
 **Secim ve sure.** macOS/Linux tam Tk penceresinde, dogrulanmis sayfa ve ondan farkli imlec
 linki varsa `Imlecin altindaki baglanti` varsayilan, `Etkin sayfa` alternatif gelir.
 macOS'ta Option+I/Option+S, Linux'ta Alt+I/Alt+S veya satira tiklama kullanilir.
-Pano metni/gorseli/linki bu durumda istege bagli secenektir. Dosya secimi ve yalniz sayfa
-akisi mevcut davranisini korur. Tk olmayan `kdialog`/`zenity`/macOS basit soru yedeginde
+Pano bağlantısı bu durumda kapalı bir seçenektir. macOS/Linux bu sayfa+imleç yolunda
+pano metninin tazeliğini doğrulamadığından metin kartı sunulmaz; not kutusuna elle
+yazılabilir veya açıkça yapıştırılabilir. Mevcut pano görseli okuyucusu da sayfa varken
+görsel teklif etmez. Linux'ta panodaki yerel dosya listesi tarayıcı bağlamına önceliklidir:
+dosya önizlemesi gösterilir ve yalnız dosyalar kaydedilir; sayfa ve imleç URL'si karta eklenmez.
+Yalnız sayfa akışı mevcut davranışını korur. Tk olmayan `kdialog`/`zenity`/macOS basit soru yedeginde
 imlec ve sayfa secicisi yoktur; dogrulanmis sayfa kullanilir.
 
 Yeni Windows belge okuyucusu 1 saniye; macOS tarayici okuma toplami 2,5 saniye (AX payi en
@@ -281,7 +285,7 @@ ve percent-encoding gosterim farki veya soguk renderer bos sonuca yol acabilir.
 Kısayol anında fare bir linkin
 (ör. YouTube ana sayfasındaki bir video kartı) üstündeyse o link varsayılan kaynak olur; açık
 sayfa **Alt+S**, imlecin altındaki link **Alt+I** ile seçilir. Okuma sırasında pencere veya sekme
-değişirse (başlık değişir) iki link de atılır. Link yoksa kaynak pencerenin görüntüsü sunulur
+değişirse (başlık değişir) iki link de atılır. Link varken de kaynak pencerenin görüntüsü sunulur
 (önce Windows.Graphics.Capture, olmazsa PrintWindow). Görüntü kapalı gelir; **Alt+W** veya satıra
 tıklama ile eklenir, çünkü `isle` görseli ajana olduğu gibi okutur. History/oturum veritabanı okunmaz;
 localhost/özel IP için mevcut ağ güvenliği sınırı korunur.
@@ -325,20 +329,33 @@ Opera Air soguk erisilebilirlik olcumu ve tek UIA uyandirma istegi ayri
 icermiyor. Yandex ortak renderer yolunu kullandigi icin soguk/sicak saglayici sonucu ve
 #399 oncesi/sonrasi ayrica olculmelidir. Eski Opera Air sonucu yeni tarayicilar icin kanit degildir.
 
-Tarayıcıdan okunan link (imlecin altındaki ya da açık sayfa) varsa varsayılan odur; pano içeriği
-yalnız seçenek olarak, işaretsiz sunulur. Link yoksa dinleyicinin başlangıcından itibaren gözlenen,
-başarılı kayıtta kullanılmamış pano revision'ı önceliklidir. İlk kullanım/yeniden başlatmada eldeki panonun yaşı bilinmez: içerik kapalı
-seçenek olarak kalır. Snipping Tool dosya zamanı tek başına otomatik tazelik sağlamaz.
+Tarayıcıdan okunan link (imlecin altındaki ya da açık sayfa) varsa varsayılan odur. Pano metni
+yalnız tazeliği doğrulanmışsa görünür; linkin yanında kapalı gelir. Eski pano metni gösterilmez.
+Link yoksa dinleyicinin başlangıcından itibaren gözlenen, başarılı kayıtta kullanılmamış pano
+revision'ı önceliklidir. İlk kullanım/yeniden başlatmada eldeki panonun yaşı bilinmez: metin
+gizlenir; bağlantı ve görüntü kapalı seçenek olarak kalır. Snipping Tool dosya zamanı tek başına
+otomatik tazelik sağlamaz.
 İptal ve yalnız sayfayı kaydetmek panoyu tüketmez. Pano değişimi yakalama tuşundan sonra
 olduysa yeni içerik kendiliğinden kaynak seçilmez. Metin/görüntü aynı pano oturumundan
 kopyalanır; gecikmeli veya tutarsız okuma güvenli biçimde atlanır.
 
 Seçim yolları: **Alt+I** imlecin altındaki bağlantı, **Alt+S** etkin sayfa, **Alt+A** alıntılanan
 gönderi, **Alt+P** pano bağlantısı, **Alt+M** metin, **Alt+G** pano görüntüsü, **Alt+W** pencere
-görüntüsü.
-Alternatifler birbirini silmez. Bir URL seçimi diğer URL'yi kapatır. Pano metni/dosya eklenen
-mevcut URL kartı da `private` olur. Aynı popup'ın kayıt kimliği tekrar oynatılsa bile ikinci
+görüntüsü. Kısayollar not kutusunda da çalışır; büyük harf ve Türkçe I/İ desteklenir.
+Birden çok bağlantı birlikte seçilebilir. Ana `url` önceliği: imleç bağlantısı, etkin sayfa,
+alıntılanan gönderi, pano bağlantısı. Diğer seçilen adresler kartın `Ek bağlantılar` bölümünde
+ve isteğe bağlı `ek_urller` listesinde tutulur; `isle` ana URL'yi işler. Aynı adres ikinci kart
+olarak gösterilmez. Yalnız bir bağlantıyı kaydetmek için diğerlerinin işaretini kaldır.
+Pano metni, dosya veya mail adresi eklenen mevcut URL kartı da `private` olur.
+Mail adresi ana kaynak yerine `ek_urller` içinde seçilmiş olsa da bütün kart özel kalır.
+Aynı popup'ın kayıt kimliği tekrar oynatılsa bile ikinci
 commit yapılmaz.
+
+Popup sıcak nötr zemin, kiremit vurgu ve küçük kısayol rozetleri kullanır. Seçili kaynaklar
+renkli çerçeve ve onay işaretiyle ayrılır. Pencere kaynak monitörün çalışma alanına sığar;
+uzun kaynak listesi fare tekerleği veya PgUp/PgDn ile kaydırılır. Not kutusu ve kaydetme
+ipuçları yerinde kalır. Pencere görüntüsü kullanıcı seçmeden karta eklenmez; link ve görüntü
+birlikte kaydedilebilir.
 
 Aynı sayfanın ikinci yakalaması yeni kart açmaz, mevcut karta eklenir. Sayfa kimliği her
 sistemde aynı kuralla hesaplanır (senkronlanan bir vault'u Mac ve Windows birlikte okuyabilir):
@@ -374,8 +391,9 @@ Görünür **Kapat** ve Alt+F4 da iptaldir. Windows güvenli masaüstü/UIPI/hoo
 her durumda global Esc garantisi yoktur. Kartın disk commit'i başladıysa Esc kaydedilmiş
 veriyi geriye dönük iptal etmez; yavaş disk I/O'su sırasında arayüz yanıtı gecikebilir.
 
-URL doğrulanmışsa ek ekran görüntüsü işi yapılmaz. Diğer durumda **WGC → PrintWindow →
-görüntü yok** sırası izlenir; her backend ayrı, sonlandırılabilir süreçtedir. Önizleme yöntem
+Pencere görüntüsü için link olsa da **WGC → PrintWindow → görüntü yok** sırası izlenir;
+her backend ayrı, sonlandırılabilir süreçtedir. Bu hazırlık popup açılışına süre ekleyebilir.
+Yakalama başarısızsa görüntü seçeneği oluşmaz. Önizleme yöntem
 adını gösterir. Ekran DC'sinden BitBlt yoktur. Kaynak pencere değişirse sonuç atılır.
 WGC, Windows 10 1903+ API yoludur; destek/izin/sürücü başarısızsa PrintWindow denenir.
 Korumalı/GPU/exclusive-fullscreen uygulamaların tamamı için başarı veya HDR renk doğruluğu
@@ -487,7 +505,7 @@ okur; bir kaynağa gizlenmiş talimat, okunan not metnini bir URL'ye ya da arama
 koydurmaya çalışabilir.
 
 - `kisitli` (varsayılan): genel web araması kapalıdır. `fetch_source` ve `download` yalnız
-  yakalanan adresi ve izinli bir sayfadan çalışanın kendi ayrıştırdığı bağlantıları açar; modelin
+  yakalanan ana adresi, açıkça seçilen ek adresleri ve izinli bir sayfadan çalışanın kendi ayrıştırdığı bağlantıları açar; modelin
   ürettiği yeni adresler reddedilir. Bağlantı seçimi ve zamanlama gibi yan kanallar kalır; bu tam
   bir veri sızıntısı koruması değildir.
 - `acik`: Claude'un web araması (Codex'te hosted arama) ve herkese açık her adres kullanılabilir.
@@ -497,6 +515,15 @@ koydurmaya çalışabilir.
   yüklediği içerikten hiçbir metin arama sorgusuna, adrese ya da dosya adına konmaz, bunu
   gerektiren iş kullanıcının izni için `onay-bekliyor` olur. Bu bir model talimatıdır, teknik bir
   engel değildir.
+
+Çoklu kaynak kartındaki `ek_urller`, kuyruğa gönderilirken mevcut kart ve kuyruk kilitleri
+altında doğrulanıp işin `extra_urls` listesine sabitlenir. Kart gövdesindeki bağlantılar,
+modelin ürettiği URL'ler ve sonradan yapılan kart değişiklikleri bu işe yeni yetki vermez;
+aynı teslimin tekrarı ilk listeyi korur. Eski işlerde alan yoksa yalnız ana kaynak kullanılır.
+Ek liste en fazla 63 adres, adres başına 8192 karakter ve JSON olarak 64 KiB olabilir.
+İstek, ayarlar ve kaynakların birlikte yazılacak ilk iş kaydı 96 KiB ile sınırlıdır;
+128 KiB okuyucu sınırında sonraki çalışma/sonuç alanlarına yer bırakılır. Sınır aşılırsa
+kart ajan durumuna geçirilmeden hata verilir; kartın kendisi korunur.
 
 İki ağ kipinde de `fetch_source` ve `download` iş başına toplam **8 çağrı** paylaşır. Başarısız
 izinli denemeler de bu bütçeden düşer. Sayaç dış isteğe çıkmadan önce diske kaydedilir;
@@ -708,12 +735,15 @@ tekrarlanan anahtar, bozuk/kapanmamış metadata veya desteklenmeyen biçim sess
 
 Claude profili `dontAsk`, `--permission-prompts none`, sınırlı built-in araçlar ve yalnız bu
 MCP yapılandırmasıyla çalışır; `--permission-prompts` için en az 2.1.259 gerekir. Codex için
-desteklenen en eski kararlı sürüm **0.155.1**'dir. Codex profili `-a never`, `--strict-config`,
-`-c agents.enabled=false` ve her çalıştırma için rastgele adlandırılan bir izin profili kullanır.
-Bu profilin tek dosya sistemi girdisi `":root"="deny"` olduğu için yerel araçlara okuma ya da
-yazma kökü verilmez. Profil `-c default_permissions=...` ile seçilir; `-s read-only` eklenmez:
-eski sandbox seçicisi adlı profili devre dışı bırakır. Gizli çalışmada `--ignore-rules` da
-kullanılır. Ön kontrol önce bayraksız
+desteklenen en eski kararlı sürüm **0.155.1**'dir. Codex profili `-a never`, `--strict-config`
+ve `-c agents.enabled=false` kullanır. Linux/macOS'ta her çalıştırmaya rastgele adlı bir
+izin profili verilir. Tek dosya sistemi girdisi `":root"="deny"` olduğu için yerel
+araçlara okuma/yazma kökü verilmez. Bu profil `-c default_permissions=...` ile seçilir;
+POSIX'te `-s read-only` eklenmez: eski seçici adlı profili devre dışı bırakır.
+**Windows'ta `-s read-only` uyumluluk yolu kullanılır; içerik tahmini kanalı açık kalır.**
+Windows `elevated` sandbox kök okuma izni istediği için root-deny başlangıcı durdurmuştur;
+Windows komutuna named profile eklenmez. Kullanıcının sandbox türü/config'i değiştirilmez.
+Gizli çalışmada `--ignore-rules` da kullanılır. Ön kontrol önce bayraksız
 `codex features list` düz tablosunu okur; bu komuta `--json` verilmez. Ardından işin kapatma
 bayraklarıyla etkin durumları doğrular. Eksik, kaldırılmış, yinelenen veya ayrıştırılamayan
 gerekli özellik; eski/ön sürüm; başarısız ya da aşırı büyük envanter çıktısı işi durdurur.
@@ -731,7 +761,7 @@ config dosyası değiştirilmez. Eklenti/app kapıları da iş bazında kapanır
 durum doğrulanamazsa iş durur; etkin MCP'si bulunan her makine topluca reddedilmez.
 Codex'in MCP araçlarını çağıran kod modu korunur. Genel kabuk veya yerel dosya sistemi aracı
 olarak açılmaz. Web araması yalnız `ag: acik` iken
-açıktır (Claude `WebSearch`, Codex `web_search="live"`). `bypassPermissions` ve tam dosya sistemi erişimi verilmez. [belge: CLI, config ve izin kaynakları]
+açıktır (Claude `WebSearch`, Codex `web_search="live"`). `bypassPermissions` ve tam dosya sistemi yazma izni verilmez. [belge: CLI, config ve izin kaynakları]
 
 Önceki dalın bakımcı ölçümü (18.10.2026; Claude Code 2.1.302, Codex 0.160.0, macOS): `kisitli` ağda Claude oturumunun araç listesi
 yalnız altı `mcp__yakala__*` aracıdır, `acik` ağda buna `WebSearch` eklenir; Bash ve dosya araçları
@@ -750,7 +780,7 @@ bitirdiğini veya Windows sandbox davranışını ölçmez.
 **Codex `apply_patch`, #384 bulgu 2 için yeni düzeltme (19.10.2026 UTC):** Araç yüzeyinde
 `apply_patch` kalabilir; `apply_patch_freeform` 0.155.1 ve güncel kararlı 0.163.0'da
 kaldırılmıştır ve güvenlik anahtarı değildir. Eski `read-only` profili 0.163.0'da da doğru
-ve yanlış satır tahminine farklı hatalar verdi. Bu dal bunun yerine resmî belgelerdeki
+ve yanlış satır tahminine farklı hatalar verdi. Bu dal Linux/macOS'ta resmî belgelerdeki
 **adlı dosya sistemi izin profilini** kullanır. `":root"="deny"`, yama doğrulamasının
 dosya okumasına da uygulanır. Kullanıcının aynı ad altındaki daha dar izinleri birleşerek
 yeniden açılmasın diye her komut için yeni 128 bit rastgele profil adı üretilir; config
@@ -772,8 +802,14 @@ durumları kapsar; yeni izin seçiminin bu legacy ayarlar altında da etkinliği
 ayarların sessizce yok sayılmasını önler; gelecekteki bütün davranış değişikliklerini
 saptayan bir güvenlik kanıtı değildir. En yeni görülen ön sürüm **0.164.0-alpha.3** yalnız
 kaynakta incelendi; mevcut kararlı sürüm kapısı bunu kabul etmez. Linux'ta bu tahmin kanalı
-kapatıldı. **Native Windows ve macOS uygulaması henüz ölçülmedi**; aşağıdaki masaüstü
-matrisiyle doğrulanmalıdır. Kaynak, hash ve tekrar komutları:
+kapatıldı; macOS native sonucu henüz ölçülmedi. **Windows bulgu 2 kısmen açıktır:**
+kullanıcı 19.10.2026'da gerçek Windows 11 / Codex 0.155.1 üzerinde `dc2a1bc2` root-deny
+profilinin `AGENTS.md` başlangıcını durdurduğunu, eski `69ac79c` salt okuma yolunun iki
+görünümde de tamamlandığını bildirdi. Bu dal Windows'a salt okuma seçicisini geri getirir;
+yazma ve diğer araç kısıtları korunur, `apply_patch` tahmin doğrulaması kapanmış sayılmaz.
+Düzeltilmiş dalın native Windows başlangıcı ve receipt/Last-Session zinciri henüz
+ölçülmedi. POSIX root-deny native testleri Windows'ta gerekçeli olarak atlanır; bu atlama
+Windows başarısı değildir. Kaynak, seçenek değerlendirmesi ve tekrar komutları:
 [Codex dosya okuma sınırı incelemesi](CODEX-APPLY-PATCH.md).
 
 Muzik araclari (`music_info`, `music_identify`) bu olcumlerden sonra eklendi; sekiz aracli
@@ -894,13 +930,12 @@ Gerçek kullanıcı sırları yerine ayırt edilebilir zararsız test notları k
 9. Önceden etkin MCP ve eklenti bulunan geçici CLI profilinde işi çalıştır; başka sunucunun
    aracı açılmamalı, kullanıcı config hash'i değişmemeli. Claude `--model haiku` ve özel
    executable seçildikten sonra Codex'e geç; yeni iş varsayılan Codex seçeneğiyle başlamalı.
-10. Sahte notlarla yeni Codex dosya okuma profilini hem gizli hem pencere kipinde doğrula:
-    vault içinde/dışında, göreli/mutlak yollarda Update/Move/Delete ve mevcut/yeni Add
-    reddedilmeli. Aynı yol ve işlemde doğru/yanlış satır tahmini aynı içeriksiz hataya
-    dönmeli; hiçbir mevcut dosyanın hash'i değişmemeli. Windows sandbox türünü de kaydet.
-    Ardından aynı oturumda izinli MCP not okuması, private reddi, sonuç, receipt ve
-    Last-Session zincirini doğrula. Bu ölçümü geçmeyen kurulumu kapalı okuma sınırı olarak
-    sunma; `-s read-only` veya ek okuma kökü vererek sınırı gevşetme.
+10. Windows Codex salt okuma uyumluluk yolunu hem gizli hem pencere kipinde doğrula:
+    `AGENTS.md` ve normal hafıza başlangıcı, izinli MCP okuması, private reddi, sonuç,
+    receipt ve Last-Session zinciri çalışmalı. Sandbox türünü ve CLI sürümünü kaydet.
+    Zararsız notlarla vault içinde/dışında Update/Move/Delete ve mevcut/yeni Add yazmaları
+    reddedilmeli; hiçbir mevcut dosyanın hash'i değişmemeli. Doğru/yanlış bağlam hataları
+    farklı olabilir: Windows `-s read-only` yolunu kapalı içerik tahmin sınırı olarak sunma.
 11. İzinli `fetch_source`/`download` çağrılarını karışık ve başarısız denemelerle toplam 8'e
     getir. Dokuzuncu çağrı ağdan önce reddedilmeli. Aynı işe yeni MCP bağlantısı açmak hakkı
     yenilememeli; `complete` yine çalışmalı. `acik` araç açıklaması yeni public URL'yi
@@ -920,6 +955,14 @@ Gerçek kullanıcı sırları yerine ayırt edilebilir zararsız test notları k
 15. Ajan kapalı normal yakalama vault köküne yeni kilit yazmamalı. Farklı `--state` seçimleri
     aynı kartı eşzamanlı güncellerken kayıt kaybolmamalı. Derin arşivdeki Last-Session'lar
     otomatik seçimi etkilememeli; birden fazla ilk düzey companion açık ayar istemeli.
+
+**Linux/macOS için ayrı Codex okuma sınırı ölçümü:**
+[isteğe bağlı gerçek CLI regresyonunu](CODEX-APPLY-PATCH.md) çalıştır. Root-deny altında
+göreli/mutlak, vault içi/dışı Update/Move/Delete ve Add denemelerinde dosyalar korunmalı;
+aynı yol/işlemde doğru ve yanlış bağlam aynı içeriksiz hataya dönmeli. Aynı oturumdaki
+normal hook ve izinli MCP teslimi de geçmeli. Başlangıç/politika hatasını başarı sayma;
+bu POSIX profilini salt okuma seçicisi veya ek okuma köküyle otomatik genişletme. Linux
+ölçümü macOS native ölçümü değildir; platform, CLI ve gerçek sonucu ayrı kaydet.
 
 **Esc ve Opera One/GX, #383 için ek masaüstü ölçümü:**
 
@@ -1080,7 +1123,12 @@ mevcut islerin bitmesini bekle. Zaman/butce sinirlari her is icin mevcut ayarlar
 kopyalanir; yeni bir toplu toplam harcama siniri eklenmez.
 
 Gonderim, ayni kuyruk ve kart kilitleri altinda guncel ayar, tum secili kartlar,
-istekler, sahiplik ve kapasiteyi denetler. Ardindan
+istekler, acikca secilmis ek kaynaklar, sahiplik ve kapasiteyi denetler. Her uyenin
+birlesik UTF-8 is girdisi tekli ajanla ayni 96 KiB sinirina tabidir; sonraki calisma
+ve sonuc alanlari icin yer ayrilir. Gecersiz ek kaynak veya buyuk is girdisi
+onizlemede ilgili kartin `hata` alaninda gorunur ve `gonderilebilir` yanlis olur.
+Gonderimde tum uyeler ilk manifest, is veya kart yazimindan once dogrulanir;
+bu girdi hatalarinda secimin hicbir uyesi gonderilmez. Ardindan
 `<state>/yakala/ajan/batches/<toplu-UUID>.json` dosyasina tum uye kimliklerini
 ve acik isteklerini yazar; her uyenin isi mevcut `jobs/<is-UUID>/job.json`
 duzeninde kalir. Son asamada tek worker uyandirma cagrisi yapilir. Manifest,
@@ -1138,7 +1186,12 @@ silme komutu degildir. Daha sonra karti tekrar ajana vermek yeni, acik bir
 `--gonder` veya `ajan-gonder` talimati gerektirir.
 
 Toplu is ayni ag ve arac sinirlarini korur. `ag: kisitli` her uyenin kendi
-yakalanan URL'si ve izinli sayfalardan donen baglantilarla sinirlidir;
+yakalanan URL'si, gonderim aninda kartin `ek_urller` alaninda acikca secilmis
+adresleri ve izinli sayfalardan donen baglantilarla sinirlidir. Ek adresler o
+uyenin kalici is kaydina kopyalanir; kart govdesindeki bir URL, farkli bir sorgu
+veya kartin sonradan duzenlenmesi mevcut isin kaynak iznini genisletmez.
+Ek kaynaklar tekli ajanla ayni en fazla 63 adres, adres basina 8192 karakter ve
+toplam 64 KiB kayit sinirini kullanir;
 `ag: acik` mevcut gizlilik talimatini korur.
 Neden veya ortak istekte "sesi indir" yazmasi dis servise ses yukleme ya da ek
 arac izni vermez. Toplu is bu tur izinleri otomatik uretmez.
@@ -1424,7 +1477,8 @@ elde olanla devam edilir.
 - Yakalama ağa çıkmaz; yalnız vault'a bir dosya yazar.
 - Ağ yalnız `isle` adımında ve yalnız yakaladığın kaynaklar için kullanılır. Defuddle,
   X gönderisi sayfada yoksa gönderi adresini FxTwitter API'sine sorar.
-- Mail, pano metni ve dosya kartları `visibility: private` ile yazılır.
+- Mail, pano metni ve dosya kartları `visibility: private` ile yazılır. Seçilen ek
+  bağlantılardan biri mail adresiyse ana kaynak herkese açık olsa da aynı kural uygulanır.
 - Kaldırmak için `python3 beyin.py yakala kaldir`: kısayol, skill ve bildirim gider, kartların kalır.
 
 ## Komutlar

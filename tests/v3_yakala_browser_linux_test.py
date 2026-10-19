@@ -402,8 +402,8 @@ class LinuxReaderProtocolTest(unittest.TestCase):
         result, _ = self.run_endpoint(b'{}')
         self.assertEqual(result, self.value)
 
-    def test_context_retains_clipboard_fallback_and_copied_files_text(self):
-        for copied in ({'url': 'https://copied.example/'}, {'metin': 'Copied text'}, {'dosyalar': ['/tmp/document.txt']}, {}):
+    def test_context_retains_clipboard_fallback_and_copied_text(self):
+        for copied in ({'url': 'https://copied.example/'}, {'metin': 'Copied text'}, {}):
             with patch.object(y, 'linux_browser_context', return_value={}), \
                     patch.object(y, '_linux_clipboard_context', return_value=copied):
                 self.assertEqual(y.linux_context(), copied)
@@ -411,9 +411,16 @@ class LinuxReaderProtocolTest(unittest.TestCase):
                     patch.object(y, '_linux_clipboard_context', return_value=copied):
                 result = y.linux_context()
             self.assertEqual(result['url'], PAGE)
-            for key in ('metin', 'dosyalar'):
-                if key in copied:
-                    self.assertEqual(result[key], copied[key])
+            if 'metin' in copied:
+                self.assertEqual(result['metin'], copied['metin'])
+
+    def test_copied_files_replace_browser_context_including_hover_and_titles(self):
+        copied = {'dosyalar': ['/tmp/document.txt', '/tmp/other.pdf']}
+        for browser in ({}, self.value):
+            with self.subTest(browser=browser), \
+                    patch.object(y, 'linux_browser_context', return_value=dict(browser)), \
+                    patch.object(y, '_linux_clipboard_context', return_value=copied):
+                self.assertEqual(y.linux_context(), copied)
 
 
 class Function:
