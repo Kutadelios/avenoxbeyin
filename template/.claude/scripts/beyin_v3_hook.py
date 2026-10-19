@@ -350,29 +350,21 @@ def receipt_reminder(payload, state, harness, event, vault=None):
             return None
 
         # Receipt exists! Check if receipt declared learning or explicitly claimed no learning.
-        summary = receipt.get("summary", "")
-        has_learning = _has_declared_learning(summary)
-        is_bare_no_learning = _is_bare_no_learning(summary)
-        knowledge_saved = marker.get("knowledge") is True or _has_knowledge_update(vault, receipt, since)
-        candidates_staged = _has_staged_candidates(state, session, since)
-
-        if not kdone.exists() and not knowledge_saved and not candidates_staged:
-            if has_learning:
+        # The knowledge tree walk and the ledger read run only when a reminder is still due.
+        if not kdone.exists():
+            summary = receipt.get("summary", "")
+            reason = (KNOWLEDGE_REMINDER if _has_declared_learning(summary)
+                      else NO_LEARNING_CHALLENGE_REMINDER if _is_bare_no_learning(summary) else None)
+            if (reason and marker.get("knowledge") is not True and
+                    not _has_staged_candidates(state, session, since) and
+                    not _has_knowledge_update(vault, receipt, since)):
                 folder.mkdir(parents=True, exist_ok=True)
                 try:
                     with kdone.open("x", encoding="utf-8"):
                         pass
                 except FileExistsError:
                     return None
-                return {"decision": "block", "reason": KNOWLEDGE_REMINDER}
-            elif is_bare_no_learning:
-                folder.mkdir(parents=True, exist_ok=True)
-                try:
-                    with kdone.open("x", encoding="utf-8"):
-                        pass
-                except FileExistsError:
-                    return None
-                return {"decision": "block", "reason": NO_LEARNING_CHALLENGE_REMINDER}
+                return {"decision": "block", "reason": reason}
 
         edited.unlink(missing_ok=True)  # later edits open a new window
         return None

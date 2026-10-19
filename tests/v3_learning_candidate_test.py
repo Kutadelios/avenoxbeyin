@@ -185,6 +185,22 @@ class LearningCandidateLedgerTest(unittest.TestCase):
                 res = hook.receipt_reminder({'session_id': session_id}, self.state, 'claude', 'Stop', vault=self.vault)
                 self.assertEqual(res, {'decision': 'block', 'reason': reason})
 
+    def test_stop_walks_the_knowledge_tree_only_when_a_reminder_is_due(self):
+        from unittest import mock
+        for name, summary in (('plain', 'Refactored auth module.'),
+                              ('explained-yok', 'Refactored auth module.\nÖğrenilen: yok (rutin)')):
+            with self.subTest(name):
+                session_id = 'walk-' + name
+                session_hash = hashlib.sha256(session_id.encode('utf-8')).hexdigest()[:24]
+                hook.receipt_reminder({'session_id': session_id}, self.state, 'claude', 'PostToolUse', vault=self.vault)
+                time.sleep(0.02)
+                self.engine.receipt('walk-' + name, summary, ['notes/task.md'], 'claude', session=session_hash)
+                with mock.patch.object(hook, '_has_knowledge_update', return_value=False) as walk, \
+                        mock.patch.object(hook, '_has_staged_candidates', return_value=False) as ledger:
+                    res = hook.receipt_reminder({'session_id': session_id}, self.state, 'claude', 'Stop', vault=self.vault)
+                self.assertIsNone(res)
+                self.assertEqual((walk.call_count, ledger.call_count), (0, 0))
+
     def test_secret_redaction_in_candidate(self):
         secret_token = "sk-" + "a" * 30
         rec = learning.stage_candidate(self.state, "sess-sec", f"Use API token {secret_token} for auth")
