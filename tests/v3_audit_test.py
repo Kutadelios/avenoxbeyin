@@ -259,5 +259,67 @@ class MemoryAuditorTest(unittest.TestCase):
         self.assertIn("Denetci Siniri", res_human.stdout)
 
 
+    SHARED = ("Kuyruk servisi yeniden deneme politikasi bekleme suresi zaman asimi "
+              "yapilandirmasi uretim ortami izleme panosu alarm esigi.\n")
+
+    def _public_twin(self):
+        (self.knowledge / 'kuyruk.md').write_text(
+            "---\ntitle: Kuyruk\nupdated_at: 2026-09-01\n---\n" + self.SHARED, encoding='utf-8')
+
+    def test_private_or_kasa_target_is_refused_without_printing_its_terms(self):
+        """An explicit target passes the same boundary as the scan; nothing of it reaches the report."""
+        self._public_twin()
+        (self.knowledge / 'ozel-plan.md').write_text(
+            "---\nvisibility: private\nupdated_at: 2026-10-01\n---\n" + self.SHARED + "zzgizlikelime\n",
+            encoding='utf-8')
+        kasa = self.vault / 'Kasa'
+        kasa.mkdir()
+        (kasa / 'not.md').write_text(
+            "---\nupdated_at: 2026-10-02\n---\n" + self.SHARED + "zzkasakelime\n", encoding='utf-8')
+        outside = Path(self.tmp.name) / 'outside.md'
+        outside.write_text(self.SHARED + "zzdisarikelime\n", encoding='utf-8')
+        for target in ('knowledge/ozel-plan.md', 'Kasa/not.md', str(outside)):
+            with self.subTest(target=target), self.assertRaises(ValueError) as caught:
+                audit_module.audit_memory(self.vault, state=self.state, target_file=target, min_shared=3)
+            self.assertNotIn('zz', str(caught.exception))
+        result, code = self._cli_result(['audit', 'knowledge/ozel-plan.md', '--min-shared', '3'])
+        self.assertEqual(code, 1)
+        self.assertNotIn('zzgizli', json.dumps(result))
+
+    def test_symlinked_note_is_not_read(self):
+        """A note-shaped link in a public folder must not carry a kasa note into the report."""
+        self._public_twin()
+        kasa = self.vault / 'Kasa'
+        kasa.mkdir()
+        secret = kasa / 'gizli.md'
+        secret.write_text("---\nupdated_at: 2026-10-02\n---\n" + self.SHARED + "zzkasakelime\n", encoding='utf-8')
+        try:
+            os.symlink(secret, self.knowledge / 'alias.md')
+        except (OSError, NotImplementedError):
+            self.skipTest('symlinks are not available')
+        report = audit_module.audit_memory(self.vault, state=self.state, min_shared=3)
+        self.assertEqual(report['notes_scanned'], 1)
+        self.assertNotIn('zzkasa', json.dumps(report))
+        with self.assertRaises(ValueError):
+            audit_module.audit_memory(self.vault, state=self.state, target_file='knowledge/alias.md', min_shared=3)
+
+    def test_bom_and_yaml_false_keep_private_and_untrusted_notes_out(self):
+        """The engine's parser reads a BOM frontmatter and `trusted: false`; the audit must agree."""
+        self._public_twin()
+        (self.knowledge / 'windows.md').write_bytes(
+            b'\xef\xbb\xbf---\r\nvisibility: private\r\n---\r\n' + self.SHARED.encode() + b'zzbomkelime\r\n')
+        (self.knowledge / 'dis-kaynak.md').write_text(
+            "---\ntrusted: false\n---\n" + self.SHARED + "zzguvensiz\n", encoding='utf-8')
+        report = audit_module.audit_memory(self.vault, state=self.state, min_shared=3)
+        self.assertEqual(report['notes_scanned'], 1)
+        self.assertEqual(report['findings'], [])
+
+    def _cli_result(self, args):
+        cmd = [sys.executable, str(self.vault / '.claude/scripts/beyin_v3_cli.py'),
+               '--vault', str(self.vault), '--state', str(self.state)] + args
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', env=inherited_env())
+        text = res.stdout if res.returncode == 0 else res.stderr
+        return json.loads(text), res.returncode
+
 if __name__ == '__main__':
     unittest.main()

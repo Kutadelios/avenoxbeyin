@@ -24,53 +24,20 @@ _MODULE_DIR = str(Path(__file__).resolve().parent)
 if _MODULE_DIR not in sys.path:
     sys.path.insert(0, _MODULE_DIR)
 
-try:
-    from beyin_v3 import (
-        _tokens,
-        _token_counts,
-        _stem,
-        STOPWORDS,
-        _strict_terms,
-        sensitive_source,
-        sensitive_excluded,
-        sensitive_fold as fold,
-    )
-except ImportError:
-    _TR_FOLD = str.maketrans({'ş': 's', 'ğ': 'g', 'ü': 'u', 'ö': 'o', 'ç': 'c', 'ı': 'i', 'â': 'a', 'î': 'i', 'û': 'u'})
-
-    def fold(text):
-        t = unicodedata.normalize('NFKD', str(text or '')).casefold()
-        t = ''.join(c for c in t if not unicodedata.combining(c)).replace('ı', 'i')
-        return t.translate(_TR_FOLD)
-
-    def _stem(word):
-        w = fold(word)
-        return w[:8] if len(w) > 8 else w
-
-    def _token_counts(text):
-        text = unicodedata.normalize('NFKD', str(text).casefold())
-        text = ''.join(c for c in text if not unicodedata.combining(c)).replace('ı', 'i')
-        return Counter(_stem(w) for w in re.findall(r'[a-z0-9]+', text))
-
-    def _tokens(text):
-        return set(_token_counts(text))
-
-    STOPWORDS = _tokens(
-        "the a an is are was were what which who when where how why of to in on at for from with and or "
-        "does did do has have latest current please tell about my our this that it its project projects "
-        "status decision decisions show find get ve veya bir bu su o ne kim nasil hangi nedir neydi mi mu "
-        "icin ile bana benim bizim olarak olan oldu en son guncel soyle getir bul yok say ignore disregard no"
-    )
-
-    def _strict_terms(terms):
-        return {t for t in terms if len(t) >= 2 and not (t.isdigit() and len(t) < 3)}
-
-    def sensitive_excluded(name):
-        f = fold(name)
-        return any(k in f for k in ('kasa', 'sifre', 'gizli', 'private', 'secret', 'password'))
-
-    def sensitive_source(source):
-        return isinstance(source, str) and any(sensitive_excluded(part) for part in Path(source).parts[:-1])
+# No local fallback: a weaker copy of the kasa-word list would silently widen what the
+# report may print. The runtime modules always ship next to this file.
+from beyin_v3 import (
+    _tokens,
+    _token_counts,
+    _stem,
+    _trusted_record,
+    STOPWORDS,
+    _strict_terms,
+    sensitive_source,
+    sensitive_excluded,
+    sensitive_fold as fold,
+)
+from beyin_v3_sync import parse as _parse_note
 
 
 # Status antonym pairs for contradiction detection (Turkish & English)
@@ -104,44 +71,69 @@ SYSTEM_EXCLUDED_FILES = {
 
 
 def parse_frontmatter_and_body(text: str) -> tuple[dict, str]:
-    """Parse YAML or JSON frontmatter and return (metadata, body)."""
-    if not text.startswith('---'):
-        return {}, text
-    lines = text.splitlines(keepends=True)
-    end = None
-    for i in range(1, len(lines)):
-        if lines[i].strip() == '---':
-            end = i
-            break
-    if end is None:
-        return {}, text
-    header = ''.join(lines[1:end]).strip()
-    body = ''.join(lines[end + 1:]).strip()
-    if header.startswith('{'):
-        try:
-            data = json.loads(header)
-            if isinstance(data, dict):
-                return data, body
-        except Exception:
-            return {}, body
-    meta = {}
-    for line in header.splitlines():
-        line = line.strip()
-        if not line or line.startswith('#'):
-            continue
-        m = re.match(r'^([A-Za-z0-9_-]+)\s*:\s*(.*)$', line)
-        if m:
-            key, raw_val = m.group(1), m.group(2).strip()
-            if ' #' in raw_val:
-                raw_val = raw_val.split(' #')[0].strip()
-            if (raw_val.startswith('"') and raw_val.endswith('"')) or (raw_val.startswith("'") and raw_val.endswith("'")):
-                val = raw_val[1:-1]
-            elif raw_val.startswith('[') and raw_val.endswith(']'):
-                val = [item.strip().strip('"\'') for item in raw_val[1:-1].split(',') if item.strip()]
-            else:
-                val = raw_val
-            meta[key] = val
+    """Frontmatter through the sync engine's parser, so a BOM, YAML booleans and Obsidian
+    lists read exactly as they do for context. Raises ValueError for frontmatter the
+    engine would not index either."""
+    meta, body = _parse_note(text)
+    return meta, body.strip()
+
+
+def _auditable(path: Path, rel_path: str) -> tuple[dict, str] | None:
+    """(metadata, body) when a note may appear in the report, else None.
+
+    The context boundary, not a looser copy of it: no symlink (the folder check would name
+    one file and the read would open another), no kasa-class folder, frontmatter the engine
+    can parse, visibility public or internal (missing means internal) and a trusted record.
+    """
+    if path.is_symlink() or sensitive_source(rel_path):
+        return None
+    try:
+        meta, body = parse_frontmatter_and_body(path.read_text(encoding='utf-8', errors='replace'))
+    except (OSError, ValueError):
+        return None
+    if meta.get('visibility', 'internal') not in ('public', 'internal') or not _trusted_record(meta):
+        return None
     return meta, body
+
+
+def _candidate(path: Path, rel_path: str, meta: dict, body: str) -> dict:
+    title = str(meta.get('title') or '').strip()
+    if not title:
+        for line in body.splitlines():
+            if line.startswith('# '):
+                title = line[2:].strip()
+                break
+    if not title:
+        title = path.stem
+    created_val = meta.get('created') or meta.get('created_at') or meta.get('date')
+    created_ts = parse_date_to_timestamp(created_val)
+    modified_val = meta.get('modified') or meta.get('updated_at') or meta.get('modified_at')
+    updated_ts = parse_date_to_timestamp(modified_val)
+    if updated_ts is None:
+        try:
+            updated_ts = path.stat().st_mtime
+        except OSError:
+            updated_ts = 0.0
+    if created_ts is None:
+        created_ts = updated_ts
+    body_tokens = _strict_terms(_tokens(body) - STOPWORDS)
+    title_tokens = _strict_terms(_tokens(title) - STOPWORDS)
+    supersedes = meta.get('supersedes', [])
+    if isinstance(supersedes, str):
+        supersedes = [supersedes]
+    elif not isinstance(supersedes, list):
+        supersedes = []
+    return {
+        'path': rel_path,
+        'full_path': path,
+        'title': title,
+        'tokens': body_tokens | title_tokens,
+        'status': str(meta.get('status', '')).lower().strip(),
+        'created_ts': created_ts,
+        'updated_ts': updated_ts,
+        'words_count': len(re.findall(r'\w+', body)),
+        'supersedes': [str(s).strip() for s in supersedes if s],
+    }
 
 
 def parse_date_to_timestamp(val: str | None) -> float | None:
@@ -205,78 +197,10 @@ def scan_audit_candidates(vault: Path, state: Path | None = None) -> list[dict]:
             except ValueError:
                 rel_path = full_path.as_posix()
 
-            if sensitive_source(rel_path):
+            checked = _auditable(full_path, rel_path)
+            if checked is None:
                 continue
-
-            try:
-                content = full_path.read_text(encoding='utf-8', errors='replace')
-            except OSError:
-                continue
-
-            meta, body = parse_frontmatter_and_body(content)
-
-            # Enforce privacy boundary: private notes are not candidates for overlap/leak reporting
-            if str(meta.get('visibility', '')).lower() == 'private':
-                continue
-
-            # Enforce trust boundary: untrusted sources are skipped
-            if (
-                str(meta.get('trust', '')).lower() == 'untrusted'
-                or meta.get('trusted') is False
-                or str(meta.get('status', '')).lower() == 'untrusted'
-                or str(meta.get('kind', '')).lower() == 'untrusted'
-            ):
-                continue
-
-            # Extract title
-            title = str(meta.get('title') or '').strip()
-            if not title:
-                for line in body.splitlines():
-                    if line.startswith('# '):
-                        title = line[2:].strip()
-                        break
-            if not title:
-                title = full_path.stem
-
-            # Extract timestamps
-            created_val = meta.get('created') or meta.get('created_at') or meta.get('date')
-            created_ts = parse_date_to_timestamp(created_val)
-            modified_val = meta.get('modified') or meta.get('updated_at') or meta.get('modified_at')
-            updated_ts = parse_date_to_timestamp(modified_val)
-            if updated_ts is None:
-                try:
-                    updated_ts = full_path.stat().st_mtime
-                except OSError:
-                    updated_ts = 0.0
-            if created_ts is None:
-                created_ts = updated_ts
-
-            # Extract tokens
-            body_tokens = _strict_terms(_tokens(body) - STOPWORDS)
-            title_tokens = _strict_terms(_tokens(title) - STOPWORDS)
-            all_tokens = body_tokens | title_tokens
-
-            # Word count
-            words_count = len(re.findall(r'\w+', body))
-
-            # Supersedes references
-            supersedes = meta.get('supersedes', [])
-            if isinstance(supersedes, str):
-                supersedes = [supersedes]
-            elif not isinstance(supersedes, list):
-                supersedes = []
-
-            candidates.append({
-                'path': rel_path,
-                'full_path': full_path,
-                'title': title,
-                'tokens': all_tokens,
-                'status': str(meta.get('status', '')).lower().strip(),
-                'created_ts': created_ts,
-                'updated_ts': updated_ts,
-                'words_count': words_count,
-                'supersedes': [str(s).strip() for s in supersedes if s],
-            })
+            candidates.append(_candidate(full_path, rel_path, *checked))
 
     return candidates
 
@@ -430,11 +354,10 @@ def audit_memory(
     target_candidate = None
 
     if target_file:
-        target_path = Path(target_file)
-        if not target_path.is_absolute():
-            target_path = (vault / target_path).resolve()
-        else:
-            target_path = target_path.resolve()
+        given = Path(target_file)
+        if not given.is_absolute():
+            given = vault / given
+        target_path = given.resolve()
 
         if not target_path.is_file():
             raise FileNotFoundError(f"Target file not found: {target_file}")
@@ -442,7 +365,7 @@ def audit_memory(
         try:
             target_rel = target_path.relative_to(vault).as_posix()
         except ValueError:
-            target_rel = target_path.as_posix()
+            raise ValueError("audit target must be a note inside the vault") from None
 
         # Find or construct target candidate
         for c in candidates:
@@ -451,33 +374,12 @@ def audit_memory(
                 break
 
         if target_candidate is None:
-            # File may be outside regular candidate directories; load directly
-            try:
-                content = target_path.read_text(encoding='utf-8', errors='replace')
-                meta, body = parse_frontmatter_and_body(content)
-                title = str(meta.get('title') or '').strip() or target_path.stem
-                body_tokens = _strict_terms(_tokens(body) - STOPWORDS)
-                title_tokens = _strict_terms(_tokens(title) - STOPWORDS)
-                all_tokens = body_tokens | title_tokens
-                created_ts = parse_date_to_timestamp(meta.get('created') or meta.get('date'))
-                updated_ts = parse_date_to_timestamp(meta.get('modified') or meta.get('updated_at'))
-                if updated_ts is None:
-                    updated_ts = target_path.stat().st_mtime
-                if created_ts is None:
-                    created_ts = updated_ts
-                target_candidate = {
-                    'path': target_rel,
-                    'full_path': target_path,
-                    'title': title,
-                    'tokens': all_tokens,
-                    'status': str(meta.get('status', '')).lower().strip(),
-                    'created_ts': created_ts,
-                    'updated_ts': updated_ts,
-                    'words_count': len(re.findall(r'\w+', body)),
-                    'supersedes': meta.get('supersedes', []),
-                }
-            except OSError as exc:
-                raise RuntimeError(f"Could not read target file: {exc}")
+            # A folder the scan skips by name (daily/, archive/) may still be audited on request,
+            # but never a note the context itself would not show.
+            checked = _auditable(given, target_rel)
+            if checked is None:
+                raise ValueError("audit target is private, untrusted, a symlink or unreadable; the auditor does not read it")
+            target_candidate = _candidate(target_path, target_rel, *checked)
 
     findings = []
     pairs_compared = 0
