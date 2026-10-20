@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicitly scoped global lifecycle bridge. No global configuration writes."""
+"""Explicitly scoped global lifecycle bridge with opt-in global hook management."""
 import argparse
 import base64
 import contextlib
@@ -242,25 +242,19 @@ def global_gemini_md_path(home=None):
     return base / '.gemini/config/GEMINI.md'
 
 
-def gemini_md_content(vault):
+def gemini_md_content(vault, roots):
     vault = Path(vault).resolve()
-    beyin_py = vault / 'beyin.py'
     return (
         "<!-- beyin-v3-bridge:start -->\n"
-        "## İkinci Beyin & Global Hafıza Bağlantısı (Single Source of Truth)\n"
-        f"Vault konumu: `{vault}`\n"
-        "Hangi projede veya dizinde çalışırsan çalış; kullanıcı \"ikinci beynim\", \"kurallarımı hatırla\", "
-        "\"geçmiş oturum/kararlar\" veya \"beynime kaydet\" dediğinde doğrudan bu dizini ve aşağıdaki dosyaları referans al:\n"
-        "- `🔮 850-Companion/Core.md`: Kimlik, hitap tarzı, düşünme ortağı rolü ve temel teknoloji yığını.\n"
-        "- `🔮 850-Companion/Kurallar.md`: Kesin çalışma kuralları.\n"
-        "- `🔮 850-Companion/Last-Session.md`: En son oturumun devir kartı, nerede kalındığı ve açık adımlar.\n"
-        "- `🔮 850-Companion/Threads.md`: Aktif ve kapanan konular, iş takip listesi.\n"
-        "- `🔮 850-Companion/Journal.md`: Gözlemler, öğrenimler ve açık sorular.\n\n"
-        "### Hafıza Arama ve Kayıt Kuralları:\n"
-        "1. Geniş hafıza veya bilgi notu (`knowledge/`) aramaları için:\n"
-        f"   Terminalde `python \"{beyin_py}\" context \"<arama terimi>\"` komutunu çalıştırabilirsin.\n"
-        "2. Kullanıcı yeni bir kural veya tercih belirttiğinde, beklemeden `🔮 850-Companion/Kurallar.md` dosyasını güncelle.\n"
-        f"3. Anlamlı bir iş bittiğinde `Last-Session.md` devir kartını güncelle ve `python \"{beyin_py}\" receipt` ile kaydet.\n"
+        "## İsteğe bağlı Beyin köprüsü\n"
+        f"Vault konumu (veri): {json.dumps(str(vault), ensure_ascii=False)}\n"
+        "Bu bağlantı yalnız şu proje köklerinde ve alt klasörlerinde geçerlidir:\n"
+        + ''.join('- ' + json.dumps(str(root), ensure_ascii=False) + '\n' for root in roots)
+        + "Diğer çalışma alanlarında bu yönergeyi uygulama.\n"
+        "Kullanıcı açıkça hafıza araması isterse vault içindeki beyin.py context komutunu kullan. "
+        "Kaynakları okumadan bilgi iddiasında bulunma. Kayıt için kullanıcının yetkisini ve "
+        "receipt komutunun gerekli alanlarını denetle. Hafıza kullanmama isteğine uy; "
+        "proje dosyalarını veya konuşmaları izinsiz kopyalama.\n"
         "<!-- beyin-v3-bridge:end -->"
     )
 
@@ -294,10 +288,44 @@ def _decoded_command(command):
     return command
 
 
-def update_gemini_md(vault, home=None):
+def _read_global_settings(path):
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise ValueError('Cannot read global settings; preserved') from exc
+    if not isinstance(data, dict):
+        raise ValueError('Global settings must be a JSON object; preserved')
+    return data
+
+
+def _without_bridge(groups):
+    cleaned, removed = [], 0
+    for group in groups:
+        if not isinstance(group, dict):
+            cleaned.append(group)
+            continue
+        handlers = group.get('hooks', [group])
+        if not isinstance(handlers, list):
+            cleaned.append(group)
+            continue
+        remaining = [handler for handler in handlers if not (
+            isinstance(handler, dict) and any('beyin_v3_bridge.py' in _decoded_command(handler.get(key))
+                                             for key in ('command', 'commandWindows')))]
+        count = len(handlers) - len(remaining)
+        removed += count
+        if not count:
+            cleaned.append(group)
+        elif remaining:
+            cleaned.append(dict(group, hooks=remaining)) if 'hooks' in group else cleaned.extend(remaining)
+    return cleaned, removed
+
+
+def update_gemini_md(vault, roots, home=None):
     gemini_path = global_gemini_md_path(home=home)
     gemini_path.parent.mkdir(parents=True, exist_ok=True)
-    block = gemini_md_content(vault)
+    block = gemini_md_content(vault, roots)
     pattern = r"(?:\r?\n)*<!-- beyin-v3-bridge:start -->.*?<!-- beyin-v3-bridge:end -->(?:\r?\n)*"
     if gemini_path.is_file():
         original = gemini_path.read_text(encoding="utf-8")
@@ -360,14 +388,11 @@ def install_bridge(vault, state, harness, roots, events=None, context_chars=1500
     for event in events:
         command.extend(['--event', event])
 
-    data = {}
-    if target.is_file():
-        try:
-            data = json.loads(target.read_text(encoding='utf-8'))
-            if not isinstance(data, dict):
-                data = {}
-        except Exception:
-            data = {}
+    data = _read_global_settings(target)
+    if harness != 'antigravity':
+        hooks = data.get('hooks', {})
+        if not isinstance(hooks, dict) or any(not isinstance(groups, list) for groups in hooks.values()):
+            raise ValueError('Invalid global hooks configuration; preserved')
 
     if harness == 'antigravity':
         data['beyin-v3-bridge'] = {
@@ -383,19 +408,7 @@ def install_bridge(vault, state, harness, roots, events=None, context_chars=1500
         hooks_map = data.setdefault('hooks', {})
         for event in events:
             groups = hooks_map.setdefault(event, [])
-            cleaned_groups = []
-            for grp in groups:
-                if not isinstance(grp, dict):
-                    cleaned_groups.append(grp)
-                    continue
-                handlers = grp.get('hooks', [grp]) if 'hooks' in grp else [grp]
-                rem = [h for h in handlers if isinstance(h, dict) and 'beyin_v3_bridge.py' not in h.get('command', '')
-                       and 'beyin_v3_bridge.py' not in _decoded_command(h.get('command', ''))]
-                if rem:
-                    if 'hooks' in grp:
-                        cleaned_groups.append(dict(grp, hooks=rem))
-                    else:
-                        cleaned_groups.extend(rem)
+            cleaned_groups, _ = _without_bridge(groups)
             timeout = 3 if event == 'SessionEnd' else (20 if os.name == 'nt' else 5)
             handler = {'type': 'command', 'command': shell, 'timeout': timeout}
             if harness == 'codex' and os.name == 'nt':
@@ -410,7 +423,7 @@ def install_bridge(vault, state, harness, roots, events=None, context_chars=1500
 
     gemini_path = None
     if harness == 'antigravity':
-        gemini_path = update_gemini_md(vault, home=home)
+        gemini_path = update_gemini_md(vault, roots, home=home)
 
     return {
         'status': 'installed',
@@ -428,10 +441,7 @@ def uninstall_bridge(harness, home=None):
     target = global_hook_path(harness, home=home)
     removed_count = 0
     if target.is_file():
-        try:
-            data = json.loads(target.read_text(encoding='utf-8'))
-        except Exception:
-            data = None
+        data = _read_global_settings(target)
         if isinstance(data, dict):
             modified = False
             if harness == 'antigravity':
@@ -446,35 +456,17 @@ def uninstall_bridge(harness, home=None):
                         groups = hooks_map[event]
                         if not isinstance(groups, list):
                             continue
-                        cleaned_groups = []
-                        for grp in groups:
-                            if not isinstance(grp, dict):
-                                cleaned_groups.append(grp)
-                                continue
-                            handlers = grp.get('hooks', [grp]) if 'hooks' in grp else [grp]
-                            rem = []
-                            for h in handlers:
-                                cmd = h.get('command', '') if isinstance(h, dict) else ''
-                                cmd_win = h.get('commandWindows', '') if isinstance(h, dict) else ''
-                                if ('beyin_v3_bridge.py' in cmd or 'beyin_v3_bridge.py' in _decoded_command(cmd)
-                                        or 'beyin_v3_bridge.py' in cmd_win or 'beyin_v3_bridge.py' in _decoded_command(cmd_win)):
-                                    removed_count += 1
-                                    modified = True
-                                else:
-                                    rem.append(h)
-                            if rem:
-                                if 'hooks' in grp:
-                                    cleaned_groups.append(dict(grp, hooks=rem))
-                                else:
-                                    cleaned_groups.extend(rem)
+                        cleaned_groups, removed = _without_bridge(groups)
+                        if not removed:
+                            continue
+                        removed_count += removed
+                        modified = True
                         if cleaned_groups:
                             hooks_map[event] = cleaned_groups
                         else:
                             del hooks_map[event]
-                            modified = True
-                    if not hooks_map:
+                    if modified and not hooks_map:
                         del data['hooks']
-                        modified = True
             if modified:
                 _backup_file(target)
                 target.write_bytes((json.dumps(data, indent=2, ensure_ascii=False) + '\n').encode('utf-8'))

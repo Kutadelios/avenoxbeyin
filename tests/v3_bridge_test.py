@@ -562,6 +562,50 @@ class BridgeTest(unittest.TestCase):
         self.assertNotIn('<!-- beyin-v3-bridge:start -->', md_after)
         self.assertIn('Keep this rule safe.', md_after)
 
+    def test_install_rejects_invalid_global_settings_without_replacing_them(self):
+        for harness in ('claude', 'codex', 'antigravity'):
+            target = bridge.global_hook_path(harness, home=self.home)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            for raw in (b'{invalid', b'[]', b'{"hooks": []}', b'{"hooks": {"SessionStart": {}}}'):
+                if harness == 'antigravity' and b'hooks' in raw:
+                    continue
+                with self.subTest(harness=harness, raw=raw):
+                    target.write_bytes(raw)
+                    with self.assertRaises(ValueError):
+                        bridge.install_bridge(self.vault, self.state, harness, [self.project], home=self.home)
+                    self.assertEqual(target.read_bytes(), raw)
+                    self.assertFalse(target.with_name(target.name + '.bak').exists())
+
+    def test_install_preserves_unknown_handlers_and_replaces_windows_only_bridge(self):
+        target = bridge.global_hook_path('codex', home=self.home)
+        target.parent.mkdir(parents=True)
+        foreign = {'matcher': 'custom', 'hooks': ['opaque-handler', {'type': 'future', 'command': None}]}
+        windows = {'hooks': [{'type': 'command', 'commandWindows': 'python beyin_v3_bridge.py'}]}
+        target.write_text(json.dumps({'hooks': {'SessionStart': [foreign, windows], 'Stop': []}}), encoding='utf-8')
+        bridge.install_bridge(self.vault, self.state, 'codex', [self.project], ['SessionStart'], home=self.home)
+        groups = json.loads(target.read_text(encoding='utf-8'))['hooks']['SessionStart']
+        self.assertEqual(groups[0], foreign)
+        self.assertEqual(len(groups), 2)
+        bridge.uninstall_bridge('codex', home=self.home)
+        self.assertEqual(json.loads(target.read_text(encoding='utf-8')),
+                         {'hooks': {'SessionStart': [foreign], 'Stop': []}})
+
+    def test_uninstall_without_bridge_preserves_empty_hook_groups_byte_for_byte(self):
+        target = bridge.global_hook_path('claude', home=self.home)
+        target.parent.mkdir(parents=True)
+        raw = b'{ "hooks": {"SessionStart": [], "Stop": [{"hooks": []}]} }\n'
+        target.write_bytes(raw)
+        result = bridge.uninstall_bridge('claude', home=self.home)
+        self.assertEqual(result['removed_count'], 0)
+        self.assertEqual(target.read_bytes(), raw)
+
+    def test_antigravity_pointer_keeps_the_project_allowlist(self):
+        bridge.install_bridge(self.vault, self.state, 'antigravity', [self.project], home=self.home)
+        text = bridge.global_gemini_md_path(home=self.home).read_text(encoding='utf-8')
+        self.assertIn(str(self.project), text)
+        self.assertNotIn('Hangi projede veya dizinde', text)
+        self.assertNotIn('beklemeden', text)
+
     def test_bridge_install_and_uninstall_claude_and_codex(self):
         for harness, rel_path in (('claude', '.claude/settings.json'), ('codex', '.codex/hooks.json')):
             target = self.home / rel_path

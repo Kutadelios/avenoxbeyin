@@ -35,12 +35,23 @@ Otomatik kurulum (`--install`):
 - **Otomatik `.bak` yedeği**: Var olan herhangi bir konfigürasyon dosyası değiştirilmeden önce yanına `.bak` uzantılı yedeği kaydedilir (örn. `hooks.json.bak`, `settings.json.bak`).
 - **Antigravity `GEMINI.md` işaretçisi**: `--harness antigravity --install` çalıştırıldığında, hook kaydına ek olarak kullanıcı ana dizinindeki `~/.gemini/config/GEMINI.md` dosyasına vault konumunu ve temel yönergeleri işaret eden idempotent bir blok (`<!-- beyin-v3-bridge:start --> ... <!-- beyin-v3-bridge:end -->`) eklenir veya güncellenir. Mevcut dosya varsa önce `GEMINI.md.bak` olarak yedeklenir.
 
+Bozuk JSON veya beklenmeyen hook listesi biçimi korunur; kurulum hata vererek durur.
+Antigravity yönergesi de yalnız seçilen proje köklerinde geçerlidir; Companion
+dosyalarını otomatik okuma veya değiştirme talimatı vermez.
+
+Global istemci ayarları vault güncellemesinin rollback kapsamına girmez.
+Antigravity harness adı ve receipt biçimi 3.11.0'da zaten desteklenir; bu değişiklik
+yeni bir harness veya hariç tutma bileşeni kaydetmez. 3.11.0'a dönüldüğünde mevcut
+köprü komutları çalışabilir, ancak yeni `bridge --install` / `--uninstall` komutları
+bulunmaz. Global köprüyü de kaldırmak istiyorsanız rollback öncesinde
+`python3 beyin.py bridge --harness antigravity --uninstall` çalıştırın.
+
 ### 2. Manuel İnceleme ve Yazdırma (`--print-config`)
 
 Dosyaları diske yazmadan yalnızca üretilecek JSON konfigürasyonunu görmek isterseniz `--print-config` kullanabilirsiniz:
 
 ```sh
-python3 beyin.py bridge --vault "/tam/yol/Beynim" --harness claude \
+python3 "/tam/yol/Beynim/beyin.py" bridge --harness claude \
   --project-root "/tam/yol/Projelerim" --print-config
 ```
 
