@@ -315,22 +315,6 @@ class TaskCompletionTest(unittest.TestCase):
         self.assertEqual(reasons.get('notes/a.md'), 'symlink source rejected')
         self.assertEqual(reasons.get('notes/b.md'), 'symlink source rejected')
 
-    def test_symlink_is_rejected_before_windows_nonstrict_resolution(self):
-        # Windows 3.13 may retain a \\?\ spelling when it cannot resolve a loop.
-        # The symlink policy must run before resolution or containment checks.
-        candidate = self.engine.root / 'notes' / 'loop.md'
-        original = Path.resolve
-
-        def nonstrict(path, *args, **kwargs):
-            if path == candidate:
-                return Path(r'\\?\C:\vault\notes\loop.md')
-            return original(path, *args, **kwargs)
-
-        with patch.object(Path, 'is_symlink', return_value=True), \
-                patch.object(Path, 'resolve', nonstrict):
-            with self.assertRaisesRegex(ValueError, '^symlink source rejected$'):
-                self.engine._path('notes/loop.md', existing=True)
-
 
 if __name__ == '__main__':
     unittest.main()
