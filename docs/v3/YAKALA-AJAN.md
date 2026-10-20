@@ -36,3 +36,35 @@ yollarında da yapılır. Süresi dolan iş ağ çağrısından sonra çıktı y
 bütçeyi sıfırlamaz. İndirme 50 MiB ile sınırlıdır, tür/uzantı kontrolünden geçer
 ve yalnız staging alanına yazılır. Aynı adlı kullanıcı dosyasının üzerine yazılmaz.
 Bu aşama da kullanıcıya ajan çalıştırma arayüzü eklemez.
+
+## Başsız Claude worker
+
+Bu aşamadan itibaren özellik açık CLI tercihiyle kullanılabilir:
+
+```text
+python beyin.py yakala ajan claude
+python beyin.py yakala ajan-gonder <kart-id> --istek "Kaynağı özetle."
+python beyin.py yakala ajan
+python beyin.py yakala ajan kapali
+```
+
+Kalıcı ayar `state/yakala/ajan/config.json` içindedir; dosya yoksa kapalıdır.
+İşler ayrı `jobs/<id>/` dizinlerinde tutulur. Tek worker OS kilidiyle sırayla
+işler. Çökme sonrası yarım kalan iş otomatik tekrarlanmaz, onay bekler. Süre
+aşımı ve kapatma sahip olunan süreç ağacını durdurur; kalıcı eski PID ile
+başka bir sürece sinyal gönderilmez. İşin süreli MCP yetkisi de sona erer.
+
+Claude başsız çalışır; yerleşik kabuk/dosya araçları kapalı, MCP yapılandırması
+dar ve kesindir. İstemci sürümü/özellikleri çalıştırmadan önce doğrulanır.
+JSON dışındaki son metin veya sıfır çıkış kodu başarı kanıtı sayılmaz. Sonuç
+manifesti, çıktı dosyaları ve gerçek oturumla yazılan receipt doğrulandıktan
+sonra kart tamamlanır. Sonuç özeti private notta kalır; Last-Session değiştirilmez.
+
+Varsayılan ağ `kisitli`dir. `--ag acik` kullanıcının ayrı tercihidir; genel web
+araması için teknik bir içerik sızıntısı önleme garantisi verilmez. Hassas not
+okuma kapıları aynı kalır, fakat modele verilen kullanıcı isteğinin veya
+yetkili kaynak içeriğinin başka sorgulara taşınmaması ayrıca talimatla belirtilir.
+Bu nedenle açık ağ seçiminde kaynak ve isteğin paylaşım uygunluğu değerlendirilmelidir.
+
+Bu aşamada Ctrl+Enter, masaüstü bildirimleri, aylık ajan günlüğü ve görünür
+istemci penceresi yoktur. Durum `yakala ajan`, iş dosyaları ve yerel logdan izlenir.
