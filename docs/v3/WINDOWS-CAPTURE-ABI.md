@@ -177,8 +177,11 @@ VT_I4 yalnız alt 32 bitten okunur; BSTR `SysFreeString`, VARIANT `VariantClear`
 `Release` ile bırakılır. Başarılı CoInitializeEx/S_FALSE, CoUninitialize ile dengelenir.
 API ve slot kaynağı: [Microsoft Windows SDK oleacc.h](https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/um/oleacc.h).
 
-Opera sayfa+imleç okuması aynı sonlandırılabilir `opera` yardımcı sürecinde, mevcut 1 saniye
-bütçesinde yapılır. İmleç fiziksel koordinatı üst pencereye karşı doğrulanır; bağlantı araması
+Opera sayfa+imleç okuması aynı sonlandırılabilir `opera` yardımcı sürecinde, 1,8 saniyelik
+bütçede (`OPERA_TIMEOUT`) yapılır. İlk MSAA okuması `Chrome Legacy Window` yer tutucusu
+(ROLE_SYSTEM_CLIENT) dönerse renderer'a bir kez UI Automation isteği (`_uia_touch`: öğe +
+Document araması, hiçbir şey okunmaz) yapılır ve belge en fazla 0,8 saniye (`OPERA_WARMUP`)
+beklenir; renderer değişirse vazgeçilir. İmleç fiziksel koordinatı üst pencereye karşı doğrulanır; bağlantı araması
 renderer HWND'sinin UIA ağacında yapılır. Belge değeri iki okumada, bulunan bağlantı da iki
 okumada doğrulanır. Başka sekmenin/iframe'in URL'sini bulmak için belge ağacı taranmaz.
 
