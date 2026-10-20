@@ -591,8 +591,8 @@ def person_sources(vault, target=None):
             if resolved.is_relative_to(vault) and resolved.is_dir() and not resolved.is_symlink():
                 for p_file in sorted(resolved.glob('*.md')):
                     if (p_file.is_file() and not p_file.is_symlink() and
-                            not p_file.name.startswith('.') and p_file.name not in seen):
-                        seen.add(p_file.name)
+                            not p_file.name.startswith('.') and p_file not in seen):
+                        seen.add(p_file)
                         found.append(p_file)
                         if len(found) >= 50:
                             return found
@@ -658,7 +658,10 @@ def context(store, budget, session, harness, query='', receipt='', warning='', p
                 if found:
                     break
     all_persons = person_sources(store.vault_root, target=target)
-    for p_file in all_persons[:5]:
+    person_count = 0
+    for p_file in all_persons:
+        if person_count >= 5:
+            break
         try:
             p_rel = p_file.relative_to(store.vault_root.resolve()).parent.as_posix()
             p_snapshot = store.source_snapshot(
@@ -677,7 +680,8 @@ def context(store, budget, session, harness, query='', receipt='', warning='', p
                                 body = f'{body}\n[Bilgiler: {" · ".join(fact_items)}]'
                     except Exception:
                         pass
-                    sections.append((f"\n[{record['source']}]\n", body, 'Kisi.md'))
+                    sections.append((f"\n[{record['source']}]\n", clip(body, 400), 'Kisi.md'))
+                    person_count += 1
         except (ValueError, OSError):
             pass
     fixed = len(header) + len(notice) + sum(len(label) for label, _, _ in sections)

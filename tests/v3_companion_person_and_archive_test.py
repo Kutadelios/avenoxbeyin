@@ -110,6 +110,45 @@ class CompanionPersonAndArchiveTest(unittest.TestCase):
         self.assertNotIn('Gizli Kişi', ctx)
         self.assertNotIn('notes/kisiler/gizli.md', ctx)
 
+    def test_private_candidates_do_not_hide_visible_person(self):
+        self.seed()
+        folder = self.vault / 'notes/kisiler'
+        folder.mkdir(parents=True)
+        for i in range(6):
+            visibility = 'private' if i < 5 else 'internal'
+            (folder / f'person-{i}.md').write_text(
+                f'---\nid: person-{i}\nkind: person\nvisibility: {visibility}\n---\n'
+                f'# Person {i}\nVisible identity {i}.\n', encoding='utf-8')
+        result = SyncEngine(self.vault, self.state).sync()
+        self.assertEqual(result['status'], 'succeeded')
+        ctx = companion.context(self.store, 8000, 'session-1', 'claude')
+        self.assertIn('[notes/kisiler/person-5.md]', ctx)
+        for i in range(5):
+            self.assertNotIn(f'Person {i}', ctx)
+            self.assertNotIn(f'person-{i}.md', ctx)
+
+    def test_person_facts_share_the_identity_limit(self):
+        self.seed()
+        folder = self.vault / 'notes/kisiler'
+        folder.mkdir(parents=True)
+        (folder / 'bounded.md').write_text(
+            '---\nid: bounded-person\nkind: person\nfacts:\n  detail: '
+            + 'x' * 1800 + '\n---\n# Bounded Person\n', encoding='utf-8')
+        self.assertEqual(SyncEngine(self.vault, self.state).sync()['status'], 'succeeded')
+        ctx = companion.context(self.store, 10000, 'session-1', 'claude')
+        label = '[notes/kisiler/bounded.md]\n'
+        self.assertIn(label, ctx)
+        self.assertNotIn('x' * 401, ctx)
+        self.assertLessEqual(len(ctx), 10000)
+
+    def test_person_sources_preserves_same_basename_in_distinct_folders(self):
+        for folder in ('notes/kisiler', 'kisiler'):
+            directory = self.vault / folder
+            directory.mkdir(parents=True)
+            (directory / 'identity.md').write_text('# Identity\n', encoding='utf-8')
+        sources = companion.person_sources(self.vault)
+        self.assertEqual(len(sources), 2)
+
     def test_excerpt_person_strips_empty_placeholders(self):
         sample = (
             "# Ayşe Yılmaz\n\n"
