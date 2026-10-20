@@ -160,7 +160,7 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(self.queued(), [])
 
     def test_origin_ignores_invalid_cwd(self):
-        for cwd in (123, '', 'relative', str(self.project) + '\0bad'):
+        for cwd in (123, '', 'relative', str(self.project) + '\0bad', str(self.root / 'deleted')):
             with self.subTest(cwd=cwd):
                 self.assertEqual(bridge.origin({'cwd': cwd}, 'codex', self.vault), {})
 

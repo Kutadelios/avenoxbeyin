@@ -37,7 +37,7 @@ def working_directory(payload, harness):
         return None
     try:
         path = Path(value)
-        return path.resolve() if path.is_absolute() else None
+        return path.resolve(strict=True) if path.is_absolute() else None
     except (RuntimeError, OSError, ValueError):
         # Deleted process directories, invalid paths and symlink loops carry no origin.
         return None
