@@ -30,6 +30,8 @@ from beyin_v3_projections import (is_receipt_view_source, is_receipt_view_confli
                                   RECEIPT_VIEW_SOURCES_ROW)
 from beyin_v3_preferences import read as read_preferences
 from beyin_v3_secrets import redact as redact_secrets, record as record_redactions
+from beyin_v3_notes import (NoteConflict, locked as note_locked,
+                            read as note_read_source, apply as note_apply_edits)
 
 
 def _hash(data):
