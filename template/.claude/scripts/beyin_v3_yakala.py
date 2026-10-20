@@ -684,13 +684,6 @@ def _run(command, timeout, cwd=None):
     if os.name == 'nt':
         command = _windows_safe_command(command)
     env = dict(os.environ, PYTHONIOENCODING='utf-8', NO_COLOR='1')
-    if os.name == 'nt':
-        for key in ('http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'):
-            upper = key.upper()
-            val = env.get(upper) if env.get(upper) is not None else env.get(key)
-            if val is not None:
-                env[key] = val
-                env[upper] = val
     if os.name == 'nt' and sys.platform == 'win32':
         return _windows_run(command, timeout, cwd, env)
     result = subprocess.run(command, capture_output=True, timeout=timeout, cwd=cwd, env=env,
