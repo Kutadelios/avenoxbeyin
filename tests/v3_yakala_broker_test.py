@@ -5,6 +5,7 @@ import queue
 import subprocess
 import tempfile
 import threading
+import time
 import types
 import unittest
 from unittest.mock import patch
@@ -17,11 +18,33 @@ class PopupModel:
         self.test, self.instance, self.mode = test, instance, mode
         self.failed, self.packets = threading.Event(), queue.Queue()
         self.ready_seen = False
+        self.done_seen = False
+        self.exit_seen, self.reader_release = threading.Event(), threading.Event()
         self.sent = []
         self.process = types.SimpleNamespace(pid=pid, returncode=None, stdin=self, stdout=self)
-        self.process.poll = lambda: self.process.returncode
+        self.process.poll = self.poll
+        self.read_thread = threading.Thread(target=self.read_final, daemon=True)
+        self.read_thread.start()
         if mode != 'warm_timeout':
             self.packets.put(y._protocol_message('READY', instance, hwnd=111, pid=pid))
+
+    def poll(self):
+        if self.process.returncode is not None:
+            self.exit_seen.set()
+        return self.process.returncode
+
+    def read_final(self):
+        if self.mode not in ('exit_delayed_done', 'exit_stuck_reader'):
+            return
+        # The reader cannot queue DONE until the broker has observed process exit.
+        if not self.exit_seen.wait(5):
+            return
+        if self.mode == 'exit_stuck_reader':
+            self.reader_release.wait(10)
+        else:
+            time.sleep(0.02)
+            self.packets.put(y._protocol_message('DONE', self.instance, capture_id=self.capture_id))
+        self.failed.set()  # reader EOF, after its final packet has been queued
 
     def receive(self):
         try:
@@ -32,13 +55,16 @@ class PopupModel:
             self.ready_seen = True
         if self.mode == 'exit_ready' and message['type'] == 'READY':
             self.process.returncode = 1
-        if self.mode == 'exit_active' and message['type'] == 'ACTIVE':
+        if self.mode in ('exit_active', 'exit_delayed_done', 'exit_stuck_reader') and message['type'] == 'ACTIVE':
             self.process.returncode = 1
+        if message['type'] == 'DONE':
+            self.done_seen = True
         return message
 
     def send(self, message):
         self.sent.append(message)
         if message['type'] == 'ACTIVATE' and self.mode != 'activation_timeout':
+            self.capture_id = message['capture_id']
             self.packets.put(y._protocol_message('ACTIVE', self.instance, capture_id=message['capture_id']))
         if message['type'] == 'STOP':
             self.process.returncode = 0
@@ -121,6 +147,8 @@ class BrokerRecoveryTest(unittest.TestCase):
     def stop(self):
         if self.reap_gate:
             self.reap_gate.set()
+        for owner in self.owners:
+            owner.reader_release.set()
         if self.listener:
             y._windows_stop_listener(self.vault, timeout=5)
             self.listener.join(5)
@@ -187,6 +215,30 @@ class BrokerRecoveryTest(unittest.TestCase):
         self.assert_recovered()
         self.assertEqual(self.owners[1].sent, [])
         self.assertIn('DONE olmadan kapandi', self.log())
+
+    def test_delayed_done_after_exit_rewarms_without_counting_failures(self):
+        self.start('exit_delayed_done', 'exit_delayed_done', 'exit_delayed_done', 'normal')
+        for count in range(2, 5):
+            self.press()
+            self.assert_recovered(count=count)
+            previous = self.owners[count - 2]
+            self.assertTrue(previous.exit_seen.is_set())
+            self.assertTrue(previous.done_seen)
+            self.assertFalse(previous.read_thread.is_alive())
+            self.assertEqual(sum(m['type'] == 'ACTIVATE' for m in previous.sent), 1)
+            self.assertEqual(self.owners[-1].sent, [])
+        self.assertNotIn('gecici hata', self.log())
+        self.assertNotIn('sonucu bilinmiyor', self.log())
+
+    def test_stuck_reader_after_exit_has_bounded_wait_and_does_not_replay_capture(self):
+        self.start('exit_stuck_reader', 'normal')
+        self.press()
+        self.assert_recovered()
+        self.assertTrue(self.owners[0].read_thread.is_alive())
+        self.assertFalse(self.owners[0].done_seen)
+        self.assertEqual(self.owners[1].sent, [])
+        self.assertIn('DONE olmadan kapandi', self.log())
+        self.assertIn('1/3 gecici hata', self.log())
 
     def test_third_recent_failure_wakes_listener_and_releases_hotkey(self):
         broker = self.start('warm_timeout', 'exit_ready', 'warm_timeout')
