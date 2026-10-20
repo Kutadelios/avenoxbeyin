@@ -1,6 +1,6 @@
 """Opt-in conversation checkpoints: metadata-only hints, explicit short Markdown writes.
 
-This prototype never reads transcripts or infers what a conversation meant. The
+This prototype never reads transcript message bodies or infers what a conversation meant. The
 switch and counters stay in state; only an explicit write creates a searchable
 source. Unknown turn origins are deliberately silent.
 """
@@ -198,7 +198,7 @@ def write(vault, state, harness, session, text):
     if len(paragraph) > MAX_PARAGRAPH:
         raise ValueError('dated trace paragraph exceeds 450 characters; shorten it explicitly')
     from beyin_v3_sync import SyncEngine, atomic, parse, render
-    from beyin_v3_notes import locked
+    from beyin_v3_notes import NoteConflict, locked
     with _lock(state) as folder:
         path, value = _marker(folder, harness, session, time.time())
         if value['suppressed']:
@@ -213,8 +213,9 @@ def write(vault, state, harness, session, text):
             if content is None:
                 body = ('# Sohbet izleri ' + today[:7] + '\n\n'
                         'Kisa oturum ozetleri; ajan beyanidir, dogrulanmis karar kaydi degildir.\n\n' + paragraph + '\n')
+                expected = render(metadata, body)
                 result = engine.note_edit({'source': source, 'expected_sha256': None,
-                                           'content': render(metadata, body)})
+                                           'content': expected})
             else:
                 if len(content.encode('utf-8')) > MAX_NOTE_BYTES:
                     raise ValueError('monthly trace note is full; review it before adding more')
@@ -223,14 +224,22 @@ def write(vault, state, harness, session, text):
                     raise ValueError('existing monthly note has different ownership/privacy; preserved')
                 paragraphs = [part.strip() for part in body.replace('\r\n', '\n').split('\n\n')]
                 if paragraph in paragraphs:
+                    expected = content
                     result = {'status': 'unchanged', 'source': source}
                 else:
                     newline = '\r\n' if '\r\n' in content else '\n'
                     separator = ('' if content.endswith(newline * 2) else
                                  newline if content.endswith(newline) else newline * 2)
-                    updated = content + separator + paragraph + newline
+                    expected = content + separator + paragraph + newline
                     result = engine.note_edit({'source': source, 'expected_sha256': previous['sha256'],
-                                               'edits': [{'old': content, 'new': updated}]})
+                                               'edits': [{'old': content, 'new': expected}]})
+            if result.get('status') not in ('written', 'unchanged'):
+                raise NoteConflict('chat trace write was not confirmed; checkpoint left open')
+            # Cooperative locking does not cover Obsidian or git. Check our exact
+            # intended bytes again before acknowledging the checkpoint, including
+            # the replay path which performed no write of its own.
+            if engine.note_read(source)['content'] != expected:
+                raise NoteConflict('chat trace changed before acknowledgement; checkpoint left open')
         # A committed, verified trace closes this checkpoint. Replaying after a crash
         # finds the exact paragraph before acknowledging, so it cannot duplicate it.
         value.update(covered=value['turns'], since=time.time(), next_due=value['turns'] + 2)

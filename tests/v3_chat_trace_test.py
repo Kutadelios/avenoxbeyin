@@ -222,6 +222,42 @@ class TraceTest(unittest.TestCase):
             self.write()
         self.assertEqual(note.read_bytes(), before)
 
+    def test_unconfirmed_write_result_does_not_close_the_checkpoint(self):
+        from beyin_v3_sync import SyncEngine
+        from beyin_v3_notes import NoteConflict
+        self.enable()
+        self.hint(1)
+        marker = next((self.state / self.trace.SESSIONS).glob('*.json'))
+        before = marker.read_bytes()
+        for status in ('conflict', 'error'):
+            with patch.object(SyncEngine, 'note_edit', return_value={'status': status}):
+                with self.assertRaisesRegex(NoteConflict, 'not confirmed'):
+                    self.write()
+            self.assertEqual(marker.read_bytes(), before)
+
+    def test_external_edit_after_real_note_write_leaves_checkpoint_open(self):
+        from beyin_v3_sync import SyncEngine
+        from beyin_v3_notes import NoteConflict
+        self.enable()
+        self.hint(1)
+        marker = next((self.state / self.trace.SESSIONS).glob('*.json'))
+        before = marker.read_bytes()
+        original = SyncEngine.note_edit
+        replacement = 'Sentetik dış düzenleyici bu kaynağı değiştirdi.\n'
+        changed = []
+        def external_editor(engine, request):
+            result = original(engine, request)  # real source and index transaction
+            source = engine.root / request['source']
+            source.write_text(replacement, encoding='utf-8')
+            changed.append(source)
+            return result
+        with patch.object(SyncEngine, 'note_edit', side_effect=None, autospec=True) as edit:
+            edit.side_effect = external_editor
+            with self.assertRaisesRegex(NoteConflict, 'changed before acknowledgement'):
+                self.write()
+        self.assertEqual(marker.read_bytes(), before)
+        self.assertEqual(changed[0].read_text(encoding='utf-8'), replacement)
+
     def test_bad_settings_or_counter_fail_open_without_destroying_them(self):
         self.enable()
         config = self.state / 'chat-trace.json'
