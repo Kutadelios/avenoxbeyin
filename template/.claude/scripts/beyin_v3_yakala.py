@@ -2086,10 +2086,17 @@ def _post_title(post, article, link=''):
     link = re.sub(r'\s+', ' ', link or '').strip()
     handle = re.match(r'^https://x\.com/([A-Za-z0-9_]{1,15})/status/', post or '')
     if handle and link:
+        at = text.find(link)
         mention = re.search(r'@' + re.escape(handle.group(1)) + r'(?![A-Za-z0-9_])', text, re.I)
-        # A display name or handle can itself contain the timestamp (for example @abc2h).
-        # Keep the existing fallback for accessibility text that omits the handle entirely.
-        at = text.find(link, mention.end() if mention else 0)
+        if mention:
+            # The header reads "@handle · <time>", and a name or handle can itself contain the time
+            # (for example @abc2h), so the time right after the handle splits. A time after the name
+            # (never at the very start) but before the mention means the header omits the handle and
+            # the body mentions it, so the first time still splits, as without any mention.
+            after = text.find(link, mention.end())
+            header = after >= 0 and not text[mention.end():after].strip(' ·')
+            if header or not 0 < at < mention.start():
+                at = after
         if at >= 0:
             body = text[at + len(link):].strip()
             text = '@%s: %s' % (handle.group(1), body) if body else '@' + handle.group(1)
