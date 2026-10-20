@@ -5548,22 +5548,6 @@ def _windows_stop_event():
     return 'Local\\AvenoxBeyinYakalaDur_' + _windows_digest(_windows_dirs()[2])
 
 
-def _crash_trace(state):
-    """A native crash in the popup (Tk, a Win32 callback) leaves only an exit code; keep the
-    Python stacks of every thread in <state>/yakala/pencere-cokme.log instead. Best effort."""
-    try:
-        import faulthandler
-        folder = Path(state) / 'yakala'
-        folder.mkdir(parents=True, exist_ok=True)
-        log = open(folder / 'pencere-cokme.log', 'a', encoding='utf-8')
-        log.write('%s pid %d\n' % (now().isoformat(timespec='seconds'), os.getpid()))
-        log.flush()
-        faulthandler.enable(file=log, all_threads=True)
-        return log
-    except (OSError, ValueError):
-        return None
-
-
 def _listener_log(state, line):
     """The listener has no console: why it left is kept next to its copy (macOS: launchd stderr)."""
     try:
@@ -12274,8 +12258,6 @@ def main(argv=None, vault=None, state=None):
     elif command == 'ajan-serbest':
         result = release_agent_card(vault, state, args.id)
     elif command == 'pencere':
-        if os.name == 'nt' and argv is None:
-            _crash_trace(state)
         if argv is None and sys.platform.startswith('linux'):
             _hand_over(vault, state)  # started by the hotkey from the state copy
         if getattr(args, 'hazir', False):
