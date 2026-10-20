@@ -166,6 +166,26 @@ class BridgeTest(unittest.TestCase):
             self.assertEqual(self.invoke(dict(self.payload, session_id=session)), {})
         self.assertEqual(self.queued(), [])
 
+    def test_origin_ignores_invalid_cwd(self):
+        for cwd in (123, '', 'relative', str(self.project) + '\0bad', str(self.root / 'deleted')):
+            with self.subTest(cwd=cwd):
+                self.assertEqual(bridge.origin({'cwd': cwd}, 'codex', self.vault), {})
+
+    def test_origin_ignores_deleted_process_directory(self):
+        from unittest.mock import patch
+        with patch.object(bridge.os, 'getcwd', side_effect=FileNotFoundError):
+            self.assertEqual(bridge.origin({}, 'codex', self.vault), {})
+
+    def test_origin_ignores_symlink_loop(self):
+        left, right = self.root / 'loop-a', self.root / 'loop-b'
+        try:
+            left.symlink_to(right, target_is_directory=True)
+            right.symlink_to(left, target_is_directory=True)
+        except OSError:
+            self.skipTest('symlinks unavailable on this platform')
+        self.assertEqual(bridge.origin({'cwd': str(left)}, 'codex', self.vault), {})
+        self.assertEqual(self.invoke(dict(self.payload, cwd=str(left))), {})
+
     def test_cwd_environment_and_process_fallback(self):
         payload = {k: v for k, v in self.payload.items() if k != 'cwd'}
         self.env['CLAUDE_PROJECT_DIR'] = str(self.project)

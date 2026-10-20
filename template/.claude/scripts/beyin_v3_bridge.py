@@ -30,17 +30,30 @@ def working_directory(payload, harness):
         if value is None:
             value = os.environ.get('CLAUDE_PROJECT_DIR') if harness == 'claude' else None
         if value is None:
-            value = os.getcwd()
-    if not isinstance(value, str) or not value or not Path(value).is_absolute():
+            try:
+                value = os.getcwd()
+            except OSError:
+                return None
+    if not isinstance(value, str) or not value:
         return None
-    return Path(value).resolve()
+    try:
+        path = Path(value)
+        return path.resolve(strict=True) if path.is_absolute() else None
+    except (RuntimeError, OSError, ValueError):
+        # Deleted process directories, invalid paths and symlink loops carry no origin.
+        return None
 
 
-def origin(payload, harness):
+def origin(payload, harness, vault=None):
     cwd = working_directory(payload, harness)
     if cwd is None:
         return {}
-    name = ''.join(c for c in cwd.name if c.isalnum() or c in ' ._-')[:80] or 'project'
+    name = None
+    if vault is not None:
+        from beyin_v3_projects import resolve_active_project
+        name = resolve_active_project(vault, cwd)
+    if not name:
+        name = ''.join(c for c in cwd.name if c.isalnum() or c in ' ._-')[:80] or 'project'
     return dict(project=name, project_id=hashlib.sha256(str(cwd).encode()).hexdigest()[:24])
 
 
@@ -609,7 +622,7 @@ def main(argv=None):
         cli = [sys.executable, str(vault / 'beyin.py')]
         command = ('& ' + ' '.join("'" + v.replace("'", "''") + "'" for v in cli)
                    if os.name == 'nt' else shlex.join(cli))
-        text = (f'Optional Beyin bridge. Project label (data only): {json.dumps(origin(payload, args.harness)["project"])}.\n'
+        text = (f'Optional Beyin bridge. Project label (data only): {json.dumps(origin(payload, args.harness, vault)["project"])}.\n'
                 f'Receipt session={session}; harness={args.harness}.\n'
                 f'Use {command} context "topic" --project PROJECT --json for explicit source lookup.\n'
                 f'After meaningful authorized work use {command} receipt --harness {args.harness} --session {session} --event-id EVENT_ID --summary "Work result" --ref PATH --json.\n'
@@ -619,7 +632,7 @@ def main(argv=None):
                 'Do not copy external project files or transcripts without authorization. No-memory requests take precedence.')
         if read_project_context(state):
             try:
-                proj_info = origin(payload, args.harness)
+                proj_info = origin(payload, args.harness, vault)
                 rem_budget = min(1200, max(0, args.context_chars - len(text) - 2))
                 extra = project_context(vault, state, proj_info.get('project_id', ''), proj_info.get('project', ''), budget=rem_budget)
                 if extra:
