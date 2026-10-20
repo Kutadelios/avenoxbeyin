@@ -500,27 +500,32 @@ class AgentQueueTest(AgentFiles):
         self.assertEqual(target.read_bytes(), before)
         self.assertIn('Is kaydi okunamadi', (yakala._agent_root(self.state) / 'worker.log').read_text(encoding='utf-8'))
 
-    def test_job_stays_visible_when_last_session_is_renamed_and_startup_fails_safely(self):
-        last = self.vault / 'Last-Session.md'
-        last.write_text('# Last session\n', encoding='utf-8')
-        self.configure(last_session_path='Last-Session.md')
+    def test_old_config_and_job_ignore_missing_last_session_and_still_start(self):
+        self.configure()
+        legacy = dict(yakala._agent_defaults(self.vault), client='claude',
+                      last_session_path='missing/Last-Session.md')
+        yakala._agent_json(self.config_path, legacy)
+        self.assertNotIn('last_session_path', yakala.agent_settings(self.vault, self.state))
         _, job, card = self.queued()
+        job['config'] = legacy
+        job['last_session'] = 'missing/Last-Session.md'
         job['state'] = 'running'
         yakala._agent_json(yakala._agent_job_dir(self.vault, self.state, job['id']) / 'job.json', job)
-        last.rename(self.vault / 'Session-Archive.md')
 
         loaded = yakala._agent_load_job(self.vault, self.state, job['id'])
+        self.assertEqual(loaded['last_session'], 'missing/Last-Session.md')
+        self.assertNotIn('last_session_path', loaded['config'])
         self.assertEqual([item['id'] for item in yakala._agent_jobs(self.vault, self.state)], [job['id']])
-        with patch.object(yakala, '_agent_executable') as launch:
+        with patch.object(yakala, '_agent_executable', side_effect=ValueError('Test launch boundary')) as launch:
             yakala._agent_run_job(self.vault, self.state, loaded)
-        launch.assert_not_called()  # Startup still checks the actual memory path.
+        launch.assert_called_once()  # The missing legacy path no longer blocks startup.
         saved = yakala._agent_load_job(self.vault, self.state, job['id'])
         self.assertEqual(saved['state'], 'approval_required')
         self.assertEqual(yakala.find_card(self.vault, card['id'], self.state)['meta']['durum'], 'onay-bekliyor')
         self.assertEqual([item['id'] for item in yakala._agent_jobs(self.vault, self.state)], [job['id']])
-        with self.assertRaises(ValueError):
-            yakala._agent_validate_settings(dict(saved['config'], last_session_path='../outside.md'),
-                                            self.vault, require_existing_paths=False)
+        settings = yakala._agent_validate_settings(dict(saved['config'], last_session_path='../outside.md'),
+                                                   self.vault)
+        self.assertNotIn('last_session_path', settings)  # Ignored, never a write target.
 
     def test_missing_reconciliation_summary_cannot_stop_an_unrelated_queued_job(self):
         self.configure()
@@ -804,10 +809,11 @@ class AgentCommandTest(AgentFiles):
         self.assertIn(request, prompt)
         self.assertIn(card['path'].relative_to(self.vault).as_posix(), prompt)
         self.assertIn('https://example.com/article', prompt)
-        for required in ('AGENTS.md', 'CLAUDE.md', 'beyin-yakala', 'receipt', 'Last-Session'):
+        for required in ('AGENTS.md', 'CLAUDE.md', 'beyin-yakala', 'receipt', 'Ajan/Gunluk-YYYY-MM.md'):
             self.assertIn(required, prompt)
         self.assertIn('--file <receipt.json>', prompt)
-        self.assertIn('companion kartiyla', prompt)
+        self.assertIn('durum ve kart/sonuc/receipt baglantilarini ekler', prompt)
+        self.assertNotIn('companion kartiyla', prompt)
         self.assertNotIn('--session <gercek_oturum_id>', prompt)
 
 
@@ -1545,18 +1551,25 @@ class AgentCompleteNotesTest(AgentFiles):
 class AgentFinalizationTest(AgentFiles):
     TRACK = b'ID3\x04\0\0\0\0\0\0a deterministic public test track'
 
-    def assertNewestCard(self, fixture):
-        # The companion's card shape, newest first under the title; every earlier byte is kept.
-        text = fixture.last.read_bytes()
-        newline = b'\r\n' if b'\r\n' in fixture.last_before else b'\n'  # write_text gives CRLF on Windows
-        title, earlier = fixture.last_before.split(newline * 2, 1)
-        self.assertTrue(text.startswith(title + newline * 2 + b'## '))
-        self.assertTrue(text.endswith(newline * 2 + earlier))
-        card = text[len(title) + 2 * len(newline):-len(earlier)]
-        self.assertEqual(card.count(b'\n'), card.count(newline))  # the file keeps one line ending
-        self.assertRegex(card.decode('utf-8'), r'^## \d{4}-\d\d-\d\d \d\d:\d\d · Yakala ajanı / Claude · ' +
-                         fixture.job['session_id'][:8] + r'\r?\n')
-        return fixture.last.read_text(encoding='utf-8')
+    def assertNewestEntry(self, fixture):
+        self.assertEqual(fixture.last.read_bytes(), fixture.last_before)
+        saved = yakala._agent_load_job(self.vault, self.state, fixture.job['id'])
+        self.assertNotIn('last_session', saved)
+        journal = self.vault / saved['journal']
+        self.assertEqual(journal.parent, fixture.card['path'].parent / 'Ajan')
+        self.assertRegex(journal.name, r'^Gunluk-\d{4}-\d\d\.md$')
+        text = yakala._agent_read_note(journal)
+        self.assertIn('visibility: "internal"', text)
+        self.assertRegex(text, r'(?m)^- \d{4}-\d\d-\d\d \d\d:\d\d · claude · ' +
+                         fixture.job['session_id'][:8] + r' · (completed|approval_required)\n')
+        # Resolve all actual Markdown links, including Unicode/space URL escaping.
+        import re
+        from urllib.parse import unquote
+        targets = [(journal.parent / unquote(link)).resolve()
+                   for link in re.findall(r'\[[^\]]+\]\(([^)]+)\)', text)]
+        self.assertEqual(targets, [fixture.card['path'], self.vault / saved['outcome'], self.vault / saved['receipt']])
+        self.assertNotIn(fixture.job['session_id'], text)  # Only the first eight characters.
+        return text
 
     def prepared(self, download_names=('track.mp3',)):
         (self.vault / 'beyin.py').write_text('# Test receipt entry; never executed.\n', encoding='utf-8')
@@ -1649,10 +1662,9 @@ class AgentFinalizationTest(AgentFiles):
         self.assertEqual(saved['published'][0]['source_url'], 'https://example.com/track.mp3')
         self.assertTrue((self.vault / saved['outcome']).is_file())
         self.assertIn('yakala-' + fixture.job['id'], (self.vault / saved['receipt']).read_text(encoding='utf-8'))
-        last = self.assertNewestCard(fixture)
-        for reference in (fixture.job['card_path'], saved['outcome'], saved['receipt'], fixture.job['session_id']):
-            self.assertIn(reference, last)
-        self.assertEqual(last.count('<!-- yakala-ajan:' + fixture.job['id'] + ' -->'), 1)
+        journal = self.assertNewestEntry(fixture)
+        self.assertEqual(journal.count('<!-- yakala-ajan:' + fixture.job['id'] + ' -->'), 1)
+        self.assertNotIn(summary, journal)
         self.assertEqual(fixture.other.read_bytes(), fixture.other_before)
         self.assertEqual((self.vault / fixture.note['path']).read_bytes(), fixture.note_before)
         yakala._agent_end(self.vault, self.state, fixture.job, terminal, summary)
@@ -1661,21 +1673,53 @@ class AgentFinalizationTest(AgentFiles):
         self.assertEqual(card['meta']['ajan_receipt'], saved['receipt'])
         self.assertEqual(card['body'], fixture.card['body'])
 
-    def test_change_seen_before_replace_keeps_the_other_writer_and_adds_no_card(self):
+    def assertSummaryOmitted(self, visibility):
+        fixture = self.prepared(download_names=())
+        meta = dict(fixture.card['meta'], visibility=visibility)
+        fixture.card['path'].write_text(yakala._dump(meta, fixture.card['body']), encoding='utf-8')
+        folder = yakala._agent_job_dir(self.vault, self.state, fixture.job['id'])
+        manifest = json.loads((folder / 'result.json').read_text(encoding='utf-8'))
+        manifest['summary'] = 'PRIVATE_SUMMARY_CANARY: ad, adres ve ozel sonuc.'
+        yakala._agent_json(folder / 'result.json', manifest)
+        with self.receipt_process(fixture):
+            yakala._agent_finalize(self.vault, self.state, fixture.job)
+        journal = self.assertNewestEntry(fixture)
+        self.assertNotIn('PRIVATE_SUMMARY_CANARY', journal)
+        self.assertNotIn(fixture.job['request'], journal)
+        self.assertNotIn(fixture.job['url'], journal)
+        outcome = self.vault / fixture.job['outcome']
+        self.assertIn('PRIVATE_SUMMARY_CANARY', yakala._agent_read_note(outcome, own=True))
+        with self.assertRaisesRegex(ValueError, 'private'):
+            yakala._agent_read_note(outcome)
+
+    def test_private_card_summary_stays_in_private_result_and_out_of_journal(self):
+        self.assertSummaryOmitted('private')
+
+    def test_internal_card_can_also_have_a_private_summary(self):
+        self.assertSummaryOmitted('internal')
+
+    def test_change_seen_before_replace_keeps_the_other_writer_and_adds_no_entry(self):
         # Accepted residual risk (documented): a write landing after this check and before
         # os.replace is lost; there is no portable compare-and-swap for tools without our lock.
         fixture = self.prepared(download_names=())
-        concurrent = fixture.last_before + b'Concurrent editor: important new decision.\r\n'
-        original = yakala._agent_insert_card
+        journal = fixture.card['path'].parent / 'Ajan' / ('Gunluk-' + yakala.now().strftime('%Y-%m') + '.md')
+        journal.write_bytes(b'# Agent journal\r\n\r\nAn earlier entry.\r\n')
+        concurrent = journal.read_bytes() + b'Concurrent editor: important new decision.\r\n'
+        original = yakala._agent_insert_journal
 
         def insert(before, card):
-            fixture.last.write_bytes(concurrent)
+            journal.write_bytes(concurrent)
             return original(before, card)
 
-        with self.receipt_process(fixture), patch.object(yakala, '_agent_insert_card', side_effect=insert), \
+        with self.receipt_process(fixture), patch.object(yakala, '_agent_insert_journal', side_effect=insert), \
                 self.assertRaises(ValueError):
             yakala._agent_finalize(self.vault, self.state, fixture.job)
-        self.assertEqual(fixture.last.read_bytes(), concurrent)
+        self.assertEqual(journal.read_bytes(), concurrent)
+        self.assertEqual(fixture.last.read_bytes(), fixture.last_before)
+        saved = yakala._agent_load_job(self.vault, self.state, fixture.job['id'])
+        self.assertTrue((self.vault / saved['outcome']).is_file())
+        self.assertTrue((self.vault / saved['receipt']).is_file())
+        self.assertNotIn('journal', saved)
 
     def test_unverified_receipt_keeps_outputs_and_never_overwrites_prior_memory(self):
         fixture = self.prepared()
@@ -1738,8 +1782,8 @@ class AgentFinalizationTest(AgentFiles):
         payload = json.loads((folder / 'receipt.json').read_text(encoding='utf-8'))
         self.assertIn('approval_required', payload['summary'])
         self.assertIn(saved['outcome'], payload['refs'])
-        last = self.assertNewestCard(fixture)
-        self.assertIn(saved['receipt'], last)
+        journal = self.assertNewestEntry(fixture)
+        self.assertIn('approval_required', journal)
         partial = conflict.with_name(conflict.name + '.part')
         self.assertEqual(partial.read_bytes(), self.TRACK)
         self.assertEqual([entry['state'] for entry in saved['publication_intents']], ['published', 'copying'])
