@@ -77,23 +77,70 @@ def _safe_source_url(url):
     return url
 
 
-def _safe_network_url(url):
-    """Reject private DNS answers before extraction helpers and stdlib retrieval (including redirects).
-
-    Note: DNS TOCTOU and helper subprocess redirects require separate network isolation.
-    """
-    _safe_source_url(url)
-    parsed = urlparse(url)
+def _public_answers(host, port):
+    """DNS answers for host, all of them public, or ValueError."""
     try:
-        answers = socket.getaddrinfo(parsed.hostname, parsed.port or
-                                    (443 if parsed.scheme.lower() == 'https' else 80), type=socket.SOCK_STREAM)
+        answers = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         if not answers or any(not ipaddress.ip_address(item[4][0].split('%')[0]).is_global or
                               ipaddress.ip_address(item[4][0].split('%')[0]).is_multicast
                               for item in answers):
             raise ValueError('Yakala adresi herkese acik bir IP adresine cozulmuyor.')
     except OSError as exc:
         raise ValueError('Yakala DNS adresi cozumlenemedi.') from exc
+    return answers
+
+
+def _safe_network_url(url):
+    """Reject private DNS answers before extraction helpers and stdlib retrieval (including redirects).
+
+    Note: helper subprocesses resolve again themselves; only the stdlib path pins the checked address.
+    """
+    _safe_source_url(url)
+    parsed = urlparse(url)
+    _public_answers(parsed.hostname, parsed.port or (443 if parsed.scheme.lower() == 'https' else 80))
     return url
+
+
+def _public_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+    """socket.create_connection for the stdlib path: the name is resolved and checked once more here and
+    the socket opens to that checked literal IP, so a DNS answer that changes after _safe_network_url
+    (rebinding) cannot point the connection at a local address. TLS still verifies the original host name."""
+    host, port = address[:2]
+    error = None
+    for item in _public_answers(host, port):
+        try:
+            return socket.create_connection((item[4][0], port), timeout, source_address)
+        except OSError as exc:
+            error = exc
+    raise error
+
+
+def _public_opener(*handlers):
+    """urllib opener whose direct connections go through _public_connection. Through a configured
+    proxy the proxy resolves the target, so the connection to the proxy itself is left as it is."""
+    import http.client
+    from urllib.request import HTTPHandler, HTTPSHandler, build_opener
+
+    def pinned(base, request):
+        direct = not request.has_proxy() and not getattr(request, '_tunnel_host', None)
+
+        class Connection(base):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                if direct:
+                    self._create_connection = _public_connection
+        return Connection
+
+    class PublicHTTP(HTTPHandler):
+        def http_open(self, request):
+            return self.do_open(pinned(http.client.HTTPConnection, request), request)
+
+    class PublicHTTPS(HTTPSHandler):
+        def https_open(self, request):
+            extra = {'check_hostname': self._check_hostname} if hasattr(self, '_check_hostname') else {}
+            return self.do_open(pinned(http.client.HTTPSConnection, request), request, context=self._context, **extra)
+
+    return build_opener(PublicHTTP(), PublicHTTPS(), *handlers)
 
 
 # ---------------------------------------------------------------- cards
@@ -1015,7 +1062,7 @@ def via_youtube(url, found, allow_audio=True, info=None):
 def via_stdlib(url):
     """No helper installed: plain HTTP fetch and a rough HTML-to-text."""
     from html.parser import HTMLParser
-    from urllib.request import HTTPRedirectHandler, Request, build_opener
+    from urllib.request import HTTPRedirectHandler, Request
 
     class PublicRedirects(HTTPRedirectHandler):
         def redirect_request(self, request, fp, code, msg, headers, new_url):
@@ -1052,7 +1099,7 @@ def via_stdlib(url):
     _safe_network_url(url)
     try:
         request = Request(url, headers={'User-Agent': 'Mozilla/5.0 (beyin-yakala)'})
-        with build_opener(PublicRedirects()).open(request, timeout=30) as response:
+        with _public_opener(PublicRedirects()).open(request, timeout=30) as response:
             if 'html' not in response.headers.get('Content-Type', 'text/html'):
                 return None
             html = response.read(5_000_000).decode(response.headers.get_content_charset() or 'utf-8', 'replace')
