@@ -112,6 +112,8 @@ def _auditable(path: Path, rel_path: str) -> tuple[dict, str] | None:
         return None
     if meta.get('visibility', 'internal') not in ('public', 'internal') or not _trusted_record(meta):
         return None
+    if meta.get('kind') == 'receipt' or meta.get('generated') is True or _status_word(meta) in RETIRED_STATUSES:
+        return None
     return meta, body
 
 
@@ -221,11 +223,6 @@ def scan_audit_candidates(vault: Path, state: Path | None = None) -> list[dict]:
 
             checked = _auditable(full_path, rel_path)
             if checked is None:
-                continue
-            meta = checked[0]
-            # Never context: sync skips receipts and generated views, every read route drops a
-            # retired status (archived, superseded, arsivlendi, eski, ...).
-            if meta.get('kind') == 'receipt' or meta.get('generated') is True or _status_word(meta) in RETIRED_STATUSES:
                 continue
             candidates.append(_candidate(full_path, rel_path, *checked))
 
@@ -372,6 +369,8 @@ def audit_memory(
         raise ValueError("threshold must be between 0.0 and 1.0")
     if min_shared < 1:
         raise ValueError("min_shared must be at least 1")
+    if limit < 0:
+        raise ValueError("limit must be nonnegative")
 
     candidates = scan_audit_candidates(vault, state=state)
     target_rel = None
@@ -402,7 +401,7 @@ def audit_memory(
             # but never a note the context itself would not show.
             checked = _auditable(given, target_rel)
             if checked is None:
-                raise ValueError("audit target is private, untrusted, a symlink or unreadable; the auditor does not read it")
+                raise ValueError("audit target is private, untrusted, retired, generated, a symlink or unreadable")
             target_candidate = _candidate(target_path, target_rel, *checked)
 
     # A note another trusted note supersedes is history for every read route. The core resolver
@@ -410,6 +409,8 @@ def audit_memory(
     pool = candidates + ([target_candidate] if target_candidate is not None and target_candidate not in candidates else [])
     retired = resolve_supersedes([{'id': c['id'], 'source': c['path'], 'supersedes': c['supersedes']} for c in pool])[0]
     candidates = [c for c in candidates if c['id'] not in retired]
+    if target_candidate is not None and target_candidate['id'] in retired:
+        raise ValueError("audit target is retired by supersedes")
 
     findings = []
     pairs_compared = 0

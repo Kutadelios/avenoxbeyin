@@ -368,6 +368,33 @@ class MemoryAuditorTest(unittest.TestCase):
                 self.assertEqual(report['findings'], [])
                 self.assertEqual(report['notes_scanned'], 1)
 
+    def test_target_cannot_bypass_retirement_or_generated_note_filters(self):
+        self._public_twin()
+        target = self.knowledge / 'hedef.md'
+        for front in ('status: archived', 'status: Arşivlendi', 'kind: receipt', 'generated: true'):
+            with self.subTest(front=front):
+                target.write_text('---\n' + front + '\n---\n' + self.SHARED, encoding='utf-8')
+                with self.assertRaises(ValueError):
+                    audit_module.audit_memory(self.vault, state=self.state,
+                                              target_file='knowledge/hedef.md', min_shared=3)
+
+    def test_superseded_target_does_not_reappear_in_findings(self):
+        self._public_twin()
+        (self.knowledge / 'yeni.md').write_text(
+            '---\nsupersedes: [knowledge/kuyruk.md]\n---\n' + self.SHARED, encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'retired'):
+            audit_module.audit_memory(self.vault, state=self.state,
+                                      target_file='knowledge/kuyruk.md', min_shared=3)
+
+    def test_negative_limit_is_rejected_and_zero_limit_is_empty(self):
+        self._public_twin()
+        (self.knowledge / 'yeni.md').write_text(self.SHARED, encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'limit'):
+            audit_module.audit_memory(self.vault, state=self.state, limit=-1)
+        report = audit_module.audit_memory(self.vault, state=self.state, limit=0)
+        self.assertEqual(report['findings'], [])
+        self.assertGreater(report['pairs_compared'], 0)
+
     def _cli_result(self, args):
         cmd = [sys.executable, str(self.vault / '.claude/scripts/beyin_v3_cli.py'),
                '--vault', str(self.vault), '--state', str(self.state)] + args
