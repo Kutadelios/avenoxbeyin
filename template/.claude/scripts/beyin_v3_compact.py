@@ -563,6 +563,12 @@ def _compact_files(vault, target, configured, dry_run=False, now=None):
             else:
                 previous_backup = _previous_backup(target, vault, name, now, backup) if result is None else None
                 if previous_backup is not None:
+                    # Nothing is written below, so the live check under `if added` never runs;
+                    # an older snapshot only covers the file if the scan did not race an edit.
+                    if (path.read_bytes() if path.exists() else None) != raw:
+                        files[name] = dict(report, status='conflict',
+                                           reason='file changed during compaction; nothing moved, retry')
+                        continue
                     report.update(backup='exists', archive=previous_backup)
                 else:
                     added.append(newline + heading + marker + newline + newline + backup +

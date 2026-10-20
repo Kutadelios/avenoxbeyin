@@ -81,6 +81,31 @@ class ArchiveReuseTest(unittest.TestCase):
         self.assertEqual(report['archive'], '850-Companion/Arşiv/Threads-2026-10.md')
         self.assertEqual(self.november.read_bytes(), existing)
 
+    def test_edit_during_prior_archive_scan_is_a_conflict_not_a_reused_backup(self):
+        self.compact()
+        stored = self.october.read_bytes()
+        original = compact_module._previous_backup
+
+        def scan_then_edit(*args):
+            found = original(*args)
+            with self.live.open('ab') as handle:
+                handle.write(b'CONCURRENT_EDIT\n')
+            return found
+
+        with mock.patch.object(compact_module, '_previous_backup', scan_then_edit):
+            result = compact_module.compact(self.vault, self.state, now=NOVEMBER)
+        report = result['files']['Threads.md']
+        self.assertEqual(result['status'], 'conflict')
+        self.assertEqual(report['status'], 'conflict')
+        self.assertNotIn('backup', report)
+        edited = self.live.read_bytes()
+        self.assertTrue(edited.endswith(b'CONCURRENT_EDIT\n'))
+        self.assertEqual(self.october.read_bytes(), stored)
+        self.assertFalse(self.november.exists())
+        retry = self.compact(NOVEMBER)
+        self.assertEqual(retry['backup'], 'written')
+        self.assertIn(edited, self.november.read_bytes())
+
     def test_missing_corrupt_or_changed_prior_archive_never_suppresses_a_backup(self):
         self.compact()
         saved = self.october.read_bytes()

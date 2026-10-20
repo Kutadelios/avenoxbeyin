@@ -141,7 +141,8 @@ Düzeltme dört parçadır:
   arşivde de aranır (toplam en fazla 8 MiB okuma); bulununca rapor gerçek eski arşiv
   yolunu verir, yeni ayda aynı metni yeniden yazmaz. Eksik, değişmiş, okunamayan,
   sembolik bağlı veya bu sınırların dışındaki arşiv bir yedeğin kanıtı sayılmaz;
-  komut güvenli biçimde yeni tam yedek yazar. Eski kopyaları silmez.
+  komut güvenli biçimde yeni tam yedek yazar. Eski kopyaları silmez. Tarama sırasında
+  canlı dosya değişirse eski yedek kabul edilmez ve `conflict` döner.
   Komut `needs_rewrite` döner; ajan dosyayı ancak bundan sonra sınır içinde
   yeniden yazar, böylece özetleme hiçbir metnin tek kopyası olmaz (#168). Arşiv
   yazıldıktan sonra canlı dosya değişmişse arşiv eski baytlarına döner ve `conflict`
