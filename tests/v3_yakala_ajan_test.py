@@ -571,6 +571,21 @@ class AgentCommandTest(AgentFiles):
         for flag in ('danger-full-access', '--yolo', '--dangerously-bypass-approvals-and-sandbox'):
             self.assertNotIn(flag, argv)
 
+    def test_prompt_carries_current_request_card_source_and_memory_obligations(self):
+        self.configure()
+        request = 'Kaynak hakkında kısa bir Türkçe not oluştur.'
+        result, job, card = self.queued(request=request, url='https://example.com/article')
+        prompt = yakala._agent_prompt(self.vault, job)
+        self.assertIn(request, prompt)
+        self.assertIn(card['path'].relative_to(self.vault).as_posix(), prompt)
+        self.assertIn('https://example.com/article', prompt)
+        for required in ('AGENTS.md', 'CLAUDE.md', 'beyin-yakala', 'receipt', 'Ajan/Gunluk-YYYY-MM.md'):
+            self.assertIn(required, prompt)
+        self.assertIn('--file <receipt.json>', prompt)
+        self.assertIn('durum ve kart/sonuc/receipt baglantilarini ekler', prompt)
+        self.assertNotIn('companion kartiyla', prompt)
+        self.assertNotIn('--session <gercek_oturum_id>', prompt)
+
 
 class AgentNetworkOptionTest(AgentFiles):
     """ag=kisitli is the default (exact source URLs only); ag=acik is an explicit research opt-in."""
@@ -1111,6 +1126,30 @@ class AgentFinalizationTest(AgentFiles):
             return owned
         return owned, launch
 
+    def test_success_publishes_exact_bytes_and_verified_memory_before_card_completion(self):
+        fixture = self.prepared()
+        with self.receipt_process(fixture) as receipt:
+            terminal, summary = yakala._agent_finalize(self.vault, self.state, fixture.job)
+        self.assertEqual(terminal, 'completed')
+        self.assertEqual(receipt.call_count, 2)
+        self.assertEqual(fixture.target.read_bytes(), self.TRACK)
+        self.assertEqual(fixture.card['path'].read_bytes(), fixture.card_before)
+        saved = yakala._agent_load_job(self.vault, self.state, fixture.job['id'])
+        self.assertEqual(saved['published'][0]['sha256'], hashlib.sha256(self.TRACK).hexdigest())
+        self.assertEqual(saved['published'][0]['path'], str(fixture.target))
+        self.assertEqual(saved['published'][0]['source_url'], 'https://example.com/track.mp3')
+        self.assertTrue((self.vault / saved['outcome']).is_file())
+        self.assertIn('yakala-' + fixture.job['id'], (self.vault / saved['receipt']).read_text(encoding='utf-8'))
+        journal = self.assertNewestEntry(fixture)
+        self.assertEqual(journal.count('<!-- yakala-ajan:' + fixture.job['id'] + ' -->'), 1)
+        self.assertNotIn(summary, journal)
+        self.assertEqual(fixture.other.read_bytes(), fixture.other_before)
+        self.assertEqual((self.vault / fixture.note['path']).read_bytes(), fixture.note_before)
+        yakala._agent_end(self.vault, self.state, fixture.job, terminal, summary)
+        card = yakala.find_card(self.vault, fixture.card['id'], self.state)
+        self.assertEqual(card['meta']['durum'], 'islendi')
+        self.assertEqual(card['meta']['ajan_receipt'], saved['receipt'])
+        self.assertEqual(card['body'], fixture.card['body'])
 
     def assertSummaryOmitted(self, visibility):
         fixture = self.prepared(download_names=())
@@ -1131,8 +1170,34 @@ class AgentFinalizationTest(AgentFiles):
         with self.assertRaisesRegex(ValueError, 'private'):
             yakala._agent_read_note(outcome)
 
+    def test_private_card_summary_stays_in_private_result_and_out_of_journal(self):
+        self.assertSummaryOmitted('private')
 
+    def test_internal_card_can_also_have_a_private_summary(self):
+        self.assertSummaryOmitted('internal')
 
+    def test_change_seen_before_replace_keeps_the_other_writer_and_adds_no_entry(self):
+        # Accepted residual risk (documented): a write landing after this check and before
+        # os.replace is lost; there is no portable compare-and-swap for tools without our lock.
+        fixture = self.prepared(download_names=())
+        journal = fixture.card['path'].parent / 'Ajan' / ('Gunluk-' + yakala.now().strftime('%Y-%m') + '.md')
+        journal.write_bytes(b'# Agent journal\r\n\r\nAn earlier entry.\r\n')
+        concurrent = journal.read_bytes() + b'Concurrent editor: important new decision.\r\n'
+        original = yakala._agent_insert_journal
+
+        def insert(before, card):
+            journal.write_bytes(concurrent)
+            return original(before, card)
+
+        with self.receipt_process(fixture), patch.object(yakala, '_agent_insert_journal', side_effect=insert), \
+                self.assertRaises(ValueError):
+            yakala._agent_finalize(self.vault, self.state, fixture.job)
+        self.assertEqual(journal.read_bytes(), concurrent)
+        self.assertEqual(fixture.last.read_bytes(), fixture.last_before)
+        saved = yakala._agent_load_job(self.vault, self.state, fixture.job['id'])
+        self.assertTrue((self.vault / saved['outcome']).is_file())
+        self.assertTrue((self.vault / saved['receipt']).is_file())
+        self.assertNotIn('journal', saved)
 
     def test_unverified_receipt_keeps_outputs_and_never_overwrites_prior_memory(self):
         fixture = self.prepared()
@@ -1172,6 +1237,40 @@ class AgentFinalizationTest(AgentFiles):
                 with self.receipt_process(fixture, status=status), self.assertRaises(ValueError):
                     yakala._agent_receipt(self.vault, self.state, fixture.job, 'Check pending status', refs)
 
+    def test_partial_publication_preserves_existing_target_and_records_actual_effects(self):
+        fixture = self.prepared(download_names=('track.mp3', 'existing.mp3'))
+        conflict = self.downloads / ('existing-yakala-' + fixture.job['id'][:8] + '.mp3')
+        existing = b'An existing download belongs to the user.'
+        conflict.write_bytes(existing)
+        with self.receipt_process(fixture) as receipt:
+            terminal, summary = yakala._agent_finalize(self.vault, self.state, fixture.job)
+        self.assertEqual(terminal, 'approval_required')
+        self.assertEqual(receipt.call_count, 2)
+        self.assertEqual(fixture.target.read_bytes(), self.TRACK)
+        self.assertEqual(conflict.read_bytes(), existing)
+        self.assertEqual(fixture.card['path'].read_bytes(), fixture.card_before)
+        folder = yakala._agent_job_dir(self.vault, self.state, fixture.job['id'])
+        self.assertEqual((folder / 'downloads/track.mp3').read_bytes(), self.TRACK)
+        saved = yakala._agent_load_job(self.vault, self.state, fixture.job['id'])
+        self.assertEqual([item['path'] for item in saved['published']], [str(fixture.target)])
+        self.assertEqual(saved['published'][0]['sha256'], hashlib.sha256(self.TRACK).hexdigest())
+        outcome = (self.vault / saved['outcome']).read_text(encoding='utf-8')
+        self.assertIn('approval_required', outcome)
+        self.assertIn(json.dumps(str(fixture.target), ensure_ascii=False), outcome)
+        payload = json.loads((folder / 'receipt.json').read_text(encoding='utf-8'))
+        self.assertIn('approval_required', payload['summary'])
+        self.assertIn(saved['outcome'], payload['refs'])
+        journal = self.assertNewestEntry(fixture)
+        self.assertIn('approval_required', journal)
+        partial = conflict.with_name(conflict.name + '.part')
+        self.assertEqual(partial.read_bytes(), self.TRACK)
+        self.assertEqual([entry['state'] for entry in saved['publication_intents']], ['published', 'copying'])
+        self.assertEqual(saved['publication_intents'][1]['partial'], str(partial))
+        self.assertIn(json.dumps(str(partial), ensure_ascii=False), outcome)
+        self.assertEqual({path.name for path in self.downloads.iterdir()},
+                         {fixture.target.name, conflict.name, partial.name})
+        yakala._agent_end(self.vault, self.state, fixture.job, terminal, summary)
+        self.assertEqual(yakala.find_card(self.vault, fixture.card['id'], self.state)['meta']['durum'], 'onay-bekliyor')
 
 
     def test_timeout_closes_the_owned_process_tree_before_recording_terminal_status(self):

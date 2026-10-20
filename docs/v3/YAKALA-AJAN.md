@@ -82,3 +82,12 @@ Windows'ta en az 0.163.0 ve açık `windows.sandbox="mxc"` gerekir. Desteklenmey
 MXC yerine legacy/read-only kullanılmaz. Linux'ta gerçek resmi Codex ikilisi
 ölçülmüştür; native Windows ve macOS aynı sonuç varsayılamaz.
 [MXC kaynak incelemesi ve Windows kabul testi](CODEX-WINDOWS-MXC.md) ayrı belgededir.
+
+## Aylık ajan günlüğü
+
+Receipt ve sonuç dosyaları doğrulandıktan sonra Yakala klasörünün
+`Ajan/Gunluk-YYYY-MM.md` notuna kart, özel sonuç ve receipt bağlantıları eklenir.
+Günlük aranabilir bir yönlendirme notudur; kullanıcı isteği veya sonuç özeti
+günlüğe kopyalanmaz. Aynı iş yeniden sonlandırılırsa iş kimliğiyle yinelenmesi
+önlenir. Eşzamanlı kullanıcı değişikliği fark edilirse yazma durur; mevcut not
+ezilmez. Last-Session bu katmanda da değiştirilmez.
