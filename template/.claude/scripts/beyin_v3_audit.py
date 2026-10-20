@@ -131,10 +131,8 @@ def _candidate(path: Path, rel_path: str, meta: dict, body: str) -> dict:
     modified_val = meta.get('modified') or meta.get('updated_at') or meta.get('modified_at')
     updated_ts = parse_date_to_timestamp(modified_val)
     if updated_ts is None:
-        try:
-            updated_ts = path.stat().st_mtime
-        except OSError:
-            updated_ts = 0.0
+        # Sync and checkout can rewrite mtime; only a note's own dates establish chronology.
+        updated_ts = created_ts if created_ts is not None else 0.0
     if created_ts is None:
         created_ts = updated_ts
     body_tokens = _strict_terms(_tokens(body) - STOPWORDS)
@@ -297,7 +295,9 @@ def _evaluate_pair(a: dict, b: dict, threshold: float, min_shared: int) -> dict 
     if any(ref in (older['path'], older_stem) for ref in newer.get('supersedes', [])):
         return None
 
-    conflict = _detect_status_conflict(older, newer)
+    # A path tie-break keeps output stable but cannot establish a change over time.
+    chronology_known = time_a > 0 and time_b > 0 and time_a != time_b
+    conflict = _detect_status_conflict(older, newer) if chronology_known else None
     novel_newer = sorted(newer['tokens'] - older['tokens'])
     novel_sample = novel_newer[:6]
 

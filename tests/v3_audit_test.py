@@ -395,6 +395,28 @@ class MemoryAuditorTest(unittest.TestCase):
         self.assertEqual(report['findings'], [])
         self.assertGreater(report['pairs_compared'], 0)
 
+    def test_created_dates_determine_status_order_despite_rewritten_mtime(self):
+        old = self.knowledge / 'eski.md'
+        new = self.knowledge / 'yeni.md'
+        old.write_text('---\ncreated: 2026-09-01\nstatus: failed\n---\n' + self.SHARED, encoding='utf-8')
+        new.write_text('---\ncreated: 2026-10-01\nstatus: passed\n---\n' + self.SHARED, encoding='utf-8')
+        os.utime(old, (2000000000, 2000000000))
+        os.utime(new, (1000000000, 1000000000))
+        finding = audit_module.audit_memory(self.vault, state=self.state)['findings'][0]
+        self.assertEqual(finding['older_note'], 'knowledge/eski.md')
+        self.assertEqual(finding['conflict']['direction'], 'negative_to_positive')
+
+    def test_unknown_or_equal_dates_do_not_claim_a_status_change(self):
+        for front in ('', 'created: 2026-10-01\n'):
+            with self.subTest(front=front):
+                (self.knowledge / 'a.md').write_text(
+                    '---\n' + front + 'status: failed\n---\n' + self.SHARED, encoding='utf-8')
+                (self.knowledge / 'b.md').write_text(
+                    '---\n' + front + 'status: passed\n---\n' + self.SHARED, encoding='utf-8')
+                findings = audit_module.audit_memory(self.vault, state=self.state)['findings']
+                self.assertEqual(len(findings), 1)
+                self.assertEqual(findings[0]['type'], 'near_duplicate')
+
     def _cli_result(self, args):
         cmd = [sys.executable, str(self.vault / '.claude/scripts/beyin_v3_cli.py'),
                '--vault', str(self.vault), '--state', str(self.state)] + args
