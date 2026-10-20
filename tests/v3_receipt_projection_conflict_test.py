@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from datetime import datetime, timezone
-from v3_package_helpers import inherited_env
+from v3_package_helpers import isolated_env
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / 'template/.claude/scripts'
@@ -27,7 +27,8 @@ class ReceiptProjectionConflictTest(unittest.TestCase):
         self.vault = self.root / 'vault'
         self.vault.mkdir()
         self.state = self.root / 'state'
-        self.env = inherited_env(BEYIN_UPDATES_OFF='1', PYTHONDONTWRITEBYTECODE='1')
+        self.env = isolated_env(self.root / 'home')
+        self.env['BEYIN_UPDATES_OFF'] = '1'
         (self.vault / 'notes').mkdir(parents=True)
         (self.vault / 'notes/canary.md').write_text(
             '---\nkind: fact\nvisibility: internal\n---\n# Nebula memory canary\nNebula memory canary code is NC-7319.\n',
@@ -43,8 +44,20 @@ class ReceiptProjectionConflictTest(unittest.TestCase):
             'cwd': str(vault),
             'prompt': prompt,
         }
+        command = [sys.executable, str(scripts / 'beyin_v3_hook.py'),
+                   '--vault', str(vault), '--state', str(state), '--harness', 'codex']
+        # These tests assert the completed sync's warnings, not the bounded pending-sync path.
+        # Queue the real event and drain synchronously, then read the acknowledged event's context.
+        # A detached worker can outlive SYNC_WAIT on Windows and keep SQLite open during cleanup.
+        queued = subprocess.run(command + ['--metadata-only'], input=json.dumps(payload),
+                                text=True, capture_output=True, env=env, timeout=60)
+        self.assertEqual(queued.returncode, 0, queued.stderr)
+        drained = subprocess.run(command + ['--drain-queue'], capture_output=True, text=True,
+                                 env=env, timeout=60)
+        self.assertEqual(drained.returncode, 0, drained.stderr)
+        self.assertEqual(json.loads(drained.stdout)['failed'], 0)
         return subprocess.run(
-            [sys.executable, str(scripts / 'beyin_v3_hook.py'), '--vault', str(vault), '--state', str(state), '--harness', 'codex'],
+            command,
             input=json.dumps(payload),
             text=True,
             capture_output=True,
