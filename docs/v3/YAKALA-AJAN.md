@@ -111,3 +111,13 @@ gizlilik kapılarını, Codex root-deny/MXC zorunluluğunu veya süre sınırın
 genişletmez. Konsol açık kalsa bile tamamlanan veya süresi dolan işin MCP
 yetkisi biter. Pencere kapanışı, ConPTY ve gerçek Win32 süreç sahipliği
 kullanıcının Windows kabul denemesinin parçasıdır.
+
+## Yakala penceresinden teslim
+
+Enter mevcut kart kaydetme davranışını sürdürür. Ctrl+Enter, ajan açıkken tek kartı
+kullanıcının yazdığı açık istekle kuyruğa verir; boş istek iş oluşturmaz. Pencere
+kapanışı bekleyen arayüz callbackini iptal eder. Windows worker, popup JobObject
+ömründen güvenli ayrılır; genel kabuk yetkisi verilmez. Başlatma, gizlilik, ağ,
+süreli yetki ve doğrulanmış receipt sınırları önceki katmanlarla aynıdır.
+Bu katmanın Win32/WGC testleri Linux üzerinde test double kullanır; gerçek
+Windows klavye, pencere ve yakalama davranışı ayrıca canlı doğrulanmalıdır.
