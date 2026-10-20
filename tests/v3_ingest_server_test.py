@@ -243,6 +243,7 @@ class IngestServerTest(unittest.TestCase):
 
     def test_stress_http_socket_resilience(self):
         import socket
+        import struct
         import threading
         import time
         server = ingest_server.create_server(self.vault, port=0)
@@ -259,12 +260,15 @@ class IngestServerTest(unittest.TestCase):
         t.start()
         self.addCleanup(lambda: (server.shutdown(), server.server_close(), t.join(2)))
 
+        # Winsock linger uses two shorts; POSIX uses two native ints.
+        linger = struct.pack('hh' if sys.platform == 'win32' else 'ii', 1, 0)
+
         # 1. Connection reset during read
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect(("127.0.0.1", port))
         s.sendall(b"POST /ingest HTTP/1.1\r\nContent-Length: 100\r\n\r\n")
         s.sendall(b"half data")
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b'\x01\x00\x00\x00\x00\x00\x00\x00')
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
         s.close()
         time.sleep(0.05)
 
@@ -278,7 +282,7 @@ class IngestServerTest(unittest.TestCase):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect(("127.0.0.1", port))
         s.sendall(b"OPTIONS /ingest HTTP/1.1\r\n\r\n")
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b'\x01\x00\x00\x00\x00\x00\x00\x00')
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
         s.close()
         time.sleep(0.05)
 
@@ -286,7 +290,7 @@ class IngestServerTest(unittest.TestCase):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect(("127.0.0.1", port))
         s.sendall(b"GET /health HTTP/1.1\r\n\r\n")
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b'\x01\x00\x00\x00\x00\x00\x00\x00')
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
         s.close()
         time.sleep(0.05)
 
