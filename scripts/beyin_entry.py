@@ -596,10 +596,28 @@ def human_result(result, command, installed_version=None):
             message = '\n'.join([message] + index_exclusion_lines(result.get('index_exclusions'), pruned=True) +
                                 (sync_copy_lines(result) if command == 'sync' else []))
     if result.get('trust_review_required'):
-        message += '\nHook tanimi degisti: Codex /hooks guven incelemesini tamamla ve yeni oturum ac.'
+        message += '\n' + trust_review_line(result.get('trust_review_files'))
     if result.get('view_conflicts'):
         message += '\nReceipt gorunumleri korundu: ' + ', '.join(plain_text(c['source']) for c in result['view_conflicts']) + '. Kurtarma: beyin.py sync --recover-views'
     return message
+
+
+# Hook definition file -> the step its client needs before the new hooks run (SETUP-V3.md step 5).
+TRUST_REVIEW = {
+    '.codex/hooks.json': 'Codex: /hooks guven incelemesi',
+    '.kiro/hooks/beyin-v3.json': 'Kiro: Agent Hooks paneli veya CLI /hooks incelemesi',
+    '.agents/hooks.json': 'Antigravity: vault klasorune guven',
+    '.claude/settings.local.json': 'Claude Code: ek inceleme yok',
+}
+
+
+def trust_review_line(files):
+    """Name only the clients whose hook definitions changed; an older updater gives no list."""
+    changed = [name for name in TRUST_REVIEW if name in (files or ())]
+    if not changed:
+        return 'Hook tanimi degisti: kullandigin istemcide guven incelemesini tamamla ve yeni oturum ac.'
+    return ('Hook tanimi degisti (' + ', '.join(changed) + '). ' +
+            '; '.join(TRUST_REVIEW[name] for name in changed) + '. Ardindan yeni oturum ac.')
 
 
 def load_cli(directory):
