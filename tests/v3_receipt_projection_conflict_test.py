@@ -34,8 +34,21 @@ class ReceiptProjectionConflictTest(unittest.TestCase):
             encoding='utf-8',
         )
 
-    def _invoke_hook(self, vault, state, prompt='What is the Nebula memory canary code?', scripts=SCRIPTS):
+    def _invoke_hook(self, vault, state, prompt='What is the Nebula memory canary code?', scripts=SCRIPTS,
+                     completed_sync=False):
         env = self.env
+        command = [sys.executable, str(scripts / 'beyin_v3_hook.py'), '--vault', str(vault),
+                   '--state', str(state), '--harness', 'codex']
+        if completed_sync:
+            # Inspect completed sync diagnostics, independently of the hook's 1.5 s
+            # foreground budget. Wait for the real worker and prevent a detached
+            # replacement from racing assertions or temporary-directory cleanup.
+            env = dict(env, BEYIN_V3_NO_SPAWN='1')
+            worker = subprocess.run(command + ['--worker'], text=True, capture_output=True,
+                                    encoding='utf-8', env=env, timeout=60)
+            self.assertEqual(worker.returncode, 0, worker.stderr)
+            self.assertTrue((state / 'hook-health.json').is_file(), worker.stdout)
+            self.assertFalse((state / 'hook-error.json').exists(), worker.stdout)
         payload = {
             'hook_event_name': 'UserPromptSubmit',
             'session_id': 'isolated-session',
@@ -44,7 +57,7 @@ class ReceiptProjectionConflictTest(unittest.TestCase):
             'prompt': prompt,
         }
         return subprocess.run(
-            [sys.executable, str(scripts / 'beyin_v3_hook.py'), '--vault', str(vault), '--state', str(state), '--harness', 'codex'],
+            command,
             input=json.dumps(payload),
             text=True,
             capture_output=True,
@@ -298,7 +311,9 @@ class ReceiptProjectionConflictTest(unittest.TestCase):
         result = json.loads(context.stdout)
         self.assertTrue(any(row['source'] == 'Paylaşım/Özet.md' for row in result['records']))
         self.assertEqual(result['source_sync']['warnings'][0]['source'], 'knowledge/v3/outcomes.md')
-        hook = self._invoke_hook(self.vault, self.state, scripts=self.vault / '.claude/scripts')
+        hook = self._invoke_hook(self.vault, self.state, scripts=self.vault / '.claude/scripts',
+                                 completed_sync=True)
+        self.assertEqual(hook.returncode, 0, hook.stderr)
         self.assertIn('NC-7319', hook.stdout)
         self.assertIn('V3 receipt view preserved', hook.stdout)
         self.assertEqual(view.read_bytes(), before)
