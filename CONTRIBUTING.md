@@ -73,7 +73,7 @@ Testleri gevşeterek sonuç elde etmeyin, kullanıcı dosyalarını izinsiz değ
 
 **Özellik önerisi:** Kullanım senaryosunu, mevcut alternatifleri, olası yan etkileri ve bakım maliyetini anlatın. [Özellik şablonu](.github/ISSUE_TEMPLATE/feature_request.md) kullanılabilir.
 
-**PR:** Fork/branch adı için zorunlu bir yöntem yoktur. [PR şablonunda](.github/PULL_REQUEST_TEMPLATE.md) neyin neden değiştiğini, önceki/yeni davranışı, uygulanan testleri ve gerçek sonuçlarını, riskleri, denenmeyen platformları ve gerekiyorsa rollback etkilerini belirtin.
+**PR:** Fork/branch adı için zorunlu bir yöntem yoktur. [PR şablonunda](.github/PULL_REQUEST_TEMPLATE.md) neyin neden değiştiğini, önceki/yeni davranışı, uygulanan testleri ve gerçek sonuçlarını belirtin. Gizlilik, kullanıcı verileri, istemci/platform farklılıkları, denenmeyen platformlar ve gerekiyorsa kurulum/rollback risklerini açıklayın.
 
 - **`Fixes #N`:** Issue tamamen çözülüyorsa; merge edildiğinde issue otomatik kapanır.
 - **`Refs #N`:** Kısmi çalışma veya ilgili tartışma için.
@@ -87,7 +87,7 @@ Bu bölüm, katkıcıya ek zorunluluk koymak yerine PR'ların nasıl değerlendi
 - Açık PR ve issue'lar bakım turlarında incelenir. Her PR ayrı `git worktree` üzerinde değerlendirilir; iddialar güncel `main` üzerinde gerçek kurulum, dosya veya veritabanı satırıyla doğrulanır. Mock veri tek başına kanıt değildir; regresyonun `RED` aşaması da kontrol edilir.
 - Katkıcı commit'leri yeniden yazılmaz (rebase/squash/force-push yapılmaz). Gerekli küçük maintainer düzeltmeleri ayrı commit olarak eklenir ve PR'da açıklanır. PR'lar **merge commit** ile alınır, yazarlık korunur.
 - Birden fazla PR aynı turda birleşik ağaçta denenir; çakışmalar çözülür, Python **3.11 ve 3.14** testleri ile `scripts/evaluate_v3.py` çalıştırılır. PR'lar sırayla merge edilir ve son `main` test edilen ağaçla karşılaştırılır.
-- CI Linux, macOS ve Windows'ta çalışır; ilk kez katkı verenlerin fork koşuları onay gerektirebilir. PR'sı olmayan yeniden üretilebilir hatalar maintainer tarafından düzeltilebilir ve raporlayan `Reported-by` ile anılabilir. Ürün yönü, merge ve yayın kararları maintainer'a aittir.
+- CI Linux, macOS ve Windows'ta çalışır; ilk kez katkı verenlerin fork kaynaklı CI koşuları onaydan sonra başlar. PR'sı olmayan yeniden üretilebilir hatalar maintainer tarafından düzeltilebilir ve raporlayan `Reported-by` ile anılabilir. Tasarım ve öneri issue'larına durum notu yazılır. Ürün yönü, merge ve yayın kararları maintainer'a aittir.
 
 ## 7. Gizlilik ve güvenlik
 
