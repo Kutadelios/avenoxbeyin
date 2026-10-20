@@ -692,6 +692,7 @@ class YakalaUnitTest(unittest.TestCase):
             commands.append(command)
             return subprocess.CompletedProcess(command, code, clip if isinstance(clip, bytes) else clip.encode('utf-8'), b'')
         with patch.object(yakala.sys, 'platform', 'linux'), patch.dict(yakala.os.environ, {'WAYLAND_DISPLAY': 'wayland-0'}), \
+                patch.object(yakala, 'linux_browser_context', return_value={}), \
                 patch.object(yakala, '_which', lambda *names: next(('/usr/bin/' + n for n in names if n not in missing), None)), \
                 patch.object(yakala.subprocess, 'run', run):
             if not wayland:

@@ -1336,45 +1336,513 @@ def _objc():
 
 def mac_frontmost():
     import ctypes
+    pool = None
     try:
         objc, send = _objc()
+        pool = send(send(objc.objc_getClass(b'NSAutoreleasePool'), b'alloc'), b'init')
         workspace = send(objc.objc_getClass(b'NSWorkspace'), b'sharedWorkspace')
         app = send(workspace, b'frontmostApplication')
 
         def string(value):
             raw = send(value, b'UTF8String', ctypes.c_char_p) if value else None
             return raw.decode('utf-8') if raw else None
-        return {'uygulama': string(send(app, b'localizedName')), 'bundle': string(send(app, b'bundleIdentifier'))}
+        pid = send(app, b'processIdentifier', ctypes.c_int)
+        result = {'uygulama': string(send(app, b'localizedName')),
+                  'bundle': string(send(app, b'bundleIdentifier')), 'pid': pid}
+        result.update(_mac_window_cursor(pid, objc, send))
+        # NSWorkspace and the window server are separate snapshots.
+        if send(send(workspace, b'frontmostApplication'), b'processIdentifier', ctypes.c_int) != pid:
+            return {}
+        return result
     except Exception:
         return {}
+    finally:
+        if pool:
+            send(pool, b'drain', None)
 
 
 CHROMIUM = {'com.google.Chrome', 'com.google.Chrome.canary', 'com.brave.Browser', 'com.microsoft.edgemac',
-            'company.thebrowser.Browser', 'com.vivaldi.Vivaldi', 'com.operasoftware.Opera'}
+            'com.vivaldi.Vivaldi', 'com.operasoftware.Opera', 'com.operasoftware.OperaGX',
+            'com.operasoftware.OperaAir', 'org.chromium.Chromium'}
+MAC_SAFARI = {'com.apple.Safari', 'com.apple.SafariTechnologyPreview'}
+# Arc's dictionary differs from Chromium. Gecko has no browser AppleScript dictionary.
+# They use the same native AX role/URL contract, never an address-bar text heuristic.
+MAC_AX_BROWSERS = CHROMIUM | MAC_SAFARI | {
+    'company.thebrowser.Browser', 'org.mozilla.firefox', 'org.mozilla.firefoxdeveloperedition',
+    'org.mozilla.nightly', 'app.zen-browser.zen', 'app.zen-browser.zen-twilight',
+    'ru.yandex.desktop.yandex-browser'}
+MAC_BROWSER_TIMEOUT = 2.5
+MAC_AX_TIMEOUT = 1.0
+MAC_AX_NODES = 256
 
 
-def _osascript(script, timeout=2.5):
+def _mac_window_cursor(pid, objc, send):
+    """Window-server identity and pointer in the same top-left screen coordinates as AX.
+
+    No title/image request or permission changes. Window IDs, PIDs and bounds are required
+    metadata; absent metadata disables browser capture instead of guessing.
+    """
+    import ctypes as C
+    cg = C.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+    cf = C.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
+
+    class Point(C.Structure):
+        _fields_ = [('x', C.c_double), ('y', C.c_double)]
+
+    cg.CGWindowListCopyWindowInfo.argtypes = [C.c_uint32, C.c_uint32]
+    cg.CGWindowListCopyWindowInfo.restype = C.c_void_p
+    cg.CGEventCreate.argtypes, cg.CGEventCreate.restype = [C.c_void_p], C.c_void_p
+    cg.CGEventGetLocation.argtypes, cg.CGEventGetLocation.restype = [C.c_void_p], Point
+    cf.CFRelease.argtypes, cf.CFRelease.restype = [C.c_void_p], None
+    windows = event = None
+    result = {}
+
+    def item(mapping, key):
+        return send(mapping, b'objectForKey:', C.c_void_p,
+                    C.c_void_p(_nsstring(objc, send, key)))
+
+    def number(mapping, key):
+        value = item(mapping, key)
+        return send(value, b'doubleValue', C.c_double) if value else None
+
     try:
-        result = subprocess.run(['osascript', '-e', script], capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
-        return result.stdout.decode('utf-8', 'replace').strip() if result.returncode == 0 else None
+        windows = cg.CGWindowListCopyWindowInfo(1 | 16, 0)  # on-screen, excluding desktop
+        if windows:
+            for index in range(min(send(windows, b'count', C.c_ulong), 4096)):
+                window = send(windows, b'objectAtIndex:', C.c_void_p, C.c_ulong(index))
+                if number(window, 'kCGWindowOwnerPID') != pid or number(window, 'kCGWindowLayer') != 0:
+                    continue
+                identifier = number(window, 'kCGWindowNumber')
+                bounds = item(window, 'kCGWindowBounds')
+                rectangle = [number(bounds, key) for key in ('X', 'Y', 'Width', 'Height')] if bounds else []
+                if identifier and len(rectangle) == 4 and all(v is not None for v in rectangle) and rectangle[2] > 0 and rectangle[3] > 0:
+                    result.update(mac_window=int(identifier), mac_bounds=rectangle)
+                break  # only the foremost normal window belonging to this application
+        event = cg.CGEventCreate(None)
+        if event:
+            point = cg.CGEventGetLocation(event)
+            result['imlec'] = [point.x, point.y]
+        return result
+    finally:
+        for value in (event, windows):
+            if value:
+                cf.CFRelease(value)
+
+
+def _mac_identity(front):
+    if not isinstance(front, dict) or type(front.get('pid')) is not int or front['pid'] <= 0 or \
+            type(front.get('mac_window')) is not int or front['mac_window'] <= 0:
+        return None
+    return front.get('bundle'), front['pid'], front['mac_window'], front.get('mac_bounds')
+
+
+def _mac_url(value):
+    """An exact absolute provider URL. Do not trim, repair, resolve or add a scheme."""
+    if not isinstance(value, str) or len(value) > 32768 or not re.match(r'^https?://', value, re.I) or \
+            any(c.isspace() or ord(c) < 32 or ord(c) == 127 or c == '\\' for c in value):
+        return None
+    try:
+        return _safe_source_url(value)
+    except ValueError:
+        return None
+
+
+def _mac_point(point):
+    import math
+    return isinstance(point, (list, tuple)) and len(point) == 2 and all(
+        type(v) in (int, float) and math.isfinite(v) and abs(v) < 1e7 for v in point)
+
+
+def _mac_rect(rectangle):
+    import math
+    return isinstance(rectangle, (list, tuple)) and len(rectangle) == 4 and all(
+        type(v) in (int, float) and math.isfinite(v) and abs(v) < 1e7 for v in rectangle) and \
+        rectangle[2] > 0 and rectangle[3] > 0
+
+
+def _mac_inside(point, rectangle):
+    return _mac_point(point) and _mac_rect(rectangle) and rectangle[0] <= point[0] < rectangle[0] + rectangle[2] and \
+        rectangle[1] <= point[1] < rectangle[1] + rectangle[3]
+
+
+class _MacAX:
+    """Small, read-only ApplicationServices binding, used only in the killable AX child.
+
+    Every Copy/Create result is retained until this bounded snapshot ends. CFEqual, not
+    pointer equality, compares AX objects. URL attributes may be CFURL or CFString.
+    """
+
+    def __init__(self, pid):
+        import ctypes as C
+        self.C, self.owned, self.keys = C, [], {}
+        self.ax = C.CDLL('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
+        self.cf = C.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
+        ptr, out = C.c_void_p, C.POINTER(C.c_void_p)
+        for function, result, args in (
+                (self.ax.AXIsProcessTrusted, C.c_bool, []),
+                (self.ax.AXUIElementCreateApplication, ptr, [C.c_int]),
+                (self.ax.AXUIElementCreateSystemWide, ptr, []),
+                (self.ax.AXUIElementGetTypeID, C.c_ulong, []),
+                (self.ax.AXUIElementGetPid, C.c_int, [ptr, C.POINTER(C.c_int)]),
+                (self.ax.AXUIElementSetMessagingTimeout, C.c_int, [ptr, C.c_float]),
+                (self.ax.AXUIElementCopyAttributeValue, C.c_int, [ptr, ptr, out]),
+                (self.ax.AXUIElementGetAttributeValueCount, C.c_int, [ptr, ptr, C.POINTER(C.c_long)]),
+                (self.ax.AXUIElementCopyAttributeValues, C.c_int, [ptr, ptr, C.c_long, C.c_long, out]),
+                (self.ax.AXUIElementCopyElementAtPosition, C.c_int, [ptr, C.c_float, C.c_float, out]),
+                (self.ax.AXValueGetType, C.c_int, [ptr]),
+                (self.ax.AXValueGetTypeID, C.c_ulong, []),
+                (self.ax.AXValueGetValue, C.c_bool, [ptr, C.c_int, ptr]),
+                (self.cf.CFRelease, None, [ptr]),
+                (self.cf.CFEqual, C.c_bool, [ptr, ptr]),
+                (self.cf.CFGetTypeID, C.c_ulong, [ptr]),
+                (self.cf.CFStringGetTypeID, C.c_ulong, []),
+                (self.cf.CFURLGetTypeID, C.c_ulong, []),
+                (self.cf.CFBooleanGetTypeID, C.c_ulong, []),
+                (self.cf.CFNumberGetTypeID, C.c_ulong, []),
+                (self.cf.CFArrayGetTypeID, C.c_ulong, []),
+                (self.cf.CFBooleanGetValue, C.c_bool, [ptr]),
+                (self.cf.CFNumberGetValue, C.c_bool, [ptr, C.c_long, ptr]),
+                (self.cf.CFURLGetString, ptr, [ptr]),
+                (self.cf.CFStringCreateWithCString, ptr, [ptr, C.c_char_p, C.c_uint32]),
+                (self.cf.CFStringGetLength, C.c_long, [ptr]),
+                (self.cf.CFStringGetCString, C.c_bool, [ptr, C.c_char_p, C.c_long, C.c_uint32]),
+                (self.cf.CFArrayGetCount, C.c_long, [ptr]),
+                (self.cf.CFArrayGetValueAtIndex, ptr, [ptr, C.c_long])):
+            function.restype, function.argtypes = result, args
+        self.trusted = bool(self.ax.AXIsProcessTrusted())  # never requests a permission prompt
+        self.app = self.system = None
+        if self.trusted:
+            self.app = self.keep(self.ax.AXUIElementCreateApplication(pid))
+            self.system = self.keep(self.ax.AXUIElementCreateSystemWide())
+            self.ax.AXUIElementSetMessagingTimeout(self.system, 0.15)
+            self.ax.AXUIElementSetMessagingTimeout(self.app, 0.15)
+
+    def keep(self, value):
+        if value:
+            self.owned.append(value)
+        return value
+
+    def close(self):
+        for value in reversed(self.owned):
+            self.cf.CFRelease(value)
+        self.owned.clear()
+
+    def key(self, name):
+        if name not in self.keys:
+            self.keys[name] = self.keep(self.cf.CFStringCreateWithCString(None, name.encode('ascii'), 0x08000100))
+        return self.keys[name]
+
+    def get(self, element, name):
+        value = self.C.c_void_p()
+        if not element:
+            return None
+        error = self.ax.AXUIElementCopyAttributeValue(element, self.key(name), self.C.byref(value))
+        if error == 0:
+            return self.keep(value.value)
+        if error not in (-25205, -25212):  # unsupported optional attribute, no value
+            raise ValueError('ax-attribute-unavailable')
+        return None
+
+    def text(self, element, name):
+        value = self.get(element, name)
+        if not value:
+            return None
+        if self.cf.CFGetTypeID(value) == self.cf.CFURLGetTypeID():
+            value = self.cf.CFURLGetString(value)
+        if not value or self.cf.CFGetTypeID(value) != self.cf.CFStringGetTypeID():
+            return None
+        length = self.cf.CFStringGetLength(value)
+        if not 0 <= length <= 32768:
+            return None
+        buffer = self.C.create_string_buffer(length * 4 + 1)
+        if self.cf.CFStringGetCString(value, buffer, len(buffer), 0x08000100):
+            return buffer.value.decode('utf-8')
+        return None
+
+    def flag(self, element, name):
+        value = self.get(element, name)
+        return bool(self.cf.CFBooleanGetValue(value)) if value and \
+            self.cf.CFGetTypeID(value) == self.cf.CFBooleanGetTypeID() else None
+
+    def number(self, element, name):
+        value = self.get(element, name)
+        if not value:
+            return None
+        if self.cf.CFGetTypeID(value) != self.cf.CFNumberGetTypeID():
+            raise ValueError('ax-number-invalid')
+        result = self.C.c_double()
+        if not self.cf.CFNumberGetValue(value, 13, self.C.byref(result)):  # kCFNumberDoubleType
+            raise ValueError('ax-number-conversion')
+        return result.value
+
+    def element(self, element, name):
+        value = self.get(element, name)
+        return value if value and self.cf.CFGetTypeID(value) == self.ax.AXUIElementGetTypeID() else None
+
+    def equal(self, first, second):
+        return bool(first and second and self.cf.CFEqual(first, second))
+
+    def pid(self, element):
+        pid = self.C.c_int()
+        return pid.value if element and self.ax.AXUIElementGetPid(element, self.C.byref(pid)) == 0 else None
+
+    def children(self, element):
+        count, value = self.C.c_long(), self.C.c_void_p()
+        error = self.ax.AXUIElementGetAttributeValueCount(element, self.key('AXChildren'), self.C.byref(count))
+        if error in (-25205, -25212):
+            return []  # leaf roles need not expose AXChildren
+        if error != 0:
+            raise ValueError('ax-children-unavailable')
+        if not 0 <= count.value <= MAC_AX_NODES:
+            raise ValueError('ax-children-limit')
+        if not count.value:
+            return []
+        if self.ax.AXUIElementCopyAttributeValues(element, self.key('AXChildren'), 0, count.value, self.C.byref(value)) != 0:
+            raise ValueError('ax-children-unavailable')
+        array = self.keep(value.value)
+        if not array or self.cf.CFGetTypeID(array) != self.cf.CFArrayGetTypeID() or self.cf.CFArrayGetCount(array) != count.value:
+            raise ValueError('ax-children-invalid')
+        elements = [self.cf.CFArrayGetValueAtIndex(array, n) for n in range(count.value)]
+        if any(not child or self.cf.CFGetTypeID(child) != self.ax.AXUIElementGetTypeID() for child in elements):
+            raise ValueError('ax-child-invalid')
+        return elements  # borrowed refs stay alive through the retained array
+
+    def has_sheets(self, window):
+        value = self.get(window, 'AXSheets')
+        if not value:
+            return False
+        return self.cf.CFGetTypeID(value) != self.cf.CFArrayGetTypeID() or self.cf.CFArrayGetCount(value) != 0
+
+    def bounds(self, element):
+        C = self.C
+
+        class Pair(C.Structure):
+            _fields_ = [('first', C.c_double), ('second', C.c_double)]
+
+        result = []
+        for name, kind in (('AXPosition', 1), ('AXSize', 2)):
+            value, pair = self.get(element, name), Pair()
+            if not value or self.cf.CFGetTypeID(value) != self.ax.AXValueGetTypeID() or \
+                    self.ax.AXValueGetType(value) != kind or not self.ax.AXValueGetValue(value, kind, C.byref(pair)):
+                return None
+            result.extend((pair.first, pair.second))
+        return result if _mac_rect(result) else None
+
+    def hit(self, at):
+        value = self.C.c_void_p()
+        if _mac_point(at) and self.ax.AXUIElementCopyElementAtPosition(self.system, at[0], at[1], self.C.byref(value)) == 0:
+            return self.keep(value.value)
+        return None
+
+
+def _mac_ax_document(ax, window):
+    """Exactly one top-level, visible WebArea under the focused window. Frames stay inside it."""
+    import math
+    queue, seen, found = [(window, 0)], [], []
+    while queue:
+        element, depth = queue.pop(0)
+        if len(seen) >= MAC_AX_NODES or depth > 16 or any(ax.equal(element, old) for old in seen):
+            raise ValueError('ax-tree-ambiguous')
+        seen.append(element)
+        if ax.flag(element, 'AXHidden') is True:
+            continue
+        role = ax.text(element, 'AXRole')
+        if not isinstance(role, str) or not role or role == 'AXUnknown':
+            raise ValueError('ax-role-unknown')  # a role-less document must not promote its iframe
+        if role == 'AXWebArea':
+            rectangle = ax.bounds(element)
+            window_bounds = ax.bounds(window)
+            if not rectangle or not window_bounds:
+                raise ValueError('ax-document-bounds')
+            if rectangle[0] < window_bounds[0] + window_bounds[2] and \
+                    rectangle[0] + rectangle[2] > window_bounds[0] and rectangle[1] < window_bounds[1] + window_bounds[3] and \
+                    rectangle[1] + rectangle[3] > window_bounds[1]:
+                found.append(element)
+            continue  # do not mistake nested frame URLs for the top-level document
+        queue.extend((child, depth + 1) for child in ax.children(element))
+    if len(found) > 1:
+        raise ValueError('ax-multiple-documents')
+    if not found:
+        return None
+    document = found[0]
+    url = _mac_url(ax.text(document, 'AXURL'))
+    if not url or ax.flag(document, 'AXLoaded') is False:
+        raise ValueError('ax-document-unsettled')
+    # Gecko's AXLoaded has used a zero BUSY & STALE mask. Its progress still reports
+    # stale=0, busy=0.5, ready=1; use that independent signal when the provider has it.
+    progress = ax.number(document, 'AXLoadingProgress')
+    if progress is not None and (type(progress) not in (int, float) or not math.isfinite(progress) or progress != 1.0):
+        raise ValueError('ax-document-unsettled')
+    # A readiness attribute appearing/disappearing between reads is also a change.
+    return document, url, ax.text(document, 'AXTitle') or '', progress
+
+
+def _mac_ax_link(ax, window, document, at):
+    """Point hit, actual AXLink ancestor and exact window/WebArea ancestry; no nearby links."""
+    if not _mac_inside(at, ax.bounds(window)):
+        return None
+    element, seen, link, in_document = ax.hit(at), [], None, False
+    for _ in range(32):
+        if not element or any(ax.equal(element, old) for old in seen):
+            return None
+        seen.append(element)
+        if ax.flag(element, 'AXHidden') is True:
+            return None
+        if not link and ax.text(element, 'AXRole') == 'AXLink':
+            url = _mac_url(ax.text(element, 'AXURL'))
+            if not url or not _mac_inside(at, ax.bounds(element)):
+                return None
+            link = (element, url, ax.text(element, 'AXTitle') or ax.text(element, 'AXDescription') or '')
+        if ax.equal(element, document):
+            in_document = True
+        if ax.equal(element, window):
+            return link if in_document else None
+        element = ax.element(element, 'AXParent')
+    return None
+
+
+def _mac_ax_snapshot(front):
+    expected = _mac_identity(front)
+    if not expected or _mac_identity(mac_frontmost()) != expected:
+        return {'status': 'ambiguous'}
+    ax = None
+    try:
+        ax = _MacAX(front['pid'])
+        if not ax.trusted:
+            return {'status': 'unavailable'}
+        window = ax.element(ax.app, 'AXFocusedWindow')
+        if not _mac_ax_window_matches(ax, window, front):
+            return {'status': 'ambiguous'}
+        first = _mac_ax_document(ax, window)
+        if not first:
+            return {'status': 'unavailable'}
+        try:
+            hovered = _mac_ax_link(ax, window, first[0], front.get('imlec'))
+            hovered_again = _mac_ax_link(ax, window, first[0], front.get('imlec')) if hovered else None
+        except (OSError, AttributeError, ValueError, TypeError):
+            hovered = hovered_again = None  # hover is optional; final page validation still runs
+        second = _mac_ax_document(ax, window)
+        if not second or first[1:] != second[1:] or not ax.equal(first[0], second[0]) or \
+                not ax.equal(window, ax.element(ax.app, 'AXFocusedWindow')) or \
+                not _mac_ax_window_matches(ax, window, front):
+            return {'status': 'ambiguous'}
+        after = mac_frontmost()
+        if _mac_identity(after) != expected:
+            return {'status': 'ambiguous'}
+        result = {'status': 'ok', 'url': first[1], 'baslik': first[2][:512], 'url_yontem': 'mac-ax'}
+        if hovered and hovered_again and hovered[1:] == hovered_again[1:] and ax.equal(hovered[0], hovered_again[0]) and \
+                after.get('imlec') == front.get('imlec'):
+            result.update(url_imlec=hovered[1], baslik_imlec=hovered[2][:512])
+        return result
+    except (OSError, AttributeError, ValueError, TypeError):
+        return {'status': 'ambiguous'}
+    finally:
+        if ax:
+            ax.close()
+
+
+def _mac_ax_window_matches(ax, window, front):
+    """Recheck all window constraints: a sheet can appear without changing window identity."""
+    if not window or ax.pid(window) != front['pid'] or ax.flag(window, 'AXMinimized') is True or \
+            ax.text(window, 'AXRole') != 'AXWindow' or ax.has_sheets(window):
+        return False
+    bounds = ax.bounds(window)
+    return _mac_rect(bounds) and _mac_rect(front.get('mac_bounds')) and all(
+        abs(first - second) <= 1 for first, second in zip(bounds, front['mac_bounds']))
+
+
+def _mac_browser_script(bundle):
+    """Only fixed known dictionaries. Reads model URL, never omnibox text or JavaScript."""
+    if bundle not in CHROMIUM | MAC_SAFARI:
+        return None
+    safari = bundle in MAC_SAFARI
+    tab = 'current tab' if safari else 'active tab'
+    tab_id = 'index' if safari else 'id'
+    title = 'name' if safari else 'title'
+    loading = '' if safari else 'if loading of t then return ""\n'
+    loading_after = '' if safari else 'if loading of t2 then return ""\n'
+    return ('if application id "' + bundle + '" is not running then return ""\n'
+            'considering case\ntell application id "' + bundle + '"\nif not frontmost then return ""\n'
+            'if (count of windows) is 0 then return ""\n'
+            'set w to front window\nif not visible of w then return ""\n'
+            'set wid to id of w\nset rect1 to bounds of w\n'
+            'set t to ' + tab + ' of w\nset tid to ' + tab_id + ' of t\n' + loading +
+            'set u to URL of t\nset heading to ' + title + ' of t\n'
+            'set w2 to front window\nset t2 to ' + tab + ' of w2\nset u2 to URL of t2\n' + loading_after +
+            'if not frontmost then return ""\nif not visible of w2 then return ""\n'
+            'if (id of w2) is not wid then return ""\nif (bounds of w2) is not rect1 then return ""\n'
+            'if (' + tab_id + ' of t2) is not tid then return ""\nif u2 is not u then return ""\n'
+            'if (' + title + ' of t2) is not heading then return ""\n'
+            'set rectText to (item 1 of rect1 as text) & "," & (item 2 of rect1 as text) & "," & '
+            '(item 3 of rect1 as text) & "," & (item 4 of rect1 as text)\n'
+            'return rectText & linefeed & u & linefeed & u2 & linefeed & heading\nend tell\nend considering')
+
+
+def _mac_script_result(out, front):
+    if not isinstance(out, str) or len(out) > 65536:
+        return {}
+    lines = out.split('\n', 3)
+    if len(lines) < 3 or lines[1] != lines[2] or not _mac_url(lines[1]) or not _mac_rect(front.get('mac_bounds')):
+        return {}
+    try:
+        bounds = [float(part) for part in lines[0].split(',')]
+    except ValueError:
+        return {}
+    if len(bounds) != 4:
+        return {}
+    rectangle = [bounds[0], bounds[1], bounds[2] - bounds[0], bounds[3] - bounds[1]]
+    if not _mac_rect(rectangle) or any(abs(first - second) > 1 for first, second in zip(rectangle, front['mac_bounds'])):
+        return {}  # the browser model's front window is not the visible OS window
+    return {'url': lines[1], 'baslik': re.sub(r'\s+', ' ', lines[3] if len(lines) == 4 else '').strip()[:512],
+            'url_yontem': 'mac-applescript'}
+
+
+def _osascript(script, timeout=2.5, exact=False, args=()):
+    # Fixed script; optional data reaches its run handler only after the option terminator.
+    if not isinstance(args, (tuple, list)) or any(not isinstance(arg, str) or '\x00' in arg for arg in args):
+        return None
+    argv = ['/usr/bin/osascript', '-e', script]
+    if args:
+        argv.extend(['--', *args])
+    try:
+        result = subprocess.run(argv, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        if result.returncode:
+            return None
+        text = result.stdout.decode('utf-8', 'replace')
+        return text if exact else text.strip()
     except (OSError, subprocess.TimeoutExpired):
         return None
 
 
-def mac_context(front=None):
+def mac_context(front=None, timeout=MAC_BROWSER_TIMEOUT):
+    import time
+    deadline = time.monotonic() + max(0, min(timeout, MAC_BROWSER_TIMEOUT))
     front = front or mac_frontmost()
     bundle = front.get('bundle') or ''
     context = dict(front)
-    if bundle in CHROMIUM:
-        out = _osascript('tell application id "' + bundle + '" to return (URL of active tab of front window) & linefeed & (title of active tab of front window)')
-    elif bundle in ('com.apple.Safari', 'com.apple.SafariTechnologyPreview'):
-        out = _osascript('tell application id "' + bundle + '" to return (URL of front document) & linefeed & (name of front document)')
-    else:
-        out = None
-    if out:
-        url, _, title = out.partition('\n')
-        if url.startswith(('http://', 'https://')):
-            context.update(url=url.strip(), baslik=title.strip())
+    for key in ('url', 'baslik', 'url_imlec', 'baslik_imlec', 'url_yontem'):
+        context.pop(key, None)
+    if bundle in MAC_AX_BROWSERS and _mac_identity(front) and deadline > time.monotonic() and \
+            _mac_identity(mac_frontmost()) == _mac_identity(front):
+        result = _process_packet([sys.executable, str(Path(__file__).resolve()), '_mac-read', 'browser'],
+                                 {'front': front}, min(MAC_AX_TIMEOUT, deadline - time.monotonic()))
+        if result.get('status') == 'ok' and _mac_url(result.get('url')):
+            context.update({key: result[key] for key in ('url', 'baslik', 'url_imlec', 'baslik_imlec', 'url_yontem') if key in result})
+            if not _mac_url(context.get('url_imlec')):
+                context.pop('url_imlec', None)
+                context.pop('baslik_imlec', None)
+        elif result.get('status') != 'ambiguous':
+            script = _mac_browser_script(bundle)
+            left = deadline - time.monotonic()
+            if script and left > 0 and _mac_identity(mac_frontmost()) == _mac_identity(front):
+                context.update(_mac_script_result(_osascript(script, timeout=left, exact=True), front))
+        after = mac_frontmost()
+        if _mac_identity(after) != _mac_identity(front) or time.monotonic() > deadline:
+            for key in ('url', 'baslik', 'url_imlec', 'baslik_imlec', 'url_yontem'):
+                context.pop(key, None)
+        elif after.get('imlec') != front.get('imlec'):
+            context.pop('url_imlec', None)
+            context.pop('baslik_imlec', None)
     if bundle == 'com.apple.finder':
         out = _osascript('tell application "Finder"\nset out to ""\nrepeat with f in (selection as alias list)\n'
                          'set out to out & POSIX path of f & linefeed\nend repeat\nreturn out\nend tell')
@@ -1382,6 +1850,25 @@ def mac_context(front=None):
         if paths:
             context['dosyalar'] = paths[:20]
     return context
+
+
+def _mac_reader_main(kind):
+    """Private AX-only endpoint. No subprocess descendants, automation or filesystem reads."""
+    try:
+        raw = sys.stdin.buffer.read(WIN_MESSAGE_LIMIT + 1)
+        if len(raw) > WIN_MESSAGE_LIMIT or sys.platform != 'darwin' or kind != 'browser':
+            raise ValueError('request-mac')
+        request = json.loads(raw)
+        front = request.get('front') if isinstance(request, dict) else None
+        if not _mac_identity(front) or front.get('bundle') not in MAC_AX_BROWSERS or \
+                not _mac_rect(front.get('mac_bounds')) or (front.get('imlec') is not None and not _mac_point(front['imlec'])):
+            raise ValueError('request-mac-context')
+        result = _mac_ax_snapshot(front)
+    except (OSError, ValueError, TypeError):
+        result = {'error': 'request-invalid'}
+    sys.stdout.buffer.write(_read_packet(result))
+    sys.stdout.buffer.flush()
+    return 0
 
 
 def windows_context(read_url=True):
@@ -1416,7 +1903,7 @@ def windows_context(read_url=True):
         point = wintypes.POINT()
         if user32.GetPhysicalCursorPos(ctypes.byref(point)):
             context['imlec'] = [point.x, point.y]  # where the pointer was when the key went down
-        if read_url and name and name.lower() in WIN_CHROMIUM:
+        if read_url and name and name.lower() in (set(WIN_CHROMIUM) | WIN_GECKO | WIN_DOCUMENT_CHROMIUM):
             url = windows_browser_url(window, name)
             if url:
                 context['url'] = url
@@ -1431,14 +1918,17 @@ def windows_context(read_url=True):
 # as the address. The class condition filters matches; it does not prune the whole subtree.
 WIN_CHROMIUM = {'chrome': 'OmniboxViewViews', 'msedge': 'OmniboxViewViews', 'chromium': 'OmniboxViewViews',
                 'brave': 'BraveOmniboxViewViews', 'opera': 'OmniboxViewViews', 'vivaldi': 'OmniboxViewViews'}
+# New families use committed document values, never a guessed address-bar class or scheme.
+WIN_GECKO = frozenset(('firefox', 'zen'))
+WIN_DOCUMENT_CHROMIUM = frozenset(('browser',))  # Yandex; its generic basename also needs a product path check.
 ADDRESS_TIMEOUT = 1.0  # seconds; a cold first read takes ~0.5 s, a hung browser must not hold the listener longer
 
 
-def _com_call(obj, index, *args, argtypes=()):
+def _com_call(obj, index, *args, argtypes=(), restype=None):
     """Call slot `index` of a COM interface's vtable (IUnknown takes 0-2)."""
     import ctypes
     vtable = ctypes.cast(ctypes.cast(obj, ctypes.POINTER(ctypes.c_void_p))[0], ctypes.POINTER(ctypes.c_void_p))
-    return ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p, *argtypes)(vtable[index])(obj, *args)
+    return ctypes.WINFUNCTYPE(restype or ctypes.HRESULT, ctypes.c_void_p, *argtypes)(vtable[index])(obj, *args)
 
 
 def _uia_address_bar(window, class_name):
@@ -1987,27 +2477,410 @@ def _windows_opera_snapshot(window, at=None, timeout=OPERA_TIMEOUT, cancel=None)
     return _windows_read('opera', request, timeout, cancel)
 
 
-def tab_url(value):
-    """A Chromium address bar value as a link. Chromium hides the scheme, so a bare host/path gains https://.
-
-    Only an unfocused address box is read (_uia_address_bar), so this is the page, never a half-typed draft.
-    Anything that is not a plain link (a search, chrome:// pages, another scheme) yields None.
-    """
-    value = (value or '').strip()
-    if not value or re.search(r'\s', value):
+def _win_document_identity(window, app):
+    """Live foreground identity for the new, explicitly allowlisted document readers."""
+    import ctypes as C
+    import ntpath
+    user, kernel = C.WinDLL('user32'), C.WinDLL('kernel32')
+    user.GetForegroundWindow.restype = C.c_void_p
+    for method in ('IsWindow', 'IsHungAppWindow'):
+        getattr(user, method).argtypes = [C.c_void_p]
+        getattr(user, method).restype = C.c_int32
+    user.GetClassNameW.argtypes = [C.c_void_p, C.c_wchar_p, C.c_int32]
+    user.GetWindowThreadProcessId.argtypes = [C.c_void_p, C.POINTER(C.c_uint32)]
+    user.GetWindowThreadProcessId.restype = C.c_uint32
+    kernel.OpenProcess.argtypes, kernel.OpenProcess.restype = [C.c_uint32, C.c_int32, C.c_uint32], C.c_void_p
+    kernel.QueryFullProcessImageNameW.argtypes = [C.c_void_p, C.c_uint32, C.c_wchar_p, C.POINTER(C.c_uint32)]
+    kernel.QueryFullProcessImageNameW.restype = C.c_int32
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [C.c_void_p], C.c_int32
+    if app not in WIN_GECKO | WIN_DOCUMENT_CHROMIUM or not window or not user.IsWindow(window) \
+            or user.IsHungAppWindow(window) or user.GetForegroundWindow() != window:
         return None
-    if not re.match(r'[a-z][a-z0-9+.-]*://', value, re.I):
-        value = 'https://' + value
+    name, pid = C.create_unicode_buffer(256), C.c_uint32()
+    user.GetClassNameW(window, name, len(name))
+    if app in WIN_GECKO and name.value != 'MozillaWindowClass':
+        return None
+    if not user.GetWindowThreadProcessId(window, C.byref(pid)) or not pid.value:
+        return None
+    handle = kernel.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
     try:
-        return _safe_source_url(value)  # the same boundary as capture; unsafe tabs keep clipboard capture available
+        path, size = C.create_unicode_buffer(32768), C.c_uint32(32768)
+        if not kernel.QueryFullProcessImageNameW(handle, 0, path, C.byref(size)):
+            return None
+        normalized = path.value.replace('/', '\\').lower()
+        if ntpath.splitext(ntpath.basename(normalized))[0] != app:
+            return None
+        # Other applications also call their executable browser.exe. Do not enable them by name.
+        if app == 'browser' and not normalized.endswith('\\yandexbrowser\\application\\browser.exe'):
+            return None
+        return (window, pid.value, name.value, normalized) if user.GetForegroundWindow() == window else None
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _win_msaa_types(pointer_type=None):
+    """oleacc.h/oaidl.h layouts; fixed-width LONG works in non-Windows ABI model tests too."""
+    import ctypes as C
+    from types import SimpleNamespace
+    pointer_type = pointer_type or C.c_void_p
+
+    class GUID(C.Structure):
+        _fields_ = [('a', C.c_uint32), ('b', C.c_uint16), ('c', C.c_uint16), ('d', C.c_ubyte * 8)]
+
+    class RECORD(C.Structure):
+        _fields_ = [('v1', pointer_type), ('v2', pointer_type)]
+
+    class PAYLOAD(C.Union):
+        _anonymous_ = ('record',)
+        # VT_RECORD needs two pointers. Scalar variants keep 64-bit alignment on Win32 too.
+        _fields_ = [('record', RECORD), ('scalar', C.c_uint64)]
+
+    class VARIANT(C.Structure):
+        _anonymous_ = ('payload',)
+        _fields_ = [('vt', C.c_uint16), ('r1', C.c_uint16), ('r2', C.c_uint16), ('r3', C.c_uint16),
+                    ('payload', PAYLOAD)]
+
+    class POINT(C.Structure):
+        _fields_ = [('x', C.c_int32), ('y', C.c_int32)]
+
+    return SimpleNamespace(GUID=GUID, VARIANT=VARIANT, POINT=POINT, LONG=C.c_int32)
+
+
+class _WindowsMSAA:
+    """Read-only IAccessible adapter, owned wholly by a killable browser helper process.
+
+    Nodes are (IAccessible pointer, child ID). Every acquired COM reference remains alive until
+    close, so IUnknown identity cannot be reused during the snapshot. No application commands,
+    focus changes, clipboard reads, or profile-file access are performed.
+    """
+    def __init__(self):
+        import ctypes as C
+        import uuid
+        self.C, self.T = C, _win_msaa_types()
+        self.owned, self.identities = [], {}
+        self.ole, self.auto, self.access = C.WinDLL('ole32'), C.WinDLL('oleaut32'), C.WinDLL('oleacc')
+        self.ole.CoInitializeEx.argtypes, self.ole.CoInitializeEx.restype = [C.c_void_p, C.c_uint32], C.c_int32
+        self.ole.CoUninitialize.argtypes, self.ole.CoUninitialize.restype = [], None
+        self.auto.VariantClear.argtypes, self.auto.VariantClear.restype = [C.POINTER(self.T.VARIANT)], C.c_int32
+        self.auto.SysFreeString.argtypes, self.auto.SysFreeString.restype = [C.c_void_p], None
+        self.auto.SysStringLen.argtypes, self.auto.SysStringLen.restype = [C.c_void_p], C.c_uint32
+        self.access.AccessibleObjectFromWindow.argtypes = [C.c_void_p, C.c_uint32, C.POINTER(self.T.GUID), C.POINTER(C.c_void_p)]
+        self.access.AccessibleObjectFromWindow.restype = C.c_int32
+        self.access.AccessibleChildren.argtypes = [C.c_void_p, C.c_int32, C.c_int32, C.POINTER(self.T.VARIANT), C.POINTER(C.c_int32)]
+        self.access.AccessibleChildren.restype = C.c_int32
+        self.access.AccessibleObjectFromPoint.argtypes = [self.T.POINT, C.POINTER(C.c_void_p), C.POINTER(self.T.VARIANT)]
+        self.access.AccessibleObjectFromPoint.restype = C.c_int32
+        self.iid = self.T.GUID.from_buffer_copy(uuid.UUID('618736e0-3c3d-11cf-810c-00aa00389b71').bytes_le)
+        self.unknown_iid = self.T.GUID.from_buffer_copy(uuid.UUID('00000000-0000-0000-c000-000000000046').bytes_le)
+        self.started = self.ole.CoInitializeEx(None, 0)
+        if self.started < 0:
+            raise OSError('msaa-init')
+
+    def close(self):
+        for obj in reversed(self.owned):
+            try:
+                if obj:
+                    _com_call(obj, 2, restype=self.C.c_uint32)  # IUnknown::Release returns ULONG, not HRESULT.
+            except Exception:
+                pass
+        self.owned.clear()
+        if self.started >= 0:
+            self.ole.CoUninitialize()
+            self.started = -1
+
+    def _output(self):
+        obj = self.C.c_void_p()
+        self.owned.append(obj)  # Record before the native call, including partial-output failures.
+        return obj
+
+    def _query(self, dispatch, iid=None):
+        C = self.C
+        obj = self._output()
+        hr = _com_call(dispatch, 0, C.byref(iid or self.iid), C.byref(obj),
+                       argtypes=(C.POINTER(self.T.GUID), C.POINTER(C.c_void_p)))
+        if hr != 0 or not obj:
+            raise OSError('msaa-interface')
+        return obj
+
+    def root(self, window):
+        C = self.C
+        obj = self._output()
+        hr = self.access.AccessibleObjectFromWindow(window, 0xfffffffc, C.byref(self.iid), C.byref(obj))
+        if hr != 0 or not obj:
+            raise OSError('msaa-window')
+        return obj, 0
+
+    def identity(self, node):
+        obj, child = node
+        if obj.value not in self.identities:
+            self.identities[obj.value] = self._query(obj, self.unknown_iid).value
+        return self.identities[obj.value], child
+
+    def _child(self, ident):
+        return self.T.VARIANT(vt=3, v1=ident & 0xffffffff)  # VT_I4 including negative provider IDs.
+
+    def integer(self, node, slot):
+        C, value = self.C, self.T.VARIANT()
+        try:
+            hr = _com_call(node[0], slot, self._child(node[1]), C.byref(value),
+                           argtypes=(self.T.VARIANT, C.POINTER(self.T.VARIANT)))
+            if hr != 0 or value.vt != 3:
+                raise OSError('msaa-integer')
+            return int(value.v1 or 0) & 0xffffffff
+        finally:
+            self.auto.VariantClear(C.byref(value))
+
+    def text(self, node, slot):
+        C, value = self.C, self.C.c_void_p()
+        try:
+            hr = _com_call(node[0], slot, self._child(node[1]), C.byref(value),
+                           argtypes=(self.T.VARIANT, C.POINTER(C.c_void_p)))
+            if hr not in (0, 1):
+                raise OSError('msaa-text')
+            length = self.auto.SysStringLen(value) if value else 0
+            if length > 32768:
+                raise ValueError('msaa-text-size')
+            return C.wstring_at(value, length) if hr == 0 and value else ''
+        finally:
+            if value:
+                self.auto.SysFreeString(value)
+
+    def children(self, node, remaining):
+        if node[1]:  # MSAA child IDs are simple elements and cannot have children.
+            return []
+        C, count = self.C, self.C.c_int32()
+        if _com_call(node[0], 8, C.byref(count), argtypes=(C.POINTER(C.c_int32),)) != 0 \
+                or count.value < 0 or count.value > remaining:
+            raise ValueError('msaa-tree-limit')
+        if not count.value:
+            return []
+        values, obtained = (self.T.VARIANT * count.value)(), C.c_int32()
+        result = []
+        try:
+            hr = self.access.AccessibleChildren(node[0], 0, count.value, values, C.byref(obtained))
+            # Partial enumeration might hide a second document. Never return its first candidate.
+            if hr != 0 or obtained.value != count.value:
+                raise OSError('msaa-tree-changed')
+            for value in values:
+                if value.vt == 9 and value.v1:  # VT_DISPATCH -> IAccessible, not a vtable cast.
+                    result.append((self._query(C.c_void_p(value.v1)), 0))
+                elif value.vt == 3 and value.v1:
+                    result.append((node[0], C.c_int32(value.v1 & 0xffffffff).value))
+                else:
+                    raise OSError('msaa-child')
+            return result
+        finally:
+            for value in values:
+                self.auto.VariantClear(C.byref(value))  # Also releases each returned IDispatch.
+
+    def at_point(self, at):
+        C, child, obj = self.C, self.T.VARIANT(), self._output()
+        try:
+            hr = self.access.AccessibleObjectFromPoint(self.T.POINT(*at), C.byref(obj), C.byref(child))
+            if hr != 0 or not obj or child.vt != 3:
+                raise OSError('msaa-point')
+            return obj, C.c_int32(int(child.v1 or 0) & 0xffffffff).value
+        finally:
+            self.auto.VariantClear(C.byref(child))
+
+    def parent(self, node):
+        if node[1]:
+            return node[0], 0
+        C, dispatch = self.C, self._output()
+        hr = _com_call(node[0], 7, C.byref(dispatch), argtypes=(C.POINTER(C.c_void_p),))
+        if hr != 0 or not dispatch:
+            raise OSError('msaa-parent')
+        return self._query(dispatch), 0
+
+    def rectangle(self, node):
+        C = self.C
+        values = [C.c_int32() for _ in range(4)]
+        if _com_call(node[0], 22, *(C.byref(value) for value in values), self._child(node[1]),
+                     argtypes=(*([C.POINTER(C.c_int32)] * 4), self.T.VARIANT)) != 0:
+            raise OSError('msaa-rectangle')
+        return tuple(value.value for value in values)
+
+
+def _gecko_document(provider, root, limit=512):
+    """Exactly one visible top-level document; stop before iframe/content descendants."""
+    # Firefox DocAccessible typeChrome -> CHROME_WINDOW -> MSAA APPLICATION (14).
+    # Do not special-case chrome:// strings if an unexpected provider reports DOCUMENT instead.
+    pending, seen, found = [(root, 0)], set(), []
+    while pending:
+        node, depth = pending.pop()
+        identity = provider.identity(node)
+        if identity in seen or len(seen) >= limit or depth > 32:
+            return None
+        seen.add(identity)
+        state, role = provider.integer(node, 14), provider.integer(node, 13)
+        if state & (0x8000 | 0x10000):  # INVISIBLE or OFFSCREEN: hidden tabs are never visited.
+            continue
+        if role == 15:  # DOCUMENT: count even an internal/unsupported one, never descend into it.
+            if state & 0x800:  # BUSY
+                return None
+            value = _opera_url(provider.text(node, 11))
+            if not value or found:
+                return None
+            found.append((node, {'value': value, 'name': re.sub(r'\s+', ' ', provider.text(node, 10)).strip()}))
+            continue
+        pending.extend((child, depth + 1) for child in provider.children(node, limit - len(seen) - len(pending)))
+    return found[0] if len(found) == 1 else None
+
+
+def _win_pointer_in_window(window, at=None):
+    """A physical point owned by this browser, before calling the global MSAA hit tester."""
+    import ctypes as C
+    T, user = _win_msaa_types(), C.WinDLL('user32')
+    point = T.POINT()
+    user.GetPhysicalCursorPos.argtypes, user.GetPhysicalCursorPos.restype = [C.POINTER(T.POINT)], C.c_int32
+    user.WindowFromPhysicalPoint.argtypes, user.WindowFromPhysicalPoint.restype = [T.POINT], C.c_void_p
+    user.GetAncestor.argtypes, user.GetAncestor.restype = [C.c_void_p, C.c_uint32], C.c_void_p
+    if at is None:
+        if not user.GetPhysicalCursorPos(C.byref(point)):
+            return None
+    else:
+        point.x, point.y = at
+    under = user.WindowFromPhysicalPoint(point)
+    return (point.x, point.y) if under and user.GetAncestor(under, 2) == window else None
+
+
+def _gecko_hover(provider, document, at):
+    """A real MSAA link under the point, whose ancestor chain reaches the selected document."""
+    if at is None:
+        return {}
+    target, node = provider.identity(document), provider.at_point(at)
+    seen, found = set(), []
+    for _ in range(64):
+        identity = provider.identity(node)
+        if identity in seen:
+            return {}
+        seen.add(identity)
+        if identity == target:
+            return found[0] if len(found) == 1 else {}
+        state, role = provider.integer(node, 14), provider.integer(node, 13)
+        if state & (0x800 | 0x8000 | 0x10000):  # BUSY (including loading iframes), INVISIBLE, OFFSCREEN.
+            return {}
+        if role == 30:  # ROLE_SYSTEM_LINK
+            left, top, width, height = provider.rectangle(node)
+            if not (width > 0 and height > 0 and left <= at[0] < left + width and top <= at[1] < top + height):
+                return {}
+            value = _opera_url(provider.text(node, 11))
+            if not value or found:
+                return {}
+            # Keep COM identity private but part of equality between the two reads. A new link
+            # node may reuse the same href/name; retained IUnknown refs prevent pointer reuse.
+            found.append({'value': value, 'name': re.sub(r'\s+', ' ', provider.text(node, 10)).strip(),
+                          '_identity': identity})
+        node = provider.parent(node)
+    return {}
+
+
+def _gecko_snapshot(window, app, at=None):
+    """Two document selections bracket two hit-tests, all inside the existing reader deadline."""
+    identity = _win_document_identity(window, app)
+    if app not in WIN_GECKO or not identity:
+        return {}
+    provider = _WindowsMSAA()
+    try:
+        first = _gecko_document(provider, provider.root(window))
+        if not first:
+            return {}
+        point = _win_pointer_in_window(window, at)
+        hovered = {}
+        try:
+            hovered = _gecko_hover(provider, first[0], point)
+            if hovered and (_gecko_hover(provider, first[0], point) != hovered
+                            or _win_pointer_in_window(window, point) != point):
+                hovered = {}
+        except Exception:
+            hovered = {}
+        second = _gecko_document(provider, provider.root(window))
+        if not second or first[1] != second[1] or provider.identity(first[0]) != provider.identity(second[0]) \
+                or _win_document_identity(window, app) != identity:
+            return {}
+        result = dict(first[1])
+        if hovered:
+            result.update(hover_value=hovered['value'], hover_name=hovered['name'])
+        return result
+    finally:
+        provider.close()
+
+
+def _document_browser_snapshot(window, app, at=None):
+    if app in WIN_GECKO:
+        return _gecko_snapshot(window, app, at)
+    identity = _win_document_identity(window, app)
+    if app not in WIN_DOCUMENT_CHROMIUM or not identity:
+        return {}
+    # This uses the same strict renderer contract as Opera. It does not add the separate
+    # Opera accessibility-wake change or rely on guessed Chromium omnibox values.
+    result = _opera_snapshot(window, at)
+    return result if _win_document_identity(window, app) == identity else {}
+
+
+def _windows_document_snapshot(window, app, at=None, timeout=ADDRESS_TIMEOUT, cancel=None):
+    if not window or app not in WIN_GECKO | WIN_DOCUMENT_CHROMIUM:
+        return {}
+    request = {'hwnd': int(window), 'app': app}
+    if at is not None:
+        request['at'] = [int(at[0]), int(at[1])]
+    return _windows_read('browser_document', request, timeout, cancel)
+
+
+def _chromium_committed_url(window, class_name):
+    """Resolve an omitted omnibox scheme using a real document in the same timed child.
+
+    A focused or unreadable address bar never enables the renderer fallback. The existing
+    Opera snapshot supplies its own explicit HTTP(S) URL and guards the foreground renderer;
+    the address box must still be unfocused and unchanged after that snapshot.
+    """
+    if _win_foreground({'hwnd': window}) != window:
+        return None
+    first = _uia_address_bar(window, class_name)
+    if not isinstance(first, str) or not first:
+        return None
+    if '://' in first:
+        value = tab_url(first)
+        return value if value and _win_foreground({'hwnd': window}) == window else None
+    if re.search(r'\s|[\\]', first):
+        return None
+    try:
+        # Parse a network-path reference, without choosing a protocol. Searches, pseudo-schemes,
+        # credentials and malformed ports cannot initiate a document read from this branch.
+        parsed = urlparse('//' + first)
+        if not parsed.hostname or '.' not in parsed.hostname or parsed.username is not None \
+                or parsed.password is not None or parsed.port == 0:
+            return None
     except ValueError:
         return None
+    snapshot = _opera_snapshot(window)
+    value = _opera_url(snapshot.get('value'))
+    if not value:
+        return None
+    displayed = value.partition('://')[2]
+    # A missing trailing root slash is harmless. Other display transformations (www elision,
+    # percent decoding, IDN formatting) need device evidence; a conflicting URL is not accepted.
+    document = urlparse(value)
+    root_slash = document.path == '/' and not document.query and not document.fragment
+    if first != displayed and not (root_slash and first == displayed[:-1]):
+        return None
+    if _uia_address_bar(window, class_name) != first or _win_foreground({'hwnd': window}) != window:
+        return None
+    return value
+
+
+def tab_url(value):
+    """Only explicit, safe HTTP(S) values are URLs; never invent an omitted browser scheme."""
+    return _opera_url(value.strip()) if isinstance(value, str) else None
 
 
 def windows_browser_url(window, app, timeout=ADDRESS_TIMEOUT, cancel=None):
-    """A committed page URL: an unfocused omnibox, or Opera's stable renderer document."""
-    name = WIN_CHROMIUM.get((app or '').lower())
-    if not name or not window:
+    """A committed page URL from an existing omnibox or an explicitly allowlisted document."""
+    app = (app or '').lower()
+    name = WIN_CHROMIUM.get(app)
+    if not window or not (name or app in WIN_GECKO | WIN_DOCUMENT_CHROMIUM):
         return None
     try:
         import ctypes
@@ -2017,24 +2890,29 @@ def windows_browser_url(window, app, timeout=ADDRESS_TIMEOUT, cancel=None):
             return None
     except AttributeError:
         pass
-    if (app or '').lower() == 'opera':
+    if app in WIN_GECKO | WIN_DOCUMENT_CHROMIUM:
+        return _opera_url(_windows_document_snapshot(window, app, timeout=timeout, cancel=cancel).get('value'))
+    if app == 'opera':
         return _opera_url(_windows_opera_snapshot(window, timeout=timeout, cancel=cancel).get('value'))
     result = _windows_read('uia', {'hwnd': int(window), 'class': name}, timeout, cancel)
     return tab_url(result.get('value'))
 
 
 def windows_hovered_link(window, app, at=None, timeout=ADDRESS_TIMEOUT, cancel=None, extra=None, posts=False):
-    """(url, text) of the link under the pointer in a Chromium window, e.g. a video card on a home page.
+    """(url, text) of a real browser link under the pointer, e.g. a video card on a home page.
 
     `at` is the pointer position recorded at the key press (physical pixels); without it the current one.
     A quoted post inside the pointed post is stored as extra['quote'] when `extra` is a dict.
     `posts` (the page is X/Instagram, _post_site) lets a post under the pointer name its permalink.
     Opera decides that itself from the document it reads.
     """
-    if not WIN_CHROMIUM.get((app or '').lower()) or not window:
+    app = (app or '').lower()
+    if not window or not (WIN_CHROMIUM.get(app) or app in WIN_GECKO | WIN_DOCUMENT_CHROMIUM):
         return None, None
-    if (app or '').lower() == 'opera':
-        snapshot = _windows_opera_snapshot(window, at, timeout, cancel)
+    document_reader = app == 'opera' or app in WIN_GECKO | WIN_DOCUMENT_CHROMIUM
+    if document_reader:
+        snapshot = (_windows_opera_snapshot(window, at, timeout, cancel) if app == 'opera'
+                    else _windows_document_snapshot(window, app, at, timeout, cancel))
         result = {'value': snapshot.get('hover_value'), 'name': snapshot.get('hover_name'),
                   'quote': snapshot.get('hover_quote')}
     else:
@@ -2044,7 +2922,7 @@ def windows_hovered_link(window, app, at=None, timeout=ADDRESS_TIMEOUT, cancel=N
         if posts:
             request['posts'] = True
         result = _windows_read('uia_link', request, timeout, cancel)
-    check = _opera_url if (app or '').lower() == 'opera' else tab_url
+    check = _opera_url if document_reader else tab_url
     url = check(result.get('value'))
     text = re.sub(r'\s+', ' ', str(result.get('name') or '')).strip()
     quote = check(result.get('quote')) if url and result.get('quote') else None
@@ -2108,6 +2986,7 @@ def _win_title(hwnd):
 
 def windows_enrich(context, cancel=None):
     context = dict(context)
+    context.pop('url_yontem', None)
     try:
         hwnd = _win_foreground(context)
     except Exception:
@@ -2121,10 +3000,12 @@ def windows_enrich(context, cancel=None):
     if context.get('dosyalar') or not _win_browser(app):
         return context
     title = _win_page_title(context.get('pencere'), app, context.get('profil'))
-    if (app or '').lower() == 'opera':
+    document_app = (app or '').lower()
+    if document_app == 'opera' or document_app in WIN_GECKO | WIN_DOCUMENT_CHROMIUM:
         for key in ('url_imlec', 'baslik_imlec', 'baslik', 'url_alinti'):
             context.pop(key, None)
-        snapshot = _windows_opera_snapshot(hwnd, context.get('imlec'), cancel=cancel)
+        snapshot = (_windows_opera_snapshot(hwnd, context.get('imlec'), cancel=cancel) if document_app == 'opera'
+                    else _windows_document_snapshot(hwnd, document_app, context.get('imlec'), cancel=cancel))
         context['url'] = _opera_url(snapshot.get('value'))
         hovered = _opera_url(snapshot.get('hover_value'))
         hovered_title = re.sub(r'\s+', ' ', str(snapshot.get('hover_name') or '')).strip() or None
@@ -2155,6 +3036,10 @@ def windows_enrich(context, cancel=None):
                 context.pop(key, None)
         elif context.get('url'):
             context['baslik'] = title
+            if document_app in WIN_GECKO:
+                context['url_yontem'] = 'windows-msaa-gecko'
+            elif document_app == 'opera' or document_app in WIN_DOCUMENT_CHROMIUM:
+                context['url_yontem'] = 'windows-msaa-renderer'
     return context
 
 
@@ -2384,13 +3269,34 @@ def _source_arguments(sources):
                 files=[source['value'] for source in selected if source['kind'] == 'file'])
 
 
-def _windows_source_cards(canvas, root, sources, y, width, pad):
-    """Each source has a visible keyboard toggle; URL choices are mutually exclusive."""
+def _browser_source_choices(context, clip='', image=None):
+    """Offer a verified desktop hover and its page without hiding clipboard alternatives.
+
+    macOS/Linux readers bind the hover to a committed page. Their ordinary page-only,
+    file-manager and clipboard capture flows keep the original preview and controls.
+    """
+    if context.get('dosyalar'):
+        return None
+    page, hovered = _opera_url(context.get('url')), _opera_url(context.get('url_imlec'))
+    if not page or not hovered or page == hovered:
+        return None
+    verified = {'url': page, 'baslik': context.get('baslik'),
+                'url_imlec': hovered, 'baslik_imlec': context.get('baslik_imlec')}
+    choices = windows_sources(verified, clip, True, image=image)
+    labels = {'i': 'Imlecin altindaki baglanti', 's': 'Etkin sayfa', 'p': 'Pano baglantisi',
+              'm': 'Pano metni', 'g': 'Pano goruntusu'}
+    for choice in choices:
+        choice['label'] = labels[choice['key']]
+    return choices
+
+
+def _windows_source_cards(canvas, root, sources, y, width, pad, key_label='Alt'):
+    """Each source binds its displayed Tk modifier; URL choices are mutually exclusive."""
     labels = []
 
     def paint():
         for source, label in labels:
-            text = ('✓ ' if source['on'] else '○ ') + source['label'] + ' · Alt+' + source['key'].upper()
+            text = ('[x] ' if source['on'] else '[ ] ') + source['label'] + ' | ' + key_label + '+' + source['key'].upper()
             canvas.itemconfigure(label, text=text, fill=PALETTE['text'] if source['on'] else PALETTE['muted'])
 
     for source in sources:
@@ -2417,7 +3323,7 @@ def _windows_source_cards(canvas, root, sources, y, width, pad):
             return 'break'
         for item in (label, detail):
             canvas.tag_bind(item, '<Button-1>', toggle)
-        root.bind('<Alt-' + source['key'] + '>', toggle)
+        root.bind('<' + key_label + '-' + source['key'] + '>', toggle)
         labels.append((source, label))
         y += 52
     paint()
@@ -2516,12 +3422,522 @@ def _file_uri_path(line):
     return unquote(match.group(1)) if match else None
 
 
-def linux_context():
-    """The clipboard is the only portable source on Linux: a link, copied files or plain text.
+LINUX_BROWSER_TIMEOUT = 2.0
+# Exact /proc/PID/exe basenames, not a window title, WM_CLASS or an application-provided name.
+# Chromium's Document interface calls its URL attribute URI; Gecko calls it DocURL.
+LINUX_BROWSERS = {
+    'chrome': ('Google Chrome', 'URI'), 'chromium': ('Chromium', 'URI'),
+    'chromium-browser': ('Chromium', 'URI'), 'msedge': ('Microsoft Edge', 'URI'),
+    'brave': ('Brave', 'URI'), 'brave-browser': ('Brave', 'URI'),
+    'opera': ('Opera', 'URI'), 'vivaldi-bin': ('Vivaldi', 'URI'), 'vivaldi': ('Vivaldi', 'URI'),
+    'firefox': ('Mozilla Firefox', 'DocURL'), 'firefox-bin': ('Mozilla Firefox', 'DocURL'),
+    'zen': ('Zen', 'DocURL'), 'zen-bin': ('Zen', 'DocURL'),
+    'yandex_browser': ('Yandex', 'URI'), 'yandex-browser': ('Yandex', 'URI'),
+}
 
-    Read like the window reads it on macOS and Windows: only a clipboard that is one link is a
-    link. A link followed by more lines is text, so nothing after the first line is dropped.
-    """
+
+def _linux_x11_session():
+    """Never mistake an XWayland DISPLAY for the whole desktop's foreground/pointer."""
+    return (sys.platform.startswith('linux') and bool(re.fullmatch(r':\d+(?:\.\d+)?', os.environ.get('DISPLAY', ''))) and
+            os.environ.get('XDG_SESSION_TYPE', '').lower() == 'x11' and not os.environ.get('WAYLAND_DISPLAY'))
+
+
+def _linux_process_identity(pid):
+    """OS process metadata only. No browser profiles, command lines or session files."""
+    if type(pid) is not int or not 0 < pid < 2 ** 31:
+        return None
+    try:
+        base = '/proc/' + str(pid)
+        executable = os.readlink(base + '/exe')
+        name = Path(executable).name
+        if not executable.startswith('/') or name not in LINUX_BROWSERS:
+            return None
+        with open(base + '/stat', encoding='ascii') as stream:
+            record = stream.read(4096)
+        # comm can contain spaces and ')'. Field 22 is the process start time.
+        fields = record[record.rfind(')') + 2:].split()
+        started = int(fields[19])
+        info = os.stat(base + '/exe')
+        return pid, executable, started, info.st_dev, info.st_ino
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+class _LinuxX11:
+    """Read-only Xlib calls. Construct only in the disposable Linux reader process."""
+
+    def __init__(self):
+        import ctypes as C
+        self.C, self.display = C, None
+        self.lib = C.CDLL('libX11.so.6')
+        P, U, I = C.c_void_p, C.c_ulong, C.c_int
+        PU, PI = C.POINTER(U), C.POINTER(I)
+        definitions = {
+            'XOpenDisplay': ([C.c_char_p], P), 'XCloseDisplay': ([P], I),
+            'XDefaultRootWindow': ([P], U), 'XInternAtom': ([P, C.c_char_p, I], U),
+            'XFree': ([P], I),
+            'XGetWindowProperty': ([P, U, U, C.c_long, C.c_long, I, U, PU, PI, PU, PU,
+                                    C.POINTER(P)], I),
+            'XGetInputFocus': ([P, PU, PI], I),
+            'XQueryTree': ([P, U, PU, PU, C.POINTER(PU), C.POINTER(C.c_uint)], I),
+            'XQueryPointer': ([P, U, PU, PU, PI, PI, PI, PI, C.POINTER(C.c_uint)], I),
+            'XGetGeometry': ([P, U, PU, PI, PI, C.POINTER(C.c_uint), C.POINTER(C.c_uint),
+                              C.POINTER(C.c_uint), C.POINTER(C.c_uint)], I),
+            'XTranslateCoordinates': ([P, U, U, I, I, PI, PI, PU], I),
+        }
+        for name, (args, result) in definitions.items():
+            function = getattr(self.lib, name)
+            function.argtypes, function.restype = args, result
+        self.display = self.lib.XOpenDisplay(None)
+        if not self.display:
+            raise OSError('x11-display')
+        self.root = self.lib.XDefaultRootWindow(self.display)
+
+    def close(self):
+        if self.display:
+            self.lib.XCloseDisplay(self.display)
+            self.display = None
+
+    def property(self, window, name, expected):
+        C = self.C
+        atom = self.lib.XInternAtom(self.display, name, 1)
+        if not atom:
+            return None
+        kind, count, rest = C.c_ulong(), C.c_ulong(), C.c_ulong()
+        form, data = C.c_int(), C.c_void_p()
+        try:
+            status = self.lib.XGetWindowProperty(self.display, window, atom, 0, 1, 0, expected,
+                                                 C.byref(kind), C.byref(form), C.byref(count),
+                                                 C.byref(rest), C.byref(data))
+            if status or kind.value != expected or form.value != 32 or count.value != 1 or rest.value or not data:
+                return None
+            # Xlib expands protocol 32-bit values to native unsigned long on LP64 too.
+            return int(C.cast(data, C.POINTER(C.c_ulong))[0])
+        finally:
+            if data:
+                self.lib.XFree(data)
+
+    def parent(self, window):
+        C = self.C
+        root, parent, count = C.c_ulong(), C.c_ulong(), C.c_uint()
+        children = C.POINTER(C.c_ulong)()
+        try:
+            if not self.lib.XQueryTree(self.display, window, C.byref(root), C.byref(parent),
+                                      C.byref(children), C.byref(count)):
+                raise ValueError('x11-tree')
+            return parent.value
+        finally:
+            if children:
+                self.lib.XFree(children)
+
+    def rect(self, window):
+        C = self.C
+        root, child = C.c_ulong(), C.c_ulong()
+        x, y = C.c_int(), C.c_int()
+        width, height, border, depth = (C.c_uint() for _ in range(4))
+        if (not self.lib.XGetGeometry(self.display, window, C.byref(root), C.byref(x), C.byref(y),
+                                     C.byref(width), C.byref(height), C.byref(border), C.byref(depth)) or
+                root.value != self.root or not width.value or not height.value or
+                not self.lib.XTranslateCoordinates(self.display, window, self.root, 0, 0,
+                                                   C.byref(x), C.byref(y), C.byref(child))):
+            raise ValueError('x11-rect')
+        return x.value, y.value, width.value, height.value
+
+    def foreground(self):
+        C = self.C
+        window = self.property(self.root, b'_NET_ACTIVE_WINDOW', 33)  # XA_WINDOW
+        if not window:
+            return None
+        identity = _linux_process_identity(self.property(window, b'_NET_WM_PID', 6))  # XA_CARDINAL
+        if not identity:
+            return None
+        focus, revert = C.c_ulong(), C.c_int()
+        self.lib.XGetInputFocus(self.display, C.byref(focus), C.byref(revert))
+        current, seen = focus.value, set()
+        for _ in range(32):
+            if current == window:
+                return window, identity, self.rect(window)
+            if current <= 1 or current == self.root or current in seen:
+                return None
+            seen.add(current)
+            current = self.parent(current)
+        return None
+
+    def pointer(self, window):
+        """The point must actually be over this client, not a tooltip or another window."""
+        C = self.C
+        current, point, inside, seen = self.root, None, False, set()
+        for _ in range(32):
+            if current in seen:
+                return None
+            seen.add(current)
+            inside = inside or current == window
+            root, child = C.c_ulong(), C.c_ulong()
+            x, y, local_x, local_y = (C.c_int() for _ in range(4))
+            mask = C.c_uint()
+            if not self.lib.XQueryPointer(self.display, current, C.byref(root), C.byref(child),
+                                         C.byref(x), C.byref(y), C.byref(local_x), C.byref(local_y), C.byref(mask)):
+                return None
+            value = x.value, y.value
+            if root.value != self.root or (point is not None and value != point):
+                return None
+            point = value
+            if not child.value:
+                return point if inside else None
+            current = child.value
+        return None
+
+
+class _LinuxAtspi:
+    """Small libatspi C binding, with explicit ownership and no Python GI dependency."""
+
+    def __init__(self):
+        import ctypes as C
+        self.C, self.refs, self.started = C, [], False
+        self.lib = C.CDLL('libatspi.so.0')
+        self.glib = C.CDLL('libglib-2.0.so.0')
+        self.gobject = C.CDLL('libgobject-2.0.so.0')
+        P, I, E = C.c_void_p, C.c_int, C.POINTER(C.c_void_p)
+        definitions = {
+            'atspi_init': ([], I), 'atspi_exit': ([], I), 'atspi_set_timeout': ([I, I], None),
+            'atspi_get_desktop_count': ([], I), 'atspi_get_desktop': ([I], P),
+            'atspi_accessible_set_cache_mask': ([P, C.c_uint], None),
+            'atspi_accessible_get_process_id': ([P, E], C.c_uint),
+            'atspi_accessible_get_child_count': ([P, E], I),
+            'atspi_accessible_get_child_at_index': ([P, I, E], P),
+            'atspi_accessible_get_parent': ([P, E], P),
+            'atspi_accessible_get_role': ([P, E], I),
+            'atspi_accessible_get_name': ([P, E], P),
+            'atspi_accessible_get_state_set': ([P], P),
+            'atspi_state_set_contains': ([P, I], I),
+            'atspi_accessible_get_document_iface': ([P], P),
+            'atspi_accessible_get_component_iface': ([P], P),
+            'atspi_accessible_get_hyperlink': ([P], P),
+            'atspi_document_get_document_attribute_value': ([P, C.c_char_p, E], P),
+            'atspi_component_get_extents': ([P, I, E], P),
+            'atspi_component_get_accessible_at_point': ([P, I, I, I, E], P),
+            'atspi_hyperlink_get_n_anchors': ([P, E], I),
+            'atspi_hyperlink_get_uri': ([P, I, E], P),
+            'atspi_hyperlink_is_valid': ([P, E], I),
+        }
+        for name, (args, result) in definitions.items():
+            function = getattr(self.lib, name)
+            function.argtypes, function.restype = args, result
+        self.glib.g_free.argtypes, self.glib.g_free.restype = [P], None
+        self.glib.g_error_free.argtypes, self.glib.g_error_free.restype = [P], None
+        self.gobject.g_object_unref.argtypes, self.gobject.g_object_unref.restype = [P], None
+        self.lib.atspi_set_timeout(180, 180)
+        if self.lib.atspi_init() != 0:
+            raise OSError('atspi-init')
+        self.started = True
+        if self.lib.atspi_get_desktop_count() != 1:
+            self.close()
+            raise ValueError('atspi-desktops')
+        self.desktop = self.own(self.lib.atspi_get_desktop(0))
+        if not self.desktop:
+            self.close()
+            raise ValueError('atspi-desktop')
+        # NONE, not UNDEFINED: every state/child query must ask the provider again.
+        self.lib.atspi_accessible_set_cache_mask(self.desktop, 0)
+
+    def close(self):
+        while self.refs:
+            self.gobject.g_object_unref(self.refs.pop())
+        if self.started:
+            self.lib.atspi_exit()
+            self.started = False
+
+    def own(self, pointer):
+        if pointer:
+            self.refs.append(pointer)
+        return pointer
+
+    def call(self, name, *args, cleanup=None):
+        error = self.C.c_void_p()
+        value = getattr(self.lib, 'atspi_' + name)(*args, self.C.byref(error))
+        if error:
+            try:
+                # Some libatspi methods allocate an empty/sentinel output even on
+                # GError (notably Component.get_extents). The caller still owns it.
+                if value and cleanup:
+                    cleanup(value)
+            finally:
+                self.glib.g_error_free(error)
+            raise ValueError('atspi-call')  # No provider message or private page text in diagnostics.
+        return value
+
+    def string(self, pointer, limit=8192):
+        if not pointer:
+            return ''
+        try:
+            # libc returns a NUL-terminated allocation. Read one byte at a time up to
+            # the cap; string_at(pointer, cap) would read beyond a short allocation.
+            raw = bytearray()
+            data = self.C.cast(pointer, self.C.POINTER(self.C.c_ubyte))
+            for index in range(limit + 1):
+                value = data[index]
+                if not value:
+                    return raw.decode('utf-8')
+                raw.append(value)
+            raise ValueError('atspi-string-size')
+        finally:
+            self.glib.g_free(pointer)
+
+    def children(self, node, limit=128):
+        count = self.call('accessible_get_child_count', node)
+        if not 0 <= count <= limit:
+            raise ValueError('atspi-child-limit')
+        result = []
+        for index in range(count):
+            child = self.own(self.call('accessible_get_child_at_index', node, index,
+                                      cleanup=self.gobject.g_object_unref))
+            if not child:
+                raise ValueError('atspi-child')
+            result.append(child)
+        return result
+
+    def pid(self, node):
+        return self.call('accessible_get_process_id', node)
+
+    def uncache(self, application):
+        self.lib.atspi_accessible_set_cache_mask(application, 0)
+
+    def role(self, node):
+        return self.call('accessible_get_role', node)
+
+    def states(self, node):
+        states = self.lib.atspi_accessible_get_state_set(node)
+        if not states:
+            raise ValueError('atspi-states')
+        try:
+            return {value for value in (1, 3, 6, 15, 25, 27, 30)
+                    if self.lib.atspi_state_set_contains(states, value)}
+        finally:
+            self.gobject.g_object_unref(states)
+
+    def name(self, node):
+        return self.string(self.call('accessible_get_name', node, cleanup=self.glib.g_free), 2048)
+
+    def document(self, node):
+        return self.own(self.lib.atspi_accessible_get_document_iface(node))
+
+    def uri(self, document, attribute):
+        return self.string(self.call('document_get_document_attribute_value', document, attribute.encode('ascii'),
+                                     cleanup=self.glib.g_free))
+
+    def component(self, node):
+        return self.own(self.lib.atspi_accessible_get_component_iface(node))
+
+    def rect(self, node):
+        component = self.component(node)
+        if not component:
+            return None
+        pointer = self.call('component_get_extents', component, 0, cleanup=self.glib.g_free)  # SCREEN
+        if not pointer:
+            return None
+        try:
+            rect = self.C.cast(pointer, self.C.POINTER(self.C.c_int))
+            return tuple(rect[index] for index in range(4))
+        finally:
+            self.glib.g_free(pointer)
+
+    def hit(self, node, point):
+        component = self.component(node)
+        if not component:
+            return None
+        return self.own(self.call('component_get_accessible_at_point', component, point[0], point[1], 0,
+                                  cleanup=self.gobject.g_object_unref))
+
+    def parent(self, node):
+        return self.own(self.call('accessible_get_parent', node, cleanup=self.gobject.g_object_unref))
+
+    def link(self, node):
+        link = self.own(self.lib.atspi_accessible_get_hyperlink(node))
+        if not link or self.call('hyperlink_get_n_anchors', link) != 1 or not self.call('hyperlink_is_valid', link):
+            return None
+        return self.string(self.call('hyperlink_get_uri', link, 0, cleanup=self.glib.g_free))
+
+
+def _linux_visible(states):
+    return {25, 30} <= states and not ({3, 6, 15, 27} & states)
+
+
+def _linux_contains(rect, point):
+    return bool(rect and rect[2] > 0 and rect[3] > 0 and
+                rect[0] <= point[0] < rect[0] + rect[2] and rect[1] <= point[1] < rect[1] + rect[3])
+
+
+def _linux_active_frame(api, pid, rect):
+    # Enumerate application identities only. No titles, text or descendants from other applications.
+    applications = [app for app in api.children(api.desktop, 128) if api.pid(app) == pid]
+    if len(applications) != 1:
+        return None
+    api.uncache(applications[0])
+    active = []
+    for frame in api.children(applications[0], 64):
+        states = api.states(frame)
+        if {6, 27} & states:
+            return None  # A failed/stale state query cannot exclude a second active window.
+        if 1 in states:
+            if not _linux_visible(states) or api.role(frame) not in (23, 69):
+                return None  # A dialog/menu/hidden active window is not a browser page.
+            active.append(frame)
+    if len(active) != 1 or api.rect(active[0]) != rect:
+        return None  # No coordinate scaling or decoration-offset guesses.
+    return active[0]
+
+
+def _linux_document(api, frame, attribute):
+    """Exactly one shown outer document. Never substitute an iframe or a URL-shaped Edit."""
+    pending, seen, documents = [(frame, 0)], set(), []
+    while pending:
+        node, depth = pending.pop()
+        if node in seen or len(seen) >= 256 or depth > 16:
+            return None
+        seen.add(node)
+        states = api.states(node)
+        if {6, 27} & states:
+            return None
+        if not {25, 30} <= states:
+            continue
+        if not _linux_visible(states):
+            return None  # A shown loading/uncertain pane is still a second possible document.
+        role = api.role(node)
+        if role in (82, 95):  # DOCUMENT_FRAME / DOCUMENT_WEB
+            document = api.document(node)
+            if not document:
+                return None  # A missing outer interface cannot promote its iframe to the page.
+            # Count it before validating URI. An invalid second pane is still ambiguous.
+            documents.append((node, api.uri(document, attribute), api.name(node), api.rect(node)))
+            if len(documents) > 1:
+                return None
+            continue  # Do not enumerate page contents or nested documents.
+        for child in api.children(node):
+            pending.append((child, depth + 1))
+    if len(documents) != 1 or not _opera_url(documents[0][1]):
+        return None
+    node, url, title, rect = documents[0]
+    if not rect or rect[2] <= 0 or rect[3] <= 0:
+        return None
+    return node, url, title, rect
+
+
+def _linux_link_at_point(api, document, point, frame=None):
+    """Point-hit descent plus bounded ancestry, only inside the selected committed document."""
+    # Start at the window to respect a browser-chrome overlay above the document.
+    # A document-only hit test could otherwise see through a sibling dialog/panel.
+    node, seen = frame or document, set()
+    for _ in range(32):
+        if node in seen or not _linux_visible(api.states(node)) or not _linux_contains(api.rect(node), point):
+            return None
+        seen.add(node)
+        child = api.hit(node, point)
+        if not child or child == node:
+            break
+        node = child
+    else:
+        return None
+    candidate, seen = None, set()
+    for _ in range(32):
+        if node == document:
+            return candidate
+        if not node or node in seen or not _linux_visible(api.states(node)) or not _linux_contains(api.rect(node), point):
+            return None
+        seen.add(node)
+        if api.role(node) == 88:  # LINK, not an inline Hyperlink interface on a non-link object.
+            value = _opera_url(api.link(node))
+            if not value or candidate is not None:
+                return None
+            candidate = (node, value, api.name(node))
+        node = api.parent(node)
+    return None
+
+
+def _linux_browser_snapshot():
+    """A pair of uncached AT-SPI reads bracketed by real X11 foreground/identity checks."""
+    if not _linux_x11_session():
+        return {}
+    x11 = api = None
+    try:
+        x11 = _LinuxX11()
+        initial = x11.foreground()
+        if not initial:
+            return {}
+        window, identity, rect = initial
+        app, attribute = LINUX_BROWSERS[Path(identity[1]).name]
+        point = x11.pointer(window)
+        api = _LinuxAtspi()
+        frame = _linux_active_frame(api, identity[0], rect)
+        if not frame:
+            return {}
+        first = _linux_document(api, frame, attribute)
+        if not first or x11.foreground() != initial:
+            return {}
+        hovered = None
+        if point is not None:
+            try:
+                hovered = _linux_link_at_point(api, first[0], point, frame)
+                if hovered != _linux_link_at_point(api, first[0], point, frame) or x11.pointer(window) != point:
+                    hovered = None
+            except Exception:
+                hovered = None
+        second = _linux_document(api, frame, attribute)
+        if (second != first or _linux_active_frame(api, identity[0], rect) != frame or
+                x11.foreground() != initial):
+            return {}
+        if hovered and x11.pointer(window) != point:
+            hovered = None
+        result = {'uygulama': app, 'url': first[1], 'baslik': first[2], 'url_yontem': 'linux-atspi-x11'}
+        if hovered:
+            result.update(url_imlec=hovered[1], baslik_imlec=hovered[2])
+        return result
+    finally:
+        if api:
+            api.close()
+        if x11:
+            x11.close()
+
+
+def _linux_reader_main(kind):
+    try:
+        raw = sys.stdin.buffer.read(WIN_MESSAGE_LIMIT + 1)
+        if len(raw) > WIN_MESSAGE_LIMIT or not sys.platform.startswith('linux') or kind != 'browser':
+            raise ValueError('request-platform-kind')
+        request = json.loads(raw)
+        if request != {}:
+            raise ValueError('request-browser')
+        result = _linux_browser_snapshot()
+    except Exception as exc:
+        result = {'error': type(exc).__name__}
+    sys.stdout.buffer.write(_read_packet(result))
+    sys.stdout.buffer.flush()
+    return 0
+
+
+def linux_browser_context(timeout=LINUX_BROWSER_TIMEOUT, cancel=None):
+    """Browser-only data; unavailable/Wayland/ambiguous providers give an empty mapping."""
+    if not _linux_x11_session():
+        return {}
+    result = _process_packet([sys.executable, str(Path(__file__).resolve()), '_linux-read', 'browser'],
+                             {}, min(timeout, LINUX_BROWSER_TIMEOUT), cancel)
+    if (not isinstance(result, dict) or 'error' in result or not isinstance(result.get('uygulama'), str) or
+            result.get('uygulama') not in {item[0] for item in LINUX_BROWSERS.values()} or
+            result.get('url_yontem') != 'linux-atspi-x11' or not _opera_url(result.get('url'))):
+        return {}
+    context = {'uygulama': result['uygulama'], 'url': result['url'], 'url_yontem': 'linux-atspi-x11'}
+    for key in ('baslik', 'baslik_imlec'):
+        value = result.get(key)
+        if isinstance(value, str) and len(value) <= 2048:
+            context[key] = re.sub(r'\s+', ' ', value).strip()
+    if _opera_url(result.get('url_imlec')):
+        context['url_imlec'] = result['url_imlec']
+    else:
+        context.pop('baslik_imlec', None)
+    return context
+
+
+def _linux_clipboard_context():
+    """Portable fallback: one copied link, copied files or plain text."""
     text = _linux_clipboard().strip()
     if not text:
         return {}
@@ -2534,6 +3950,21 @@ def linux_context():
         paths = [path for path in paths if Path(path).is_file()]
         return {'dosyalar': paths[:20]} if paths else {}
     return {'metin': text}
+
+
+def linux_context():
+    context = linux_browser_context()
+    copied = _linux_clipboard_context()
+    if copied.get('dosyalar'):
+        # The file preview owns this capture. An unseen browser URL could deduplicate
+        # against an older page card and silently skip copying these files on POSIX.
+        return copied
+    if context:
+        # Preserve copied text. The popup reads a copied URL as its own source;
+        # it must not overwrite the independently attested current browser page.
+        context.update({key: value for key, value in copied.items() if key != 'url'})
+        return context
+    return copied
 
 
 def gather_context():
@@ -3087,13 +4518,14 @@ def popup(vault, context=None, state=None, root=None, session=None):
         image = clipboard_image(clip, context)
         if image:
             clip = ''  # at most the screenshot's own temp path, which is not the note
+        sources = _browser_source_choices(context, clip, image)
     clip_is_url = bool(re.match(r'^https?://\S+$', clip))
     url = context.get('url') or (clip if clip_is_url else None)
     files = context.get('dosyalar') or []
     clip_text = clip if clip and not clip_is_url else ''
     include = {'on': bool(clip_text) and not url and not files}
-    if windows:
-        url, files, clip_text = None, [], ''  # Windows sources are shown independently below
+    if sources is not None:
+        url, files, clip_text = None, [], ''  # Source rows below own their explicit selections.
 
     P, W, pad = PALETTE, 640, 26
     _window_chrome(root)
@@ -3152,7 +4584,8 @@ def popup(vault, context=None, state=None, root=None, session=None):
     y += 16
 
     if sources is not None:
-        y = _windows_source_cards(canvas, root, sources, y, W, pad)
+        y = _windows_source_cards(canvas, root, sources, y, W, pad,
+                                  key_label='Option' if sys.platform == 'darwin' and os.name != 'nt' else 'Alt')
 
     # Preview card.
     if files or url or clip_text:
@@ -3200,7 +4633,7 @@ def popup(vault, context=None, state=None, root=None, session=None):
         y += 30
 
     # Clipboard image (#274): shown before it is attached; Tab or a click takes it off or puts it back.
-    if image and not windows:
+    if image and not windows and sources is None:
         def image_changed(on):
             nonlocal placeholder_text
             files[:] = [image['path']] if on else []
@@ -3250,7 +4683,7 @@ def popup(vault, context=None, state=None, root=None, session=None):
 
     def save(_event=None):
         nonlocal url, files
-        if windows and (saving['on'] or result):
+        if saving['on'] or result:
             return 'break'
         text = clip_text if include['on'] else None
         title = context.get('baslik') if url else None
@@ -3505,14 +4938,32 @@ def _context_line_popup(vault, state=None):
     return popup(vault, json.loads(line.decode('utf-8')), state, root=root)
 
 
+_MAC_FALLBACK_SCRIPT = ('on run argv\n'
+                        'return text returned of (display dialog (item 1 of argv) default answer "" '
+                        'with title "Beyne at" buttons {"Vazgec", "Kaydet"} '
+                        'default button "Kaydet" cancel button "Vazgec")\n'
+                        'end run')
+
+
 def _popup_fallback(vault, context, state=None):
-    """No tkinter (some Homebrew/Linux Pythons): the OS dialog asks only for the reason."""
+    """No tkinter: show the source and ask for a reason; macOS offers the page only."""
     if os.name == 'nt' and sys.platform == 'win32':
         return {'status': 'vazgecildi'}  # no dialog to confirm with: a found page or window is never saved unasked
     why = ''
     url, files, text = context.get('url'), context.get('dosyalar') or [], context.get('metin') or ''
     if sys.platform == 'darwin':
-        why = _osascript('text returned of (display dialog "Neden kaydediyorsun?" default answer "" with title "Beyne at")', timeout=300) or ''
+        if url:
+            if not _mac_url(url):
+                return {'status': 'vazgecildi'}
+            prompt = ('Kaydedilecek sayfa:\n' + url + '\n\n'
+                      'Tarayicidan yalniz bu sayfa alinir; imlec linki secilemez.\n\nNeden kaydediyorsun?')
+        else:
+            shown = ', '.join(Path(f).name for f in files) or text
+            shown = re.sub(r'[\s\x00-\x1f\x7f]+', ' ', shown).strip()[:120]
+            prompt = 'Neden kaydediyorsun?' + ('\n' + shown if shown else '')
+        why = _osascript(_MAC_FALLBACK_SCRIPT, timeout=300, args=(prompt,))
+        if why is None:  # Cancel, timeout or a dialog error is never an empty confirmation.
+            return {'status': 'vazgecildi'}
     elif sys.platform.startswith('linux'):
         why = _linux_ask(url or ', '.join(Path(f).name for f in files) or text)
         if why is None:
@@ -4073,7 +5524,7 @@ def _windows_reader_main(kind):
             hwnd, name = request.get('hwnd'), request.get('class')
             if type(hwnd) is not int or hwnd <= 0 or name not in set(WIN_CHROMIUM.values()):
                 raise ValueError('request-uia')
-            result = {'value': _uia_address_bar(hwnd, name)}
+            result = {'value': _chromium_committed_url(hwnd, name)}
         elif kind == 'opera':
             hwnd, at = request.get('hwnd'), request.get('at')
             if type(hwnd) is not int or hwnd <= 0:
@@ -4081,6 +5532,15 @@ def _windows_reader_main(kind):
             if at is not None and not (isinstance(at, list) and len(at) == 2 and all(type(v) is int for v in at)):
                 raise ValueError('request-point')
             result = _opera_snapshot(hwnd, at)
+        elif kind == 'browser_document':
+            hwnd, at, app = request.get('hwnd'), request.get('at'), request.get('app')
+            if type(hwnd) is not int or hwnd <= 0 or not isinstance(app, str) \
+                    or app not in WIN_GECKO | WIN_DOCUMENT_CHROMIUM:
+                raise ValueError('request-browser')
+            if at is not None and not (isinstance(at, list) and len(at) == 2
+                                      and all(type(v) is int and -(2 ** 31) <= v < 2 ** 31 for v in at)):
+                raise ValueError('request-point')
+            result = _document_browser_snapshot(hwnd, app, at)
         elif kind == 'uia_link':
             hwnd = request.get('hwnd')
             if type(hwnd) is not int or hwnd <= 0:
@@ -5641,6 +7101,10 @@ def main(argv=None, vault=None, state=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
     if len(arguments) == 2 and arguments[0] == '_win-read':
         return _windows_reader_main(arguments[1])
+    if len(arguments) == 2 and arguments[0] == '_mac-read':
+        return _mac_reader_main(arguments[1])
+    if len(arguments) == 2 and arguments[0] == '_linux-read':
+        return _linux_reader_main(arguments[1])
     def shared(default):
         # Subcommands must not reset a --vault/--json given before them, hence SUPPRESS there.
         common = argparse.ArgumentParser(add_help=False)
