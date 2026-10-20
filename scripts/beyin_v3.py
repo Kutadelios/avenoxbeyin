@@ -68,7 +68,7 @@ def resolve_state(vault: Path, pinned: Path) -> Path:
     """Resolve a foreign OS/user's conventional default; preserve custom and local pins."""
     expected = default_state(vault).resolve()
     raw = str(pinned)
-    if not raw or not raw.strip():
+    if not raw or not raw.strip() or "\0" in raw:
         return expected
     if _in_package_container(raw):
         try:
@@ -185,6 +185,8 @@ def state_location(vault: Path, state: Path, windows=None) -> dict:
     if pinned is None:
         return report
     try:
+        if "\0" in pinned:
+            raise ValueError("embedded null character in pinned state path")
         resolved = Path(pinned).expanduser().resolve()
     except (OSError, ValueError, RuntimeError):
         report.update(pinned_state=pinned, installed_at_pinned_state=False)

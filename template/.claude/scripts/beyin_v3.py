@@ -56,7 +56,7 @@ def resolve_state(vault: Path, pinned: Path) -> Path:
     """Resolve a foreign OS/user's conventional default; preserve custom and local pins."""
     expected = default_state(vault).resolve()
     raw = str(pinned)
-    if not raw or not raw.strip():
+    if not raw or not raw.strip() or "\0" in raw:
         return expected
     if _in_package_container(raw):
         try:
