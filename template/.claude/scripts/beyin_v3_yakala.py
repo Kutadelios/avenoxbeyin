@@ -6258,6 +6258,7 @@ class _WindowsPopupBroker:
 
     WARM_TIMEOUT = 6
     ACTIVE_TIMEOUT = 4
+    EXIT_DRAIN_TIMEOUT = 0.25
     RETRY_DELAY = 0.5
     FAILURE_WINDOW = 120
     FAILURE_LIMIT = 3
@@ -6380,9 +6381,9 @@ class _WindowsPopupBroker:
         import time
         instance = self._spawn()
         stage, deadline, sent_focus, capture_id = 'warming', time.monotonic() + self.WARM_TIMEOUT, 0, None
-        done = False
+        done, exit_seen = False, False
         while not self.stopping.is_set():
-            # Consume queued final packets before observing pipe EOF/process exit.
+            # Consume queued final packets before classifying pipe EOF/process exit.
             while True:
                 message = self.pipe.receive()
                 if message is None:
@@ -6413,6 +6414,13 @@ class _WindowsPopupBroker:
                     stage, deadline, done = 'closing', time.monotonic() + 2, True
             child = self.owned.process
             if child.poll() is not None:
+                if not exit_seen:
+                    # Exit can precede the reader queuing DONE. Join the reader (not the
+                    # shared failed flag, which the writer also sets), then drain once more.
+                    # An inherited/open stdout must not hold the listener indefinitely.
+                    self.pipe.read_thread.join(timeout=self.EXIT_DRAIN_TIMEOUT)
+                    exit_seen = True
+                    continue
                 if stage in ('warming', 'ready'):
                     raise _WindowsPopupTransientError('Hazir pencere beklenmedik bicimde kapandi (asama: %s)' % stage)
                 if stage in ('activating', 'active') or (stage == 'closing' and not done):
