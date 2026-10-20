@@ -2085,9 +2085,14 @@ def _post_title(post, article, link=''):
     text = re.sub(r'\s+', ' ', article or '').strip()
     link = re.sub(r'\s+', ' ', link or '').strip()
     handle = re.match(r'^https://x\.com/([A-Za-z0-9_]{1,15})/status/', post or '')
-    if handle and link and link in text:
-        body = text.split(link, 1)[1].strip()
-        text = '@%s: %s' % (handle.group(1), body) if body else '@' + handle.group(1)
+    if handle and link:
+        mention = re.search(r'@' + re.escape(handle.group(1)) + r'(?![A-Za-z0-9_])', text, re.I)
+        # A display name or handle can itself contain the timestamp (for example @abc2h).
+        # Keep the existing fallback for accessibility text that omits the handle entirely.
+        at = text.find(link, mention.end() if mention else 0)
+        if at >= 0:
+            body = text[at + len(link):].strip()
+            text = '@%s: %s' % (handle.group(1), body) if body else '@' + handle.group(1)
     return text[:200]
 
 
