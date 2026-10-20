@@ -907,6 +907,8 @@ def parser():
     settings.add_argument("--companion-context-chars", type=int,
                           help="Opening context budget (SessionStart, continuity questions), 1000..24000; 0 uses --context-chars")
     settings.add_argument("--secret-filter", choices=("on", "off"))
+    settings.add_argument("--daily-layout", choices=("flat", "v3"),
+                          help="Vault-wide daily receipt view layout (default v3); applied by the next sync")
     settings.add_argument("--update-notifications", choices=("on", "off"))
     settings.add_argument("--last-session-chars", type=int, help="Hygiene limit for Last-Session.md; 0 turns it off")
     settings.add_argument("--threads-chars", type=int, help="Hygiene limit for Threads.md; 0 turns it off")
@@ -1109,6 +1111,7 @@ def main(argv=None, return_result=False):
         elif args.command == "preferences":
             _ensure_scripts_path()
             import beyin_v3_preferences as preferences
+            daily_layout = preferences.read_daily_layout(vault)  # validate before saving any setting
             import beyin_v3_companion as companion
             limits = {name: value for name, value in (('Last-Session.md', args.last_session_chars),
                                                       ('Threads.md', args.threads_chars)) if value is not None}
@@ -1172,6 +1175,10 @@ def main(argv=None, return_result=False):
             result = {'status': 'saved' if changes or args.profile or (args.exclude_component or args.include_component) else 'current',
                       'preferences': settings, 'excluded_components': result_excluded,
                       'model_calls': False, 'timer_installed': False}
+            result['daily_layout'] = daily_layout
+            if args.daily_layout is not None:
+                result['daily_layout'] = preferences.save_daily_layout(vault, args.daily_layout)
+                result['status'] = 'saved'
             if exclusion_notice:
                 result['exclusion_notice'] = exclusion_notice
             # Machine-local like update notifications: rollback-safe, outside the vault schema.
@@ -1380,7 +1387,9 @@ def main(argv=None, return_result=False):
             # Entries beside the skills that this vault never owned. Information only.
             result['skill_unmanaged'] = health.get('sync', {}).get('skill_unmanaged', [])
             from beyin_v3_projections import is_receipt_view_conflict
-            result['receipt_view_conflicts'] = [c for c in health.get('sync', {}).get('conflicts', []) if is_receipt_view_conflict(c)]
+            view_sync = health.get('sync', {})
+            result['receipt_view_conflicts'] = [c for c in view_sync.get('conflicts', []) + view_sync.get('warnings', [])
+                                                if is_receipt_view_conflict(c)]
             try:
                 result['task_completion'] = load_sync().reader(store).completion_health()
             except Exception as exc:

@@ -244,6 +244,10 @@ def human_result(result, command, installed_version=None):
                  'Sir suzgeci: ' + ('acik' if prefs['secret_filter'] else 'kapali'),
                  'Surum bildirimi: ' + ('acik' if result.get('update_notifications', {}).get('effective') else 'kapali'),
                  'Proje oturum basi baglami: ' + ('acik' if result.get('project_context') == 'on' else 'kapali')]
+        if result.get('daily_layout') in ('flat', 'v3'):
+            layout = result['daily_layout']
+            lines.append('Daily duzeni: ' + layout + ' (' +
+                         ('daily/YYYY-MM-DD.md' if layout == 'flat' else 'daily/v3/YYYY-MM-DD.md') + ')')
         opening = (result.get('companion_context') or {}).get('context_chars')
         if opening is not None:
             lines.append('Oturum basi hafiza baglami: ' + (str(opening) + ' karakter' if opening else 'baglam ust siniri kadar'))

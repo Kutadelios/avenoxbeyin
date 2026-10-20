@@ -25,7 +25,7 @@ from beyin_v3_index import applied_keys, dir_key, exclusions as index_exclusions
 from beyin_v3_hygiene import sensitive_excluded, sensitive_source
 from beyin_v3_projections import (is_receipt_view_source, is_receipt_view_conflict, project_receipts,
                                   quarantine_receipt_view_history, archived_receipt_view_aliases,
-                                  _receipt_view_contents,
+                                  _receipt_view_contents, receipt_view_rows,
                                   RECEIPT_VIEW_SOURCES_ROW)
 from beyin_v3_preferences import read as read_preferences
 from beyin_v3_secrets import redact as redact_secrets, record as record_redactions
@@ -780,6 +780,7 @@ class SyncEngine:
         # taking their identities so aliases on case-insensitive volumes are also
         # excluded, without treating distinct case-sensitive files as the same note.
         view_paths = self.receipt_view_sources = set(receipt_views)
+        self.discovered_receipt_views = {}
         view_identities = set(alias_identities)
         for relative in view_paths:
             try:
@@ -841,6 +842,10 @@ class SyncEngine:
                     if metadata.get('kind') == 'task' and body.lstrip().startswith('---'):
                         raise ValueError('task has embedded frontmatter; reconcile metadata and body explicitly')
                     if metadata.get('kind') == 'receipt' or metadata.get('generated') is True:
+                        if (metadata.get('generated') is True and metadata.get('kind') == 'receipt-index' and
+                                is_receipt_view_source(relative, proven=True)):
+                            view_paths.add(relative)
+                            self.discovered_receipt_views[relative] = _hash(raw)
                         continue
                     record = dict(metadata, source=relative, text=body)
                     record.setdefault('id', 'md-' + _hash(relative)[:24])
@@ -1011,14 +1016,23 @@ class SyncEngine:
             db.execute("INSERT OR REPLACE INTO metadata VALUES ('last_sync_time', ?)", (str(now_sec),))
             completed, recovery_conflicts = self._recover(db)
             receipt_warnings, receipt_conflicts = self._scan_receipts(db)
-            desired_views = _receipt_view_contents(self, db, receipt_warnings)
+            # The layout file is shared through git and can arrive malformed (for
+            # example with merge markers). Indexing, receipts and hooks keep working;
+            # receipt views stay exactly as they are until the file is valid again.
+            layout_issue = None
+            try:
+                from beyin_v3_preferences import read_daily_layout
+                read_daily_layout(self.root)
+            except (ValueError, OSError) as exc:
+                layout_issue = {'source': '.beyin-daily-layout.json',
+                                'reason': 'invalid daily layout; receipt views left unchanged: ' + str(exc)}
+            desired_views = {} if layout_issue else _receipt_view_contents(self, db, receipt_warnings)
             view_paths = set(desired_views)
             # First sync has no tracking table. Keep edited stale views excluded
             # even when no receipt currently produces them; unexpected tracking
             # paths are source conflicts, never authority to hide ordinary notes.
-            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_views'").fetchone():
-                view_paths.update(row[0] for row in db.execute('SELECT path FROM receipt_views')
-                                  if is_receipt_view_source(row[0]))
+            view_paths.update(path for path, _ in receipt_view_rows(db)
+                              if is_receipt_view_source(path, proven=True))
             canonical_view_paths = set(view_paths)
             # A hard link to an edited view keeps the old inode when recovery
             # atomically replaces the canonical path. Retain only identities
@@ -1049,8 +1063,9 @@ class SyncEngine:
             old_payloads = dict(db.execute('SELECT id, payload FROM records'))
             cache = _SignatureCache(db, old_sources, old_payloads, full=full)
             records, warnings, conflicts = self._scan(cache, view_paths, alias_identities)
+            canonical_view_paths.update(self.discovered_receipt_views)
             warnings.extend(state_regression_warnings)
-            warnings.extend(receipt_warnings)
+            warnings.extend(issue for issue in receipt_warnings if issue not in warnings)
             conflicts.extend(recovery_conflicts + receipt_conflicts)
             deleted = 0
             for id in old_owned - records.keys():
@@ -1099,12 +1114,15 @@ class SyncEngine:
                     continue
             # Include the deletion event just written, and already-deleted snapshots
             # at these proven paths. Audit payloads remain immutable.
-            quarantine_receipt_view_history(db, self.receipt_view_sources)
+            provenance_durable = quarantine_receipt_view_history(self, db, self.receipt_view_sources, warnings)
+            if layout_issue:
+                warnings.append(layout_issue)
             db.execute('INSERT OR REPLACE INTO metadata VALUES (?,?)',
                        (RECEIPT_VIEW_SOURCES_ROW, _json(sorted(self.receipt_view_sources))))
             recovered_views = [] if recover_views else None
             view_issues = project_receipts(self, db, warnings, recover_views=recover_views,
-                                          recovered=recovered_views, desired=desired_views)
+                                          recovered=recovered_views, desired=desired_views,
+                                          allow_view_writes=provenance_durable and not layout_issue)
             for issue in view_issues:
                 if is_receipt_view_conflict(issue):
                     warnings.append(dict(issue, kind='receipt_view'))
