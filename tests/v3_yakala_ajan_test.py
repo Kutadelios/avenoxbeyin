@@ -264,6 +264,189 @@ class AgentConfigurationTest(AgentFiles):
         self.assertFalse(self.config_path.exists())
 
 
+class AgentAutomaticClientTest(AgentFiles):
+    def setUp(self):
+        super().setUp()
+        environment = patch.dict(os.environ, {'CLAUDECODE': '', 'CLAUDE_CODE_ENTRYPOINT': '',
+                                             'CODEX_THREAD_ID': '', 'CODEX_HOME': ''})
+        environment.start()
+        self.addCleanup(environment.stop)
+        executable = patch.object(yakala, '_agent_executable', side_effect=FileNotFoundError)
+        self.executable = executable.start()
+        self.addCleanup(executable.stop)
+        terminal = patch.object(sys, 'stdin', Mock(isatty=Mock(return_value=False)))
+        terminal.start()
+        self.addCleanup(terminal.stop)
+
+    def cli(self, argv, terminal=False):
+        output = io.StringIO()
+        with patch.object(sys, 'stdout', output), patch.object(output, 'isatty', return_value=terminal):
+            self.assertEqual(yakala.main(argv, vault=self.vault, state=self.state), 0)
+        return output.getvalue()
+
+    def test_session_markers_take_priority_over_installed_clients(self):
+        environments = [
+            ({'CLAUDECODE': '1'}, 'claude'),
+            ({'CLAUDE_CODE_ENTRYPOINT': 'cli'}, 'claude'),
+            ({'CODEX_THREAD_ID': str(uuid.uuid4())}, 'codex'),
+            ({'CLAUDECODE': '1', 'CODEX_THREAD_ID': str(uuid.uuid4())}, 'claude'),
+        ]
+        for environment, client in environments:
+            with self.subTest(environment=environment), patch.dict(os.environ, environment):
+                self.assertEqual(yakala._agent_select_client('otomatik', True), (client, 'kurulum-ajani'))
+        self.executable.assert_not_called()
+
+    def test_location_and_empty_session_markers_are_not_session_evidence(self):
+        with patch.dict(os.environ, {'CODEX_HOME': str(self.vault), 'CODEX_THREAD_ID': '',
+                                     'CLAUDECODE': '0', 'CLAUDE_CODE_ENTRYPOINT': ''}):
+            with self.assertRaisesRegex(ValueError, 'Ajan istemcisi bulunamadi'):
+                yakala._agent_select_client('otomatik', True)
+        self.assertEqual(self.executable.call_args_list, [mock.call('claude'), mock.call('codex')])
+
+    def test_only_installed_client_is_selected_without_launching_it(self):
+        for client in ('claude', 'codex'):
+            with self.subTest(client=client):
+                self.executable.side_effect = ([[client], FileNotFoundError()] if client == 'claude'
+                                               else [FileNotFoundError(), [client]])
+                self.assertEqual(yakala._agent_select_client('otomatik', True), (client, 'tek-kurulu'))
+
+    def test_both_installed_require_a_terminal_and_non_json_output(self):
+        self.executable.side_effect = None
+        self.executable.return_value = ['native-cli']
+        for stdin, as_json in ((None, False), (Mock(isatty=Mock(return_value=False)), False),
+                               (Mock(isatty=Mock(return_value=True)), True)):
+            with self.subTest(stdin=stdin, as_json=as_json), patch.object(sys, 'stdin', stdin), \
+                    patch('builtins.input') as ask:
+                with self.assertRaisesRegex(ValueError, '^Iki istemci de kurulu; --ajan claude veya --ajan codex sec[.]$'):
+                    yakala._agent_select_client('otomatik', as_json)
+                ask.assert_not_called()
+
+    def test_both_installed_ask_for_the_client_at_a_terminal(self):
+        self.executable.side_effect = None
+        self.executable.return_value = ['native-cli']
+        for answer, client in (('1', 'claude'), ('2', 'codex'), (' CLAUDE ', 'claude'), ('codex', 'codex')):
+            with self.subTest(answer=answer), patch.object(sys.stdin, 'isatty', return_value=True), \
+                    patch('builtins.input', return_value=answer) as ask:
+                self.assertEqual(yakala._agent_select_client('otomatik', False), (client, 'kullanici'))
+                self.assertIn('1) claude', ask.call_args.args[0])
+                self.assertIn('2) codex', ask.call_args.args[0])
+
+    def test_invalid_or_missing_answer_does_not_pick_a_client(self):
+        self.executable.side_effect = None
+        self.executable.return_value = ['native-cli']
+        for answer in ('', '3'):
+            with self.subTest(answer=answer), patch.object(sys.stdin, 'isatty', return_value=True), \
+                    patch('builtins.input', return_value=answer), self.assertRaisesRegex(ValueError, 'Gecersiz secim'):
+                yakala._agent_select_client('otomatik', False)
+        with patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input', side_effect=EOFError), \
+                self.assertRaisesRegex(ValueError, 'Istemci secilemedi'):
+            yakala._agent_select_client('otomatik', False)
+
+    def test_neither_installed_fails_before_install_or_config_write(self):
+        with patch.object(yakala, 'install') as install, self.assertRaisesRegex(ValueError, 'Ajan istemcisi bulunamadi'):
+            self.cli(['kur', '--ajan', 'otomatik'])
+        install.assert_not_called()
+        self.assertFalse(self.config_path.exists())
+
+    def test_ambiguous_cli_json_output_preserves_existing_configuration(self):
+        self.configure('claude')
+        before = self.config_path.read_bytes()
+        self.executable.side_effect = None
+        self.executable.return_value = ['native-cli']
+        for argv in (['kur', '--ajan', 'otomatik', '--json'], ['ajan', 'otomatik', '--json']):
+            with self.subTest(argv=argv), patch.object(yakala, 'install') as install, \
+                    patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input') as ask, \
+                    self.assertRaisesRegex(ValueError, 'Iki istemci de kurulu'):
+                self.cli(argv, terminal=True)
+            install.assert_not_called()
+            ask.assert_not_called()
+            self.assertEqual(self.config_path.read_bytes(), before)
+
+    def test_automatic_agent_command_saves_only_the_concrete_client(self):
+        self.executable.side_effect = [FileNotFoundError(), ['codex']]
+        result = json.loads(self.cli(['ajan', 'otomatik', '--ag', 'acik', '--gorunum', 'gizli']))
+        self.assertEqual(result['ajan'], 'codex')
+        self.assertEqual(result['secim'], 'tek-kurulu')
+        config = json.loads(self.config_path.read_text(encoding='utf-8'))
+        self.assertEqual(config['client'], 'codex')
+        self.assertEqual(config['ag'], 'acik')
+        self.assertEqual(config['gorunum'], 'gizli')
+        self.assertNotIn('otomatik', config.values())
+        self.assertNotIn('secim', config)
+
+    def test_setup_view_prompt_uses_the_resolved_client(self):
+        with patch.dict(os.environ, {'CLAUDECODE': '1'}), \
+                patch.object(yakala, 'install', return_value={'status': 'kuruldu'}) as install, \
+                patch.object(yakala, '_agent_window_supported', return_value=True), \
+                patch.object(sys.stdin, 'isatty', return_value=True), \
+                patch('builtins.input', return_value='2') as ask:
+            result = json.loads(self.cli(['kur', '--ajan', 'otomatik']))
+            # JSON output suppresses the view question as before.
+            ask.assert_not_called()
+            self.assertEqual(result['ajan']['gorunum'], 'gizli')
+            install.return_value = {'status': 'kuruldu', 'web_clipper_sablonu': 'clipper.json'}
+            output = self.cli(['kur', '--ajan', 'otomatik'], terminal=True)
+            ask.assert_called_once()
+            self.assertIn('nasil calissin', ask.call_args.args[0])
+        self.assertIn('Arka plan ajani: claude', output)
+        self.assertIn('Ajan secimi: kurulum-ajani', output)
+        self.assertEqual(yakala.agent_settings(self.vault, self.state)['gorunum'], 'pencere')
+        self.assertEqual(yakala.agent_settings(self.vault, self.state)['client'], 'claude')
+
+    def test_setup_terminal_client_answer_is_saved_and_then_view_is_asked(self):
+        self.executable.side_effect = None
+        self.executable.return_value = ['native-cli']
+        with patch.object(yakala, 'install', return_value={'web_clipper_sablonu': 'clipper.json'}), \
+                patch.object(yakala, '_agent_window_supported', return_value=True), \
+                patch.object(sys.stdin, 'isatty', return_value=True), \
+                patch('builtins.input', side_effect=['1', '2']) as ask:
+            output = self.cli(['kur', '--ajan', 'otomatik'], terminal=True)
+        self.assertEqual(ask.call_count, 2)
+        self.assertIn('hangi istemciyi', ask.call_args_list[0].args[0])
+        self.assertIn('nasil calissin', ask.call_args_list[1].args[0])
+        self.assertIn('Ajan secimi: kullanici', output)
+        config = json.loads(self.config_path.read_text(encoding='utf-8'))
+        self.assertEqual(config['client'], 'claude')
+        self.assertEqual(config['gorunum'], 'pencere')
+
+    def test_setup_explicit_view_skips_the_prompt_for_both_clients(self):
+        # Both clients now offer the window view; an explicit --ajan-gorunum still skips the question.
+        for client, options in (('codex', ['--ajan-gorunum', 'gizli']), ('claude', ['--ajan-gorunum', 'gizli'])):
+            environment = {'CODEX_THREAD_ID': 'test-thread'} if client == 'codex' else {'CLAUDECODE': '1'}
+            with self.subTest(client=client), patch.dict(os.environ, environment), \
+                    patch.object(yakala, 'install', return_value={'web_clipper_sablonu': 'clipper.json'}), \
+                    patch.object(yakala, '_agent_window_supported', return_value=True), \
+                    patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input') as ask:
+                self.cli(['kur', '--ajan', 'otomatik'] + options, terminal=True)
+                ask.assert_not_called()
+                self.assertEqual(yakala.agent_settings(self.vault, self.state)['client'], client)
+
+    def test_explicit_clients_keep_existing_behavior(self):
+        with patch('builtins.input') as ask:
+            for client in ('claude', 'codex', 'kapali'):
+                self.assertEqual(yakala._agent_select_client(client, False), (client, None))
+                result = json.loads(self.cli(['ajan', client]))
+                self.assertEqual(result['ajan'], client)
+                self.assertNotIn('secim', result)
+            self.executable.assert_not_called()
+            ask.assert_not_called()
+        self.assertEqual(yakala.agent_settings(self.vault, self.state)['client'], 'kapali')
+        self.spawned.assert_not_called()
+
+    def test_setup_without_agent_stays_off_even_in_an_agent_session(self):
+        with patch.dict(os.environ, {'CLAUDECODE': '1'}), \
+                patch.object(sys.stdin, 'isatty', return_value=True), \
+                patch.object(yakala, 'install', return_value={'web_clipper_sablonu': 'clipper.json'}), \
+                patch.object(yakala, '_agent_select_client') as select, patch('builtins.input') as ask:
+            self.cli(['kur'], terminal=True)
+        select.assert_not_called()
+        ask.assert_not_called()
+        self.executable.assert_not_called()
+        self.assertFalse(self.config_path.exists())
+        self.assertEqual(yakala.agent_settings(self.vault, self.state)['client'], 'kapali')
+        self.spawned.assert_not_called()
+
+
 class AgentQueueTest(AgentFiles):
     def test_plain_capture_never_starts_an_agent_even_when_feature_is_on(self):
         self.configure()
@@ -887,6 +1070,15 @@ class AgentWindowViewTest(AgentFiles):
             self.assertIn('canli izliyor', argv[-1])
             self.assertEqual([item for item in argv if 'Istek ' in item], [argv[-1]])
 
+    def test_both_clients_are_asked_for_a_view_only_at_a_persons_terminal(self):
+        for client in ('claude', 'codex'):
+            with self.subTest(client=client), patch.object(yakala, '_agent_window_supported', return_value=True), \
+                    patch.object(yakala.sys, 'stdin', Mock(isatty=Mock(return_value=True))), \
+                    patch('builtins.input', return_value='2') as ask:
+                self.assertEqual(yakala._agent_ask_view(client, False), 'pencere')
+                self.assertIn('Codex' if client == 'codex' else 'Claude Code', ask.call_args.args[0])
+                self.assertIsNone(yakala._agent_ask_view(client, True))
+                ask.assert_called_once()
 
     def test_window_command_is_interactive_with_the_same_tool_boundary(self):
         result, job, card = self.windowed(request='Müziği bul "--dangerously-skip-permissions" $(x)')

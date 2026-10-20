@@ -121,3 +121,14 @@ kapanışı bekleyen arayüz callbackini iptal eder. Windows worker, popup JobOb
 süreli yetki ve doğrulanmış receipt sınırları önceki katmanlarla aynıdır.
 Bu katmanın Win32/WGC testleri Linux üzerinde test double kullanır; gerçek
 Windows klavye, pencere ve yakalama davranışı ayrıca canlı doğrulanmalıdır.
+
+## Kurulumda açık istemci tercihi
+
+`yakala kur --ajan claude --ajan-gorunum gizli` veya açık `codex` tercihi,
+kurulum sırasında aynı ajan ayarını oluşturur. `otomatik` mevcut istemciyi ve
+oturum ipuçlarını değerlendirir; iki istemci olduğunda insan terminalinde sorar,
+JSON veya etkileşimsiz belirsizlikte sessizce seçim yapmaz. Windows görünüm
+sorusu da yalnız insan terminalinde çıkar. `--ajan` verilmeden yapılan kurulum
+ajanı açmaz; seçim güvenlik ön kontrollerini atlatmaz. Ayar yalnız
+`state/yakala/ajan/config.json` altındadır. Paket rollback denemesinde eski
+kod baytları geri geldi, notlar ve ayar korundu; eski sürüm ajan ayarını yok saydı.
