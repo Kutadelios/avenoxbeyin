@@ -101,3 +101,13 @@ Bildirim API'sinin çağrıyı kabul etmesi kullanıcının bildirimi gördüğ�
 İşletim sistemi bildirimi engellese de iş durumu `yakala ajan` ile okunabilir;
 bildirim başarısızlığı doğrulanmış receipt veya sonuç durumunu değiştirmez.
 Gerçek Windows masaüstü sunumu bu Linux çalışmasında ölçülmemiştir.
+
+## Görünür Windows istemcisi
+
+Desteklenen Windows kurulumunda `yakala ajan claude --gorunum pencere` veya
+`yakala ajan codex --gorunum pencere` istemci konsolunu görünür açar.
+`--gorunum gizli` arka plan çalışmasına döner. Görünüm tercihi MCP araçlarını,
+gizlilik kapılarını, Codex root-deny/MXC zorunluluğunu veya süre sınırını
+genişletmez. Konsol açık kalsa bile tamamlanan veya süresi dolan işin MCP
+yetkisi biter. Pencere kapanışı, ConPTY ve gerçek Win32 süreç sahipliği
+kullanıcının Windows kabul denemesinin parçasıdır.
