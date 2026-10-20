@@ -1697,6 +1697,90 @@ class AgentFinalizationTest(AgentFiles):
         self.assertEqual(yakala.find_card(self.vault, card['id'], self.state)['meta']['durum'], 'hata')
 
 
+class _Widget:
+    """The existing pane tests use this same small scripted Tk boundary."""
+
+    def __getattr__(self, name):
+        if name.startswith('__'):
+            raise AttributeError(name)
+        return lambda *args, **options: None
+
+
+class _PopupRoot(_Widget):
+    def __init__(self, script):
+        self.script, self.bound, self.timers, self.key_results = script, {}, [], {}
+        self.alive = True
+
+    def bind(self, sequence, handler, add=None):
+        self.bound[sequence] = handler
+
+    def after(self, delay, handler, *args):
+        self.timers.append((handler, args))
+
+    def winfo_screenwidth(self):
+        return 1440
+
+    def winfo_screenheight(self):
+        return 900
+
+    def destroy(self):
+        self.alive = False
+
+    def mainloop(self):
+        for action, value in self.script:
+            if action == 'key':
+                # Tk falls back to an unmodified Return binding if a more specific one is absent.
+                handler = self.bound.get(value)
+                if handler is None and value == '<Control-Return>':
+                    handler = self.bound['<Return>']
+                self.key_results[value] = handler(None)
+            elif action == 'type':
+                self.entry.type(value)
+        for _ in range(400):
+            if not (self.alive and self.timers):
+                break
+            handler, args = self.timers.pop(0)
+            handler(*args)
+
+
+class _PopupEntry(_Widget):
+    def __init__(self, root, **options):
+        self.text, self.handlers = '', {}
+        root.entry = self
+
+    def bind(self, sequence, handler, add=None):
+        self.handlers[sequence] = handler
+
+    def delete(self, first, last=None):
+        self.text = ''
+
+    def insert(self, index, text):
+        self.text += text
+
+    def get(self):
+        return self.text
+
+    def type(self, text):
+        self.handlers['<KeyPress>'](types.SimpleNamespace(char=text[0], keysym=text[0]))
+        self.insert('end', text)
+        self.handlers['<KeyRelease>'](None)
+
+
+class _PopupCanvas(_Widget):
+    def __init__(self, root, **options):
+        self.items = {}
+        root.canvas = self
+
+    def _create(self, *coordinates, **options):
+        self.items[len(self.items) + 1] = dict(options)
+        return len(self.items)
+
+    create_text = create_polygon = create_oval = create_line = create_window = create_image = _create
+
+    def itemconfigure(self, item, **options):
+        self.items[item].update(options)
+
+
 def _host_lock_for_simulated_linux():
     """The popup is simulated as Linux; on a Windows host flock is missing, so a plain lock stands in."""
     if os.name != 'nt':
@@ -1725,6 +1809,61 @@ def _host_lock_for_simulated_linux():
     stack.enter_context(patch.object(yakala, '_AgentFileLock', HostLock))
     stack.enter_context(patch.object(yakala, 'enqueue_agent', host_enqueue))
     return stack
+
+
+class AgentPopupTest(AgentFiles):
+    def popup(self, script):
+        root = _PopupRoot(script)
+        fake = types.ModuleType('tkinter')
+        fake.Tk = lambda: root
+        fake.Canvas, fake.Entry, fake.TclError = _PopupCanvas, _PopupEntry, RuntimeError
+        fake.font = types.ModuleType('tkinter.font')
+        fake.font.Font = lambda **options: types.SimpleNamespace(measure=lambda text: len(text) * 6)
+        system = types.SimpleNamespace(**{**vars(os), 'name': 'posix'})
+        platform = types.SimpleNamespace(**{**vars(sys), 'platform': 'linux'})
+        with patch.dict(sys.modules, {'tkinter': fake, 'tkinter.font': fake.font}), \
+                patch.object(yakala, 'os', system), patch.object(yakala, 'sys', platform), \
+                patch.dict(os.environ, {'BEYIN_YAKALA_SNAPSHOT': ''}), \
+                _host_lock_for_simulated_linux(), \
+                patch.object(yakala, '_clipboard', return_value=''), \
+                patch.object(yakala, 'clipboard_image', return_value=None), \
+                patch.object(yakala, '_window_chrome'), \
+                patch.object(yakala, '_font', side_effect=lambda size, weight='normal': ('Segoe UI', size, weight)):
+            result = yakala.popup(self.vault, {}, state=self.state)
+        return result, root
+
+    def test_ctrl_enter_preserves_a_request_without_any_selected_source(self):
+        self.configure()
+        request = 'Yarınki planım için yeni bir not oluştur.'
+        result, root = self.popup([('type', request), ('key', '<Control-Return>')])
+        card = yakala.find_card(self.vault, result['id'], self.state)
+        job = yakala._agent_load_job(self.vault, self.state, card['meta']['ajan_isi'])
+        self.assertEqual(job['request'], request)
+        self.assertIn(request, card['body'])
+        self.assertEqual(card['meta']['durum'], 'ajanda')
+        self.assertEqual(root.key_results['<Control-Return>'], 'break')
+        self.spawned.assert_called_once()
+
+    def test_disabled_ctrl_enter_does_not_fall_through_to_plain_save(self):
+        result, root = self.popup([('type', 'Bu yalnızca yazılan metin.'),
+                                   ('key', '<Control-Return>'), ('key', '<Escape>')])
+        self.assertEqual(result['status'], 'vazgecildi')
+        self.assertEqual(yakala.pending(self.vault, self.state), 0)
+        self.assertEqual(root.key_results['<Control-Return>'], 'break')
+        self.spawned.assert_not_called()
+
+    def test_escape_blocks_pending_return_events_during_close_animation(self):
+        self.configure()
+        for key in ('<Return>', '<Control-Return>'):
+            with self.subTest(key=key):
+                # Tk can deliver another already-queued key before the next
+                # 10 ms fade timer. Escape is cancellation at that point.
+                result, root = self.popup([('type', 'İptal edilen istek.'),
+                                           ('key', '<Escape>'), ('key', key)])
+                self.assertEqual(result['status'], 'vazgecildi')
+                self.assertEqual(yakala.pending(self.vault, self.state), 0)
+                self.assertEqual(root.key_results[key], 'break')
+                self.spawned.assert_not_called()
 
 
 class AgentWorkerLaunchTest(AgentFiles):

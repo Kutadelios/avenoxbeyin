@@ -716,7 +716,7 @@ def _run(command, timeout, cwd=None):
     return result.returncode, result.stdout.decode('utf-8', 'replace'), result.stderr.decode('utf-8', 'replace')
 
 
-def _windows_job():
+def _windows_job(allow_breakaway=False):
     """An unnamed, non-inheritable job; closing it kills every helper descendant."""
     import ctypes
     from ctypes import wintypes
@@ -738,7 +738,7 @@ def _windows_job():
     if not job:
         raise ctypes.WinError(ctypes.get_last_error())
     limits = EXTENDED()
-    limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    limits.basic.flags = 0x2000 | (0x800 if allow_breakaway else 0)  # KILL_ON_JOB_CLOSE, explicit BREAKAWAY_OK
     if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
         error = ctypes.WinError(ctypes.get_last_error())
         kernel32.CloseHandle(job)
@@ -4679,6 +4679,10 @@ def popup(vault, context=None, state=None, root=None, session=None):
     """
     context = dict(context or {})
     try:
+        agent_client = agent_settings(vault, state or resolve_state(vault))['client']
+    except (OSError, ValueError):
+        agent_client = 'kapali'
+    try:
         import tkinter as tk
     except ImportError:
         return _popup_fallback(vault, context, state)
@@ -4897,7 +4901,11 @@ def popup(vault, context=None, state=None, root=None, session=None):
     right = keycap(right, '↵', 'Kaydet')
     if W >= 520:
         keycap(right, 'esc', 'Kapat')
-    height = footer_y + 26
+    agent_button = None
+    if agent_client != 'kapali':
+        agent_button = canvas.create_text(pad, footer_y + 34, anchor='w', fill=P['accent'], font=_font(12),
+                                          text='Ctrl+Enter · Kaydet ve ajana ver (' + agent_client + ')')
+    height = footer_y + (56 if agent_button is not None else 26)
     canvas.configure(height=height)
     # The window can end up a little larger than the canvas; the frame follows its real edge.
     frame = canvas.create_rectangle(0, 0, W - 1, height - 1, outline=P['line'])
@@ -4907,6 +4915,9 @@ def popup(vault, context=None, state=None, root=None, session=None):
     stop_escape = lambda: None
 
     def close():
+        # Escape commits cancellation before another queued Return can run
+        # during the fade animation and save a card or enqueue an agent job.
+        saving['on'] = True
         def fade(alpha):
             if alpha <= 0:
                 root.destroy()
@@ -4919,7 +4930,7 @@ def popup(vault, context=None, state=None, root=None, session=None):
             root.after(10, fade, round(alpha - 0.34, 2))
         fade(1.0)
 
-    def save(_event=None):
+    def save(_event=None, send_agent=False):
         nonlocal url, files
         if saving['on'] or result:
             return 'break'
@@ -4931,11 +4942,15 @@ def popup(vault, context=None, state=None, root=None, session=None):
             url, files, text, title = chosen['url'], chosen['files'], chosen['text'], chosen['title']
             extra_urls = chosen['extra_urls']
         why = '' if hint['on'] else entry.get().strip()
+        request = why  # Keep the current typed request, including repeated URLs and note-only captures.
+        if send_agent and not request:
+            canvas.itemconfigure(status, text='Ajana vereceğin isteği yaz', fill=P['accent'])
+            return 'break'
         if not (url or files or text or why):
             canvas.itemconfigure(status, text='Önce bir şey yaz', fill=P['accent'])
             return 'break'
         if not (url or files or text):
-            text, why = why, ''  # only a typed line: the line itself is the note
+            text, why = why, (why if send_agent else '')  # Agent captures keep the request in Neden too.
         saving['on'] = True
         try:
             result.update(capture(vault, url=url, text=text, files=files, why=why, app=context.get('uygulama'),
@@ -4950,12 +4965,34 @@ def popup(vault, context=None, state=None, root=None, session=None):
                 _clipboard_saved(vault, sequence, state, context.get('clipboard_generation'))
             stop_escape()
         entry.configure(state='disabled', disabledbackground=P['field'], disabledforeground=P['muted'])
-        canvas.itemconfigure(status, text='✓  Beyne atıldı', fill=P['ok'], font=_font(12, 'bold'))
-        root.after(260, close)
+        message, delay = '✓  Beyne atıldı', 260
+        if send_agent:
+            try:
+                sent = enqueue_agent(vault, state or resolve_state(vault), result['id'], request, capture_id)
+                result['ajan'] = sent
+                if sent['status'] in ('ajanda', 'ayni_ajan_isi'):
+                    message = '✓  Kaydedildi · Ajan sırasında'
+                else:
+                    message, delay = 'Kaydedildi · Ajan başlayamadı; karta bak', 2000
+            except Exception as exc:
+                result['ajan_hata'] = str(exc)
+                message, delay = 'Kaydedildi · ' + str(exc), 2500
+        canvas.itemconfigure(status, text=_fit(canvas, message, _font(12), W - 2 * pad),
+                             fill=P['ok'], font=_font(12, 'bold'))
+        root.after(delay, close)
         return 'break'
+
+    def send_agent(_event=None):
+        if agent_client == 'kapali':
+            return 'break'
+        return save(send_agent=True)
 
     root.bind('<Return>', save)
     root.bind('<KP_Enter>', save)
+    root.bind('<Control-Return>', send_agent)
+    root.bind('<Control-KP_Enter>', send_agent)
+    if agent_button is not None:
+        canvas.tag_bind(agent_button, '<Button-1>', send_agent)
     def dismiss(_event=None):
         stop_escape()
         if session:
@@ -5617,7 +5654,7 @@ def listen_windows(vault, script, spec=None, state=None):
 # ---------------------------------------------------------------- isolated Windows readers
 
 WIN_CAPTURE_SCHEMA = 3
-WIN_CAPTURE_VERSION = 'win-capture-2026.10.13-r2'
+WIN_CAPTURE_VERSION = 'win-capture-2026.10.17-agent-1'
 WIN_MESSAGE_LIMIT = 64 * 1024
 WIN_READ_LIMIT = 68 * 1024 * 1024
 WIN_TEXT_LIMIT = 4 * 1024 * 1024
@@ -5636,10 +5673,11 @@ class _OwnedProcess:
 
     def __init__(self, command, **options):
         self.process = self.kernel = self.job = None
+        allow_breakaway = options.pop('allow_breakaway', False)
         try:
             native = os.name == 'nt' and sys.platform == 'win32'
             if native:
-                self.kernel, self.job = _windows_job()
+                self.kernel, self.job = _windows_job(allow_breakaway=True) if allow_breakaway else _windows_job()
             flags = options.pop('creationflags', 0) | (NO_WINDOW | 4 if native else 0)
             self.process = subprocess.Popen(command, creationflags=flags, **options)
             if native:
@@ -6254,7 +6292,7 @@ class _WindowsPopupBroker:
         env = dict(os.environ, PYTHONIOENCODING='utf-8', PYTHONDONTWRITEBYTECODE='1',
                    TMP=self.temp.name, TEMP=self.temp.name)
         self.owned = _OwnedProcess(self.command('--hazir', '--instance', instance), stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, allow_breakaway=True)
         self.pipe = _JsonPipe(self.owned.process.stdout, self.owned.process.stdin)
         return instance
 
@@ -7952,7 +7990,7 @@ def configure_agent(vault, state, client, config_file=None, view=None, network=N
     _agent_validate_settings(config, vault)
     _agent_json(_agent_root(state) / 'config.json', config)
     registered = _agent_register_toast(state, vault) if client != 'kapali' and os.name == 'nt' else None
-    hint = ('Kayitli kart icin yakala ajan-gonder <id> --istek <istek> kullan' +
+    hint = ('Enter kaydeder; Ctrl+Enter kaydeder ve ajana verir' +
             (' (ekranda ' + ('Codex' if client == 'codex' else 'Claude Code') +
              ' penceresi acilir, canli izlenir).' if _agent_windowed(config)
              else ' (arka planda, bildirimle).'))
@@ -8489,7 +8527,7 @@ def _agent_prompt(vault, job):
                 'additional_source_urls': job.get('extra_urls', []),
                 'job_id': job['id'], 'harness': job['client'], 'session_id': job.get('session_id')}
     return (
-        'Bu vault icinde kullanicinin acikca baslattigi tek Yakala isini yurutuyorsun.\n'
+        'Bu vault icinde kullanicinin Ctrl+Enter ile acikca baslattigi tek Yakala isini yurutuyorsun.\n'
         'Vault AGENTS.md/CLAUDE.md kurallarina ve beyin-yakala skill\'ine uy; once bu dosyalari read_note ile oku. '
         'Normal hafiza hooklari ve bu istemcinin gercek oturumu kullanilir. Baska bekleyen kartlari isleme.\n'
         'Acilis baglamindaki bakim talimatlari (or. Memory hygiene / companion-compact, receipt yazma, '
