@@ -17,6 +17,11 @@ uygulanır. Ayar vault kökündeki `.beyin-daily-layout.json` dosyasındadır; v
 eşitliyorsan bu dosyayı da eşitle. Makineye özel değildir, profil değişimleri etkilemez.
 Ayrı dosya eski sürümlerin sıkı `.beyin-preferences.json` şemasıyla uyumluluğu korur;
 eski motorlar bu tercihi uygulamaz, aynı vault'a yazan tüm makineleri güncelle.
+Düz görünüm sahipliği ayrı `receipt_flat_views` tablosunda tutulur; 3.11.0'a
+`rollback` eski motorun görünüm tablosuna tanımadığı yollar bırakmaz. Eski motor
+`daily/v3/` düzenini kullanır ve mevcut düz görünümleri korur. Yeniden güncelleme
+sonrası tercih tekrar uygulanır. Obsidian günlük not eklentisi düz görünümü açarsa
+oraya yazılan metin de elle düzenlenmiş görünüm sayılır ve kurtarmada arşivlenir.
 
 Flat hedefinde motorun takip etmediği, generated olmayan bir insan günlüğü varsa dosya
 korunur, görünüm yazılmaz ve çakışma oluşmaz. Receipt'ler `knowledge/v3/outcomes.md`

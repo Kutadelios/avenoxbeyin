@@ -505,6 +505,32 @@ def is_receipt_view_source(source, *, proven=False):
         (proven and re.fullmatch(r'daily/[0-9]{4}-[0-9]{2}-[0-9]{2}\.md', source) is not None))
 
 
+def _receipt_view_table(relative):
+    # Older engines reject flat paths in receipt_views during every sync.
+    return ('receipt_flat_views' if re.fullmatch(r'daily/[0-9]{4}-[0-9]{2}-[0-9]{2}\.md', relative)
+            else 'receipt_views')
+
+
+def receipt_view_rows(db):
+    """Read both ownership tables, including before the first projection."""
+    rows = {}
+    for table in ('receipt_views', 'receipt_flat_views'):
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+            rows.update(db.execute(f'SELECT path, hash FROM {table}'))
+    return sorted(rows.items())
+
+
+def _prepare_receipt_views(db):
+    for table in ('receipt_views', 'receipt_flat_views'):
+        db.execute(f'CREATE TABLE IF NOT EXISTS {table}(path TEXT PRIMARY KEY, hash TEXT NOT NULL)')
+    # Preserve ownership from the initial flat-layout implementation, including
+    # edited views whose original hash is required for safe recovery.
+    for relative, digest in db.execute('SELECT path, hash FROM receipt_views').fetchall():
+        if _receipt_view_table(relative) == 'receipt_flat_views':
+            db.execute('INSERT OR IGNORE INTO receipt_flat_views VALUES (?,?)', (relative, digest))
+            db.execute('DELETE FROM receipt_views WHERE path=?', (relative,))
+
+
 def is_receipt_view_conflict(item):
     # Both provenance and diagnosis are required. A source conflict must never
     # become writable merely because its name falls under a generated directory.
@@ -652,9 +678,7 @@ def _receipt_view_contents(engine, db, warnings=None, *, include_human_daily=Fal
     _hash, _, render = engine.projection_helpers()
     from beyin_v3_preferences import read_daily_layout
     layout = read_daily_layout(engine.root)
-    tracked = set()
-    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_views'").fetchone():
-        tracked = {row[0] for row in db.execute('SELECT path FROM receipt_views')}
+    tracked = {row[0] for row in receipt_view_rows(db)}
     migration = engine.state/'v2-migration.json'
     previous = json.loads(migration.read_text(encoding='utf-8')) if migration.exists() else {}
     historical = set(previous.get('historical_receipts', []))
@@ -802,7 +826,7 @@ def quarantine_receipt_view_history(engine, db, sources, warnings):
 def _adopt_stale_receipt_views(engine, db, desired, _hash):
     """Recover stale ownership without calling possibly edited bytes engine-authored."""
     discovered = dict(getattr(engine, 'discovered_receipt_views', {}))
-    tracked = {row[0] for row in db.execute('SELECT path FROM receipt_views')}
+    tracked = {row[0] for row in receipt_view_rows(db)}
     # A state built by the original flat-layout code may already have saved
     # its orphan as an alias. Such paths bypass _scan's metadata parsing; prove
     # the header here as well, without treating all alias paths as owned views.
@@ -835,14 +859,14 @@ def _adopt_stale_receipt_views(engine, db, desired, _hash):
                 comparison_views = _receipt_view_contents(engine, db, include_human_daily=True)
             expected = comparison_views.get(alternate)
         owned_hash = observed_hash if expected is not None and observed_hash == _hash(expected) else ''
-        db.execute('INSERT OR IGNORE INTO receipt_views VALUES (?,?)', (relative, owned_hash))
+        db.execute(f'INSERT OR IGNORE INTO {_receipt_view_table(relative)} VALUES (?,?)', (relative, owned_hash))
 
 
 def project_receipts(engine, db, warnings=None, recover_views=False, recovered=None, desired=None,
                      allow_view_writes=True):
     _hash, atomic, _ = engine.projection_helpers()
     _record_excluded_dirs(engine, db)
-    db.execute('CREATE TABLE IF NOT EXISTS receipt_views(path TEXT PRIMARY KEY, hash TEXT NOT NULL)')
+    _prepare_receipt_views(db)
     if not allow_view_writes:
         # Indexing and context gates can still commit. Keep the last live
         # provenance until the marker can be saved, then retry on the next sync.
@@ -852,7 +876,7 @@ def project_receipts(engine, db, warnings=None, recover_views=False, recovered=N
         desired = _receipt_view_contents(engine, db, warnings)
     _adopt_stale_receipt_views(engine, db, desired, _hash)
     conflicts = []
-    tracked_views = dict(db.execute('SELECT path, hash FROM receipt_views'))
+    tracked_views = dict(receipt_view_rows(db))
     for relative, content in desired.items():
         # A note may have appeared since the desired view plan was built.
         if _human_daily(engine, relative, tracked_views, warnings):
@@ -869,7 +893,7 @@ def project_receipts(engine, db, warnings=None, recover_views=False, recovered=N
                 except (OSError, ValueError):
                     conflicts.append({'source': relative, 'reason': 'receipt view recovery failed; preserved'})
                     continue
-                db.execute('INSERT OR REPLACE INTO receipt_views VALUES (?,?)', (relative, desired_hash))
+                db.execute(f'INSERT OR REPLACE INTO {_receipt_view_table(relative)} VALUES (?,?)', (relative, desired_hash))
                 if recovered is not None:
                     recovered.append({'source': relative, 'archive': archive_path.relative_to(engine.root).as_posix(),
                                       'status': 'recovered'})
@@ -884,7 +908,7 @@ def project_receipts(engine, db, warnings=None, recover_views=False, recovered=N
                 continue
             atomic(path, content)
         if tracked != desired_hash:
-            db.execute('INSERT OR REPLACE INTO receipt_views VALUES (?,?)', (relative, desired_hash))
+            db.execute(f'INSERT OR REPLACE INTO {_receipt_view_table(relative)} VALUES (?,?)', (relative, desired_hash))
     conflicts.extend(_retire_stale_views(engine, db, desired, _hash, recover_views=recover_views, recovered=recovered))
     refresh_gaps(engine, db)
     return conflicts
@@ -897,7 +921,7 @@ def _retire_stale_views(engine, db, desired, _hash, recover_views=False, recover
     file is never touched and stays a visible conflict until the person moves or deletes it.
     """
     conflicts = []
-    for relative, tracked in db.execute('SELECT path, hash FROM receipt_views ORDER BY path').fetchall():
+    for relative, tracked in receipt_view_rows(db):
         if relative in desired:
             continue
         if not is_receipt_view_source(relative, proven=True):
@@ -910,7 +934,7 @@ def _retire_stale_views(engine, db, desired, _hash, recover_views=False, recover
             conflicts.append({'source': relative, 'reason': 'stale receipt view unreadable; preserved'})
             continue
         if current is None and not path.exists():
-            db.execute('DELETE FROM receipt_views WHERE path=?', (relative,))
+            db.execute(f'DELETE FROM {_receipt_view_table(relative)} WHERE path=?', (relative,))
             continue
         if current != tracked:
             if recover_views:
@@ -920,7 +944,7 @@ def _retire_stale_views(engine, db, desired, _hash, recover_views=False, recover
                 except (OSError, ValueError):
                     conflicts.append({'source': relative, 'reason': 'receipt view recovery failed; preserved'})
                     continue
-                db.execute('DELETE FROM receipt_views WHERE path=?', (relative,))
+                db.execute(f'DELETE FROM {_receipt_view_table(relative)} WHERE path=?', (relative,))
                 if recovered is not None:
                     recovered.append({'source': relative, 'archive': archive_path.relative_to(engine.root).as_posix(),
                                       'status': 'archived_and_retired'})
@@ -934,7 +958,7 @@ def _retire_stale_views(engine, db, desired, _hash, recover_views=False, recover
         except OSError:
             conflicts.append({'source': relative, 'reason': 'stale receipt view could not be removed'})
             continue
-        db.execute('DELETE FROM receipt_views WHERE path=?', (relative,))
+        db.execute(f'DELETE FROM {_receipt_view_table(relative)} WHERE path=?', (relative,))
     return conflicts
 
 

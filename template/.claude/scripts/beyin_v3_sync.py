@@ -24,7 +24,7 @@ from beyin_v3_index import applied_keys, dir_key, exclusions as index_exclusions
 from beyin_v3_hygiene import sensitive_excluded, sensitive_source
 from beyin_v3_projections import (is_receipt_view_source, is_receipt_view_conflict, project_receipts,
                                   quarantine_receipt_view_history, archived_receipt_view_aliases,
-                                  _receipt_view_contents,
+                                  _receipt_view_contents, receipt_view_rows,
                                   RECEIPT_VIEW_SOURCES_ROW)
 from beyin_v3_preferences import read as read_preferences
 from beyin_v3_secrets import redact as redact_secrets, record as record_redactions
@@ -1026,9 +1026,8 @@ class SyncEngine:
             # First sync has no tracking table. Keep edited stale views excluded
             # even when no receipt currently produces them; unexpected tracking
             # paths are source conflicts, never authority to hide ordinary notes.
-            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_views'").fetchone():
-                view_paths.update(row[0] for row in db.execute('SELECT path FROM receipt_views')
-                                  if is_receipt_view_source(row[0], proven=True))
+            view_paths.update(path for path, _ in receipt_view_rows(db)
+                              if is_receipt_view_source(path, proven=True))
             canonical_view_paths = set(view_paths)
             # A hard link to an edited view keeps the old inode when recovery
             # atomically replaces the canonical path. Retain only identities

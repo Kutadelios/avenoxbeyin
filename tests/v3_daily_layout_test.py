@@ -51,7 +51,7 @@ class DailyLayoutTest(unittest.TestCase):
 
     def tracked(self):
         with self.engine.store._connect() as db:
-            return dict(db.execute('SELECT path,hash FROM receipt_views'))
+            return dict(projections.receipt_view_rows(db))
 
     def visible(self):
         with self.engine.store._connect() as db:
@@ -81,6 +81,47 @@ class DailyLayoutTest(unittest.TestCase):
         preferences.save_daily_layout(self.vault, 'v3')
         self.engine.sync()
         self.assertEqual(self.daily('v3').read_bytes(), before)
+
+    def test_flat_tracking_is_invisible_to_older_engines(self):
+        preferences.save_daily_layout(self.vault, 'flat')
+        self.receipt()
+        self.assertEqual(self.engine.sync()['status'], 'succeeded')
+        source = self.daily('flat').relative_to(self.vault).as_posix()
+        raw = self.daily('flat').read_bytes()
+        with self.engine.store._connect() as db:
+            legacy = dict(db.execute('SELECT path,hash FROM receipt_views'))
+            self.assertNotIn(source, legacy)
+            self.assertEqual(dict(db.execute('SELECT path,hash FROM receipt_flat_views')),
+                             {source: hashlib.sha256(raw).hexdigest()})
+            self.assertTrue(all(projections.is_receipt_view_source(path) for path in legacy))
+        # An older engine ignores the separate table. Its default v3 layout can
+        # coexist with the flat file; upgrading again must retire only its view.
+        preferences.save_daily_layout(self.vault, 'v3')
+        self.assertEqual(self.engine.sync()['status'], 'succeeded')
+        self.assertFalse(self.daily('flat').exists())
+        self.assertTrue(self.daily('v3').exists())
+
+    def test_original_flat_tracking_migrates_without_losing_edited_view(self):
+        preferences.save_daily_layout(self.vault, 'flat')
+        self.receipt()
+        self.engine.sync()
+        source = self.daily('flat').relative_to(self.vault).as_posix()
+        digest = self.tracked()[source]
+        # Simulate the first PR version's database, retaining its original hash.
+        with self.engine.store._connect() as db:
+            db.execute('DELETE FROM receipt_flat_views WHERE path=?', (source,))
+            db.execute('INSERT INTO receipt_views VALUES (?,?)', (source, digest))
+        edited = self.daily('flat').read_bytes() + b'Human addition.\n'
+        self.daily('flat').write_bytes(edited)
+        preferences.save_daily_layout(self.vault, 'v3')
+        result = self.engine.sync()
+        self.assertEqual(result['status'], 'degraded', result)
+        self.assertEqual(self.daily('flat').read_bytes(), edited)
+        with self.engine.store._connect() as db:
+            self.assertIsNone(db.execute('SELECT hash FROM receipt_views WHERE path=?', (source,)).fetchone())
+            self.assertEqual(db.execute('SELECT hash FROM receipt_flat_views WHERE path=?', (source,)).fetchone()[0], digest)
+        self.assertEqual(self.engine.sync(recover_views=True)['status'], 'succeeded')
+        self.assertFalse(self.daily('flat').exists())
 
     def test_flat_and_both_untouched_transitions_preserve_bytes(self):
         self.receipt()
