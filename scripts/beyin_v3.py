@@ -179,6 +179,14 @@ def state_location(vault: Path, state: Path, windows=None) -> dict:
         report["pin_status"] = "present" if pinned else "unreadable"
     if pinned is None:
         return report
+    try:
+        resolved = Path(pinned).expanduser().resolve()
+    except (OSError, ValueError, RuntimeError):
+        report.update(pinned_state=pinned, installed_at_pinned_state=False)
+        report["warnings"].append(
+            "invalid_state_path: the pinned state root cannot be resolved on this machine; "
+            "the local default is used. Reinstall here to bind lifecycle commands.")
+        return report
     if not Path(pinned).expanduser().is_absolute():
         report["warnings"].append(
             "pinned_state_not_absolute: the pinned state root is not an absolute path on this "
@@ -186,13 +194,9 @@ def state_location(vault: Path, state: Path, windows=None) -> dict:
             "through a synced vault or edited by hand (#249); the installed beyin.py reads this "
             "machine's default state instead. Installation files are per machine and stay out of "
             "the sync; see https://github.com/avenoxai/avenoxbeyin/blob/main/docs/v3/MULTI-MACHINE.md.")
-    elif resolve_state(vault, Path(pinned)) != Path(pinned).expanduser().resolve():
+    elif resolve_state(vault, Path(pinned)) != resolved:
         report['warnings'].append('foreign_default_state: the synced default state belongs to another user or OS; '
                                   'this machine uses its local default. Reinstall here to bind lifecycle commands.')
-    try:
-        resolved = Path(pinned).expanduser().resolve()
-    except (OSError, ValueError, RuntimeError):
-        resolved = Path(pinned)
     same = os.path.normcase(str(resolved)) == os.path.normcase(pinned)
     report.update({"pinned_state": pinned, "pinned_resolves_here_to": str(resolved),
                    "pinned_in_package_container": _in_package_container(pinned),

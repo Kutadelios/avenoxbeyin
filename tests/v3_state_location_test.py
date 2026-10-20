@@ -14,7 +14,7 @@ import sys
 import tempfile
 import unittest
 
-from v3_package_helpers import isolated_env
+from v3_package_helpers import install, isolated_env, run_python
 from v3_transaction_root_test import link_directory
 
 ROOT = Path(os.environ.get("BEYIN_TEST_REPO", Path(__file__).resolve().parents[1]))
@@ -183,6 +183,46 @@ class StateLocationTest(unittest.TestCase):
         report = self.report()
         self.assertEqual(report["pin_status"], "unreadable")
         self.assertEqual(report["warnings"], [])
+
+    def test_unresolvable_pin_is_reported_without_rethrowing(self):
+        invalid = str(self.state / "bad") + "\0state"
+        self.pin(invalid)
+        report = self.report()
+        self.assertEqual(report["pinned_state"], invalid)
+        self.assertIn("invalid_state_path", self.codes(report))
+        self.assertFalse(report["installed_at_pinned_state"])
+
+    def test_installed_doctor_and_hook_keep_the_invalid_pin_fallback(self):
+        home = self.state.parent / "home"
+        env = isolated_env(home)
+        installed = install(self.vault, self.state, env)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.pin(str(self.state / "bad") + "\0state")
+        doctor = run_python(self.vault / "beyin.py", ["doctor"], self.vault, env)
+        self.assertEqual(doctor.returncode, 0, doctor.stderr)
+        location = json.loads(doctor.stdout)["state_location"]
+        self.assertIn("invalid_state_path", self.codes(location))
+        self.assertIn(home, Path(location["effective_state"]).parents)
+        self.assertIn(b"install_v3.py", doctor.stderr)
+        # argv cannot contain NUL through the OS; inject the invalid parsed state inside a
+        # fresh interpreter to exercise the same hook fallback used for inaccessible UNC pins.
+        driver = """
+import sys
+from pathlib import Path
+vault = Path(sys.argv[1])
+sys.path.insert(0, str(vault / '.claude/scripts'))
+import beyin_v3_hook
+sys.argv = ['hook', '--vault', str(vault), '--state', str(vault.parent / 'bad') + chr(0),
+            '--harness', 'claude', '--metadata-only']
+beyin_v3_hook.main()
+"""
+        hook = subprocess.run([sys.executable, "-c", driver, str(self.vault)],
+                              input=json.dumps({"hook_event_name": "SessionEnd", "session_id": "invalid-pin"}),
+                              text=True, encoding="utf-8", capture_output=True, cwd=self.vault,
+                              env=env, timeout=30)
+        self.assertEqual(hook.returncode, 0, hook.stderr)
+        self.assertEqual(json.loads(hook.stdout), {})
+        self.assertTrue((Path(location["effective_state"]) / "hook-queue").is_dir())
 
     def test_foreign_paths_in_state_location(self):
         paths = [
