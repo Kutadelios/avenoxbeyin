@@ -1188,12 +1188,16 @@ runpy.run_path({str(HOOK)!r}, run_name='__main__')
         self.seed()
         import beyin_v3_preferences as preferences
         preferences.save(self.vault, {'context_mode': 'turn', 'interval_minutes': 15})
+        # Exercise the real interval claim instead of forcing its result in a wrapper.
+        self.assertTrue(preferences.claim_check(self.state, preferences.read(self.vault), 'UserPromptSubmit'))
+        self.env.pop('BEYIN_V3_NO_SPAWN', None)
         payload = {'hook_event_name': 'UserPromptSubmit', 'session_id': 'deferred-turn', 'event_id': 'deferred-1',
                    'cwd': str(self.vault), 'prompt': 'Nebula calibration owner'}
-        context = self.invoke(payload, 'claude', script=self.deferred_sync_hook())['hookSpecificOutput']['additionalContext']
+        context = self.invoke(payload, 'claude')['hookSpecificOutput']['additionalContext']
         self.assertIn('Synthetic Reviewer', context)
         self.assertIn('deferred by your interval preference', context)
         self.assertIn('previous index', context)
+        self.assertLessEqual(len(context.encode('utf-16-le')) // 2, 10000)
         self.assertFalse((self.state / 'hook-error.json').exists())
 
     def test_user_prompt_submit_without_index_when_check_is_deferred_keeps_notice(self):
