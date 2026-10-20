@@ -25,6 +25,11 @@ HARNESSES = ("codex", "claude", "antigravity", "hermes", "opencode", "omp", "kir
 # rejected_at grammar: a date, optionally with an RFC 3339-style time.
 REJECTED_AT = re.compile(r"\d{4}-\d{2}-\d{2}(?:[T ](?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?)?", re.ASCII)
 
+# Keep adjacent installed modules importable when this file is loaded by path.
+_MODULE_DIR = str(Path(__file__).resolve().parent)
+if _MODULE_DIR not in sys.path:
+    sys.path.insert(0, _MODULE_DIR)
+
 # Frontmatter keys other tools write instead of updated_at, in precedence order.
 RECENCY_ALIASES = ("updated", "modified", "last_modified", "date_modified")
 
@@ -528,7 +533,7 @@ def _attaches(stem, gate):
 
 
 def _harmonizes(stem, suffix):
-    """Weak vowel harmony: folding hides o/u/i fronting, so only a and e can decide."""
+    """Weak vowel harmony: only an unambiguous last vowel (a/e) can decide."""
     tone = next((c for c in suffix if c in _VOWELS), "")
     if tone not in ("a", "e"):
         return True
@@ -542,6 +547,11 @@ def _harmonizes(stem, suffix):
 def _stem(word):
     # Words under 5 characters are already stems; peeling them merges unrelated roots.
     while len(word) >= 5:
+        # Claude ends in the spelling of a Turkish locative suffix. Preserve the
+        # name after peeling a real suffix, without scanning past folded vowels
+        # (tarihte, hakime and kabulde need the existing weak harmony rule).
+        if word == "claude":
+            break
         for suffix, floor, gate in _SUFFIXES_BY_LAST.get(word[-1], ()):
             if not word.endswith(suffix):
                 continue
@@ -717,6 +727,8 @@ class MemoryStore:
     def context_for(self, harness, query, **kwargs):
         if kwargs.get("strict") is True and self.STRICT_PASSAGES:
             try:
+                if _MODULE_DIR not in sys.path:
+                    sys.path.insert(0, _MODULE_DIR)
                 from beyin_v3_passage import context_for as passage_context
                 return passage_context(self, harness, query, **kwargs)
             except Exception:
@@ -1227,6 +1239,8 @@ class MemoryStore:
         allowed_statuses = _allowed_statuses(statuses)
         if strict:
             try:
+                if _MODULE_DIR not in sys.path:
+                    sys.path.insert(0, _MODULE_DIR)
                 from beyin_v3_passage import _path_key, settings
             except ImportError:
                 # Without the exclusion policy, strict fallback must not deliver sources.
