@@ -279,11 +279,17 @@ def _runtime_health(state):
     try:
         if connection.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
             raise ValueError('installed runtime database integrity check failed')
-        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        for name, required in {'records': {'id','payload'}, 'receipts': {'id','payload'}, 'events': {'sequence','event_type','record_id','revision','record'}}.items():
-            if name in tables:
-                columns = {row[1] for row in connection.execute('PRAGMA table_info(' + name + ')')}
-                if not required <= columns:
+        required_tables = {'records': {'id','payload'}, 'receipts': {'id','payload'}, 'events': {'sequence','event_type','record_id','revision','record'}}
+        rows = connection.execute(
+            "SELECT m.name, p.name FROM sqlite_master m JOIN pragma_table_info(m.name) p "
+            "WHERE m.type='table' AND m.name IN ('records', 'receipts', 'events')"
+        ).fetchall()
+        table_cols = {}
+        for tname, cname in rows:
+            table_cols.setdefault(tname, set()).add(cname)
+        for name, required in required_tables.items():
+            if name in table_cols:
+                if not required <= table_cols[name]:
                     raise ValueError('installed runtime schema unsupported: ' + name)
     finally:
         connection.close()
