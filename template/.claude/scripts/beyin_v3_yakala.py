@@ -4746,7 +4746,7 @@ def popup(vault, context=None, state=None, root=None, session=None):
     show_hint()
     y += 56 + 18
 
-    if sources is not None:
+    if sources:
         canvas.create_text(pad, y + 6, anchor='w', text='Kaynaklar · Birlikte seçebilirsin',
                            fill=P['muted'], font=_font(11))
         y += 26

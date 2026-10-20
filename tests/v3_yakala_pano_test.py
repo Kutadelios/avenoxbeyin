@@ -947,6 +947,17 @@ class PopupWiringTest(ScreenshotFiles, unittest.TestCase):
         self.assertTrue(any('Kaydet' in text for text in root.seen[0][1]))
         self.assertFalse((self.vault / INBOX).exists())
 
+    def test_empty_windows_sources_keep_the_note_field_without_a_negative_viewport(self):
+        # Clipboard age is unknown and window capture failed: only the note remains.
+        result, root, _ = self.popup('old clipboard text', None,
+            [('type', 'yalnız bir not'), ('key', '<Return>')], windows=True)
+        self.assertEqual(result['status'], 'yakalandi')
+        self.assertIn('yalnız bir not', self.card(result)['body'])
+        self.assertNotIn('old clipboard text', self.card(result)['body'])
+        rows = [item['window'] for item in root.canvas.items.values()
+                if isinstance(item.get('window'), Canvas)]
+        self.assertEqual(rows, [])
+
     def test_windows_sequence_makes_image_fresh_without_snipping_tool_path(self):
         result, root, _ = self.popup('', self.bitmap, [('look', None), ('key', '<Return>')],
                                      windows=True, fresh=True)
