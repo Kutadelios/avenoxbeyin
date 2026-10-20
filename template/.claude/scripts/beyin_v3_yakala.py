@@ -6095,7 +6095,7 @@ class _WindowsPopupBroker:
         import time
         instance = self._spawn()
         stage, deadline, sent_focus, capture_id = 'warming', time.monotonic() + self.WARM_TIMEOUT, 0, None
-        done, exit_seen = False, False
+        done, exit_seen, pipe_deadline = False, False, None
         while not self.stopping.is_set():
             # Consume queued final packets before classifying pipe EOF/process exit.
             while True:
@@ -6146,9 +6146,12 @@ class _WindowsPopupBroker:
             if self.pipe.failed.is_set() and stage != 'closing':
                 if stage in ('warming', 'ready'):
                     raise _WindowsPopupTransientError('READY kanali kapandi (asama: %s)' % stage)
-                # EOF may race the final exit. Never start a replacement until this owner is dead.
-                stage, deadline = 'closing', time.monotonic() + 1
-            if stage in ('warming', 'activating', 'closing') and time.monotonic() >= deadline:
+                # EOF can race the reader queuing ACTIVE/DONE after receive() returned
+                # empty. Keep the protocol phase so those packets are still accepted.
+                if pipe_deadline is None:
+                    pipe_deadline = time.monotonic() + 1
+            if ((stage in ('warming', 'activating', 'closing') and time.monotonic() >= deadline)
+                    or (pipe_deadline is not None and stage != 'closing' and time.monotonic() >= pipe_deadline)):
                 if capture_id and not done:
                     self.log('Yakalama penceresi DONE olmadan zaman asimina ugradi; kaydin sonucu bilinmiyor, '
                              'bu yakalama tekrar denenmeyecek.')
@@ -6166,7 +6169,7 @@ class _WindowsPopupBroker:
                 if not self.pipe.send(message):
                     raise _WindowsPopupTransientError('ACTIVATE iletilemedi')
                 stage, deadline, sent_focus = 'activating', time.monotonic() + self.ACTIVE_TIMEOUT, number
-            elif stage == 'active' and number != sent_focus:
+            elif stage == 'active' and number != sent_focus and not self.pipe.failed.is_set():
                 try:
                     granted = bool(self.grant(child.pid))
                 except OSError:

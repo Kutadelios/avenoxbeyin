@@ -18,6 +18,7 @@ class PopupModel:
         self.test, self.instance, self.mode = test, instance, mode
         self.failed, self.packets = threading.Event(), queue.Queue()
         self.ready_seen = False
+        self.eof_queued = False
         self.done_seen = False
         self.exit_seen, self.reader_release = threading.Event(), threading.Event()
         self.sent = []
@@ -50,6 +51,15 @@ class PopupModel:
         try:
             message = self.packets.get_nowait()
         except queue.Empty:
+            if (self.mode in ('eof_delayed_done', 'eof_delayed_active_done')
+                    and hasattr(self, 'capture_id') and not self.eof_queued):
+                # The reader queues its final packets after receive() saw an empty queue,
+                # then publishes EOF before the broker checks the failed flag.
+                self.eof_queued = True
+                if self.mode == 'eof_delayed_active_done':
+                    self.packets.put(y._protocol_message('ACTIVE', self.instance, capture_id=self.capture_id))
+                self.packets.put(y._protocol_message('DONE', self.instance, capture_id=self.capture_id))
+                self.failed.set()
             return None
         if message['type'] == 'READY':
             self.ready_seen = True
@@ -59,13 +69,16 @@ class PopupModel:
             self.process.returncode = 1
         if message['type'] == 'DONE':
             self.done_seen = True
+            if self.mode in ('eof_delayed_done', 'eof_delayed_active_done'):
+                self.process.returncode = 0
         return message
 
     def send(self, message):
         self.sent.append(message)
-        if message['type'] == 'ACTIVATE' and self.mode != 'activation_timeout':
+        if message['type'] == 'ACTIVATE':
             self.capture_id = message['capture_id']
-            self.packets.put(y._protocol_message('ACTIVE', self.instance, capture_id=message['capture_id']))
+            if self.mode not in ('activation_timeout', 'eof_delayed_active_done'):
+                self.packets.put(y._protocol_message('ACTIVE', self.instance, capture_id=message['capture_id']))
         if message['type'] == 'STOP':
             self.process.returncode = 0
         return True
@@ -153,6 +166,11 @@ class BrokerRecoveryTest(unittest.TestCase):
             y._windows_stop_listener(self.vault, timeout=5)
             self.listener.join(5)
             self.assertFalse(self.listener.is_alive())
+        # A cleanup-failure test deliberately retains ownership until its assertion.
+        self.fail_cleanup = False
+        for broker in self.brokers:
+            if not broker.thread.is_alive():
+                broker._drop()
 
     def log(self):
         try:
@@ -226,6 +244,18 @@ class BrokerRecoveryTest(unittest.TestCase):
             self.assertTrue(previous.done_seen)
             self.assertFalse(previous.read_thread.is_alive())
             self.assertEqual(sum(m['type'] == 'ACTIVATE' for m in previous.sent), 1)
+            self.assertEqual(self.owners[-1].sent, [])
+        self.assertNotIn('gecici hata', self.log())
+        self.assertNotIn('sonucu bilinmiyor', self.log())
+
+    def test_final_packets_queued_during_eof_check_preserve_capture_phase(self):
+        self.start('eof_delayed_done', 'eof_delayed_active_done', 'normal')
+        for count in (2, 3):
+            self.press()
+            self.assert_recovered(count=count)
+            previous = self.owners[count - 2]
+            self.assertTrue(previous.done_seen)
+            self.assertTrue(previous.eof_queued)
             self.assertEqual(self.owners[-1].sent, [])
         self.assertNotIn('gecici hata', self.log())
         self.assertNotIn('sonucu bilinmiyor', self.log())
