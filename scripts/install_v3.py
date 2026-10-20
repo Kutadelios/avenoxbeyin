@@ -283,15 +283,34 @@ def semantic_unchanged(name, baseline, current, previous, kept=(), user_excluded
         if name == ".beyin-runtime.json":
             # The installer pins a resolved absolute path. A pin that is not absolute here was
             # written by another OS through a synced vault (#249); it cannot name this machine's
-            # state, so the reinstall replaces it. Any other change still conflicts.
+            # state, so the reinstall replaces it. Standard default state layouts (.../beyin-v3/<key>)
+            # and package-redirected paths are also reconciled across moves without conflicting.
             data, before = json.loads(current), json.loads(baseline)
-            if not isinstance(data, dict) or not isinstance(before, dict) or not isinstance(data.get("state"), str):
+            if not isinstance(data, dict) or not isinstance(before, dict) or not isinstance(data.get("state"), str) or not isinstance(before.get("state"), str):
                 return False
+            if dict(data, state=None) != dict(before, state=None):
+                return False
+            cur_state, bef_state = data["state"], before["state"]
+            if cur_state == bef_state:
+                return True
             try:
-                foreign = not Path(data["state"]).expanduser().is_absolute()
-            except RuntimeError:
+                if not Path(cur_state).expanduser().is_absolute() and Path(bef_state).expanduser().is_absolute():
+                    return True
+            except (RuntimeError, ValueError):
                 return False
-            return foreign and dict(data, state=None) == dict(before, state=None)
+            def _is_default_layout(s):
+                portable = str(s).replace("\\", "/").rstrip("/")
+                return bool(re.search(r"/beyin-v3/[0-9a-fA-F]{16}$", portable))
+            if _is_default_layout(cur_state) and _is_default_layout(bef_state):
+                return True
+            try:
+                p_cur = Path(cur_state).expanduser().resolve()
+                p_bef = Path(bef_state).expanduser().resolve()
+                if p_cur == p_bef or (p_cur.exists() and p_bef.exists() and os.path.samefile(p_cur, p_bef)):
+                    return True
+            except (RuntimeError, ValueError, OSError):
+                pass
+            return False
         if name in (".claude/settings.local.json", ".claude/settings.json", ".codex/hooks.json", ".agents/hooks.json"):
             def owned(raw):
                 data = json.loads(raw)

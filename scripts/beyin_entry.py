@@ -585,6 +585,26 @@ def human_result(result, command, installed_version=None):
             if not pruned:
                 return 'Temizlenecek eksik klasor bulunmadi; tum klasorler kasada mevcut.'
             return 'Kasada bulunmayan ' + str(len(pruned)) + ' klasor kapsamdan cikarildi: ' + ', '.join(plain_text(f) for f in pruned)
+    elif command == 'bridge':
+        status = result.get('status')
+        harness = result.get('harness', 'bilinmiyor')
+        if status == 'installed':
+            lines = ['Global kopru kuruldu (' + harness + '):']
+            if result.get('hook_file'):
+                lines.append('  Hook ayari: ' + plain_text(result['hook_file']))
+            if result.get('gemini_md'):
+                lines.append('  Global yonerge: ' + plain_text(result['gemini_md']))
+            if result.get('project_roots'):
+                lines.append('  Kapsanan proje kokleri: ' + ', '.join(plain_text(r) for r in result['project_roots']))
+            lines.append('Mevcut kullanici ayarlari korundu; .bak yedegi alindi.')
+            return '\n'.join(lines)
+        elif status == 'uninstalled':
+            lines = ['Global kopru kaldirildi (' + harness + '):']
+            if result.get('hook_file'):
+                lines.append('  Hook ayari: ' + plain_text(result['hook_file']))
+            lines.append('  Kaldirilan kopru girdisi sayisi: ' + str(result.get('removed_count', 0)))
+            lines.append('Kullaniciya ait diger ayarlar korundu.')
+            return '\n'.join(lines)
     else:
         message = 'Islem sonucu: ' + str(status or 'tamamlandi')
         if command in ('sync', 'recover-views'):
@@ -630,7 +650,7 @@ def load_cli(directory):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    force_json = '--json' in argv
+    force_json = '--json' in argv or '--print-config' in argv
     human = ('--human' in argv or sys.stdout.isatty()) and not force_json
     argv = [arg for arg in argv if arg not in ('--human', '--json')]
     if human:
