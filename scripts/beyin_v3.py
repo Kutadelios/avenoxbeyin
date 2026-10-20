@@ -517,6 +517,13 @@ def hook_reconcile(vault: Path, state: Path, force: bool = False) -> dict:
 
     launchers_stale = False
     planned_launchers = {}
+    launcher_baselines = {}
+    try:
+        manifest = json.loads((state / "v3-install.json").read_text(encoding="utf-8"))
+        launcher_baselines = {name: base64.b64decode(info.get("installed_content") or "")
+                              for name, info in manifest.get("files", {}).items() if isinstance(info, dict)}
+    except (OSError, ValueError):
+        pass
     launcher_script = vault / ".claude/scripts/beyin_v3_launchers.py"
     if not launcher_script.is_file():
         launcher_script = Path(__file__).resolve().parent / "beyin_v3_launchers.py"
@@ -533,7 +540,9 @@ def hook_reconcile(vault: Path, state: Path, force: bool = False) -> dict:
                 lpath = vault / lname
                 if lpath.is_file():
                     _local_hook_file(vault, lpath)
-                    if lpath.read_bytes() != lbytes:
+                    original = lpath.read_bytes()
+                    baseline = launcher_baselines.get(lname)
+                    if baseline is not None and original.replace(b"\r\n", b"\n") == baseline.replace(b"\r\n", b"\n") and original != lbytes:
                         launchers_stale = True
         except Exception:
             pass
@@ -721,6 +730,9 @@ def hook_reconcile(vault: Path, state: Path, force: bool = False) -> dict:
             continue
         try:
             original_bytes = lpath.read_bytes()
+            baseline = launcher_baselines.get(lname)
+            if baseline is None or original_bytes.replace(b"\r\n", b"\n") != baseline.replace(b"\r\n", b"\n"):
+                continue  # A user-edited launcher remains user-owned, including with --force.
             if original_bytes != expected_bytes or force:
                 if lpath.read_bytes() != original_bytes:
                     raise RuntimeError("Launcher changed during reconciliation; preserved")
@@ -772,8 +784,6 @@ def hook_reconcile(vault: Path, state: Path, force: bool = False) -> dict:
                                 adopt = True
                         except Exception:
                             pass
-                    elif name in planned_launchers:
-                        adopt = True
                     if file_path.is_file() and adopt:
                         file_bytes = file_path.read_bytes()
                         files[name]["installed_hash"] = hashlib.sha256(file_bytes).hexdigest()

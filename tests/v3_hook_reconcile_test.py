@@ -371,6 +371,25 @@ class HookReconcileTest(unittest.TestCase):
         altered_data = {"schema": 2, "state": "C:\\Users\\Alice\\AppData\\Local\\beyin-v3\\0123456789abcdef"}
         self.assertFalse(installer.semantic_unchanged(".beyin-runtime.json", json.dumps(altered_data).encode(), json.dumps(base_data).encode(), (), (), ()))
 
+    def test_reconcile_preserves_edited_launcher_and_its_manifest_baseline(self):
+        self.install()
+        import shutil
+        moved = self.root / 'Moved Vault'
+        shutil.move(str(self.vault), str(moved))
+        self.vault = moved
+        name = 'Beyni Guncelle.cmd' if os.name == 'nt' else ('Beyni Güncelle.command' if sys.platform == 'darwin' else 'Beyni Güncelle.sh')
+        launcher = self.vault / name
+        edited = launcher.read_bytes() + b'\necho USER_CUSTOMIZATION\n'
+        launcher.write_bytes(edited)
+        manifest_path = self.state / 'v3-install.json'
+        baseline = json.loads(manifest_path.read_text(encoding='utf-8'))['files'][name]
+        for extra in ([], ['--force']):
+            result = subprocess.run([sys.executable, str(self.vault / 'beyin.py'), 'hook-reconcile', *extra],
+                                    env=self.env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(launcher.read_bytes(), edited)
+            self.assertEqual(json.loads(manifest_path.read_text(encoding='utf-8'))['files'][name], baseline)
+
 
 if __name__ == "__main__":
     unittest.main()
