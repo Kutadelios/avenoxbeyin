@@ -829,6 +829,284 @@ class AgentSelectedSourceTest(AgentFiles):
         self.spawned.assert_not_called()
 
 
+class AgentWindowViewTest(AgentFiles):
+    """gorunum=pencere: interactive clients with the hidden run's tool boundary."""
+
+    def windowed(self, request='Bu gönderinin linkini kontrol et.', client='claude'):
+        with patch.object(yakala, '_agent_window_supported', return_value=True):
+            self.configure(client)
+            result = yakala.configure_agent(self.vault, self.state, client, view='pencere')
+        self.assertEqual(result['gorunum'], 'pencere')
+        self.assertIn('Codex' if client == 'codex' else 'Claude Code', result['ipucu'])
+        return self.queued(request=request, url='https://example.com/post')
+
+    def test_hidden_is_the_default_and_old_settings_without_the_field_still_load(self):
+        self.configure('claude')
+        self.assertEqual(yakala.agent_settings(self.vault, self.state)['gorunum'], 'gizli')
+        saved = json.loads(self.config_path.read_text(encoding='utf-8'))
+        saved.pop('gorunum')
+        self.config_path.write_text(json.dumps(saved), encoding='utf-8')
+        self.assertEqual(yakala.agent_settings(self.vault, self.state)['gorunum'], 'gizli')
+
+    def test_window_is_only_offered_on_windows_for_both_clients(self):
+        for client in ('claude', 'codex'):
+            with self.subTest(client=client), patch.object(yakala, '_agent_window_supported', return_value=False), \
+                    self.assertRaises(ValueError):
+                yakala.configure_agent(self.vault, self.state, client, view='pencere')
+        self.assertFalse(self.config_path.exists())
+
+    def test_codex_window_uses_interactive_argv_and_the_same_security_flags(self):
+        result, job, card = self.windowed(client='codex', request='Istek " & $(x) --yolo')
+        self.assertIsNone(job['session_id'])
+        job['codex_mcp_off'] = ['node_repl', 'other']
+        for network in ('kisitli', 'acik'):
+            job['config']['ag'] = network
+            with self.subTest(network=network), patch.object(yakala, '_agent_window_supported', return_value=True), \
+                    patch.object(yakala, '_agent_executable', return_value=['C:/Codex/codex.exe']), \
+                    patch.object(yakala, '_agent_windows_argv', wraps=yakala._agent_windows_argv) as checked:
+                argv = yakala._agent_command(self.vault, self.state, job, job['config'])
+            checked.assert_called_once_with(argv)
+            self.assertEqual(argv[0], 'C:/Codex/codex.exe')
+            for flag in ('exec', '--json', '-o', '--ignore-rules', '--skip-git-repo-check', '-', '--session-id'):
+                self.assertNotIn(flag, argv)
+            self.assertEqual(argv[argv.index('-a') + 1], 'never')
+            self.assert_codex_filesystem_policy(argv)
+            self.assertEqual(argv[argv.index('-C') + 1], str(self.vault))
+            for feature in yakala.CODEX_DISABLED:
+                self.assertIn(['--disable', feature], [argv[i:i + 2] for i in range(len(argv) - 1)])
+            for name in job['codex_mcp_off']:
+                self.assertIn('mcp_servers.' + name + '.enabled=false', argv)
+            for setting in ('mcp_servers.yakala.enabled=true', 'mcp_servers.yakala.required=true',
+                            'mcp_servers.yakala.tool_timeout_sec=60'):
+                self.assertIn(setting, argv)
+            self.assertTrue(any(item.startswith('mcp_servers.yakala.command=') for item in argv))
+            self.assertTrue(any(item.startswith('mcp_servers.yakala.args=') for item in argv))
+            self.assertIn('web_search="' + ('live' if network == 'acik' else 'disabled') + '"', argv)
+            self.assertEqual(argv[-2], '--')
+            self.assertTrue(argv[-1].startswith('Bu vault icinde'))
+            self.assertIn('canli izliyor', argv[-1])
+            self.assertEqual([item for item in argv if 'Istek ' in item], [argv[-1]])
+
+
+    def test_window_command_is_interactive_with_the_same_tool_boundary(self):
+        result, job, card = self.windowed(request='Müziği bul "--dangerously-skip-permissions" $(x)')
+        prefix = [str(Path(self.tmp.name) / 'native CLI' / 'claude.exe')]
+        with patch.object(yakala, '_agent_window_supported', return_value=True), patch.object(yakala, '_agent_executable', return_value=prefix):
+            argv = yakala._agent_command(self.vault, self.state, job, job['config'])
+        self.assertEqual(argv[:len(prefix)], prefix)
+        for flag in ('-p', '--output-format', '--verbose'):
+            self.assertNotIn(flag, argv)
+        for flag in ('--strict-mcp-config', '--no-chrome', '--session-id'):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index('--session-id') + 1], result['session_id'])
+        self.assertEqual(argv[argv.index('--tools') + 1], '')
+        self.assertEqual(argv[argv.index('--allowedTools') + 1], 'mcp__yakala__*')
+        self.assertEqual(argv[argv.index('--permission-mode') + 1], 'dontAsk')
+        self.assertNotIn('--permission-prompts', argv)  # documented only for print mode
+        for flag in ('--dangerously-skip-permissions', 'bypassPermissions', '--bare'):
+            self.assertNotIn(flag, argv)
+        # The request travels only inside the single prompt argument, after every option.
+        self.assertTrue(argv[-1].startswith('Bu vault icinde'))
+        self.assertEqual(argv[-2], '--')
+        self.assertIn('canli izliyor', argv[-1])
+        self.assertIn('basarinin henuz dogrulanmadigini', argv[-1])
+        self.assertNotIn('birkac saniye icinde', argv[-1])
+        self.assertEqual([item for item in argv if 'Müziği bul' in item], [argv[-1]])
+
+    def test_valid_request_can_exceed_createprocess_limit_after_json_and_quoting(self):
+        result, saved_job, card = self.windowed(request='"' * yakala.AGENT_MAX_REQUEST)
+        for character in ('"', '\\', '\U0001F680', '\x01'):
+            with self.subTest(character=repr(character)):
+                job = dict(saved_job, request=character * yakala.AGENT_MAX_REQUEST)
+                with patch.object(yakala, '_agent_window_supported', return_value=True), \
+                        patch.object(yakala, '_agent_executable', return_value=['C:/Claude/claude.exe']), \
+                        self.assertRaisesRegex(ValueError, 'gizli'):
+                    yakala._agent_command(self.vault, self.state, job, job['config'])
+                self.assertTrue(card['path'].is_file())
+
+    def test_long_request_still_works_with_stdin_in_hidden_mode(self):
+        self.configure('claude')
+        result, job, card = self.queued(request='"' * yakala.AGENT_MAX_REQUEST)
+        with patch.object(yakala, '_agent_executable', return_value=['C:/Claude/claude.exe']):
+            argv = yakala._agent_command(self.vault, self.state, job, job['config'])
+        self.assertIn('-p', argv)
+        self.assertNotIn(job['request'], argv)
+
+    def test_windows_argv_limit_counts_utf16_and_terminator(self):
+        base = ['C:/claude.exe', '--', '']
+        overhead = len(subprocess.list2cmdline(base[:-1]).encode('utf-16-le')) // 2 + 1
+        # One separator and one terminating NUL are included in the 32,767 total.
+        accepted = [*base[:-1], 'a' * (32766 - overhead)]
+        self.assertEqual(yakala._agent_windows_argv(accepted), accepted)
+        with self.assertRaises(ValueError):
+            yakala._agent_windows_argv([*base[:-1], accepted[-1] + 'a'])
+
+    @unittest.skipUnless(os.name == 'nt', 'requires real Windows CreateProcessW')
+    def test_real_windows_argv_round_trip_has_no_shell_expansion(self):
+        values = ['--dangerously-skip-permissions', '" & %PATH% ^ ! <> $(x)',
+                  '\U0001F680 Örnek', 'tail \\\\', 'quote \\\" end', 'line\nnext']
+        command = [sys.executable, '-c',
+                   'import json,sys; print(json.dumps(sys.argv[1:], ensure_ascii=True))', *values]
+        result = subprocess.run(yakala._agent_windows_argv(command), capture_output=True,
+                                text=True, check=True, timeout=15, shell=False, env=inherited_env())
+        self.assertEqual(json.loads(result.stdout), values)
+
+    def run_window(self, poll, manifest, client='claude', session=None, session_error=None):
+        result, job, card = self.windowed(client=client)
+        folder = yakala._agent_job_dir(self.vault, self.state, job['id'])
+        if manifest:
+            (folder / 'result.json').write_text('{}', encoding='utf-8')
+        process = types.SimpleNamespace(pid=777, poll=Mock(return_value=poll), kill=Mock())
+        with self.window_process_identity(process.pid), \
+                patch.object(yakala, '_agent_window_supported', return_value=True), \
+                patch.object(yakala.subprocess, 'Popen', return_value=process) as popen, \
+                patch.object(yakala, '_agent_finalize', return_value=('completed', 'tamam')) as finalize, \
+                patch.object(yakala, '_agent_codex_window_session', return_value=session, side_effect=session_error) as discover, \
+                patch('time.sleep'):
+            outcome = yakala._agent_run_window(self.vault, self.state, job, [client + '.exe', 'istem'])
+        if client == 'claude' or not manifest:
+            discover.assert_not_called()
+        return outcome, process, popen, finalize, job
+
+    def test_codex_window_saves_observed_session_before_finalizing_and_stays_open(self):
+        session = str(uuid.uuid4())
+        outcome, process, popen, finalize, job = self.run_window(None, True, client='codex', session=session)
+        self.assertEqual(outcome, ('completed', 'tamam'))
+        self.assertEqual(finalize.call_args.args[2]['session_id'], session)
+        self.assertEqual(yakala._agent_load_job(self.vault, self.state, job['id'])['session_id'], session)
+        self.assertEqual(yakala.read_card(yakala._agent_card_path(self.vault, job))[0]['ajan_oturum'], session)
+        process.kill.assert_not_called()
+        self.assertTrue(popen.call_args.kwargs['creationflags'] & 0x10)
+        self.assertNotIn('stdin', popen.call_args.kwargs)
+
+    def test_codex_window_cannot_finalize_without_an_unambiguous_session(self):
+        for error in (None, ValueError('birden fazla yeni oturum'), OSError('meta okunamadi')):
+            with self.subTest(error=error):
+                outcome, process, popen, finalize, job = self.run_window(None, True, client='codex', session_error=error)
+                self.assertEqual(outcome[0], 'approval_required')
+                self.assertIn('oturum', outcome[1])
+                finalize.assert_not_called()
+                process.kill.assert_not_called()
+                self.assertIsNone(job['session_id'])
+                yakala._agent_end(self.vault, self.state, job, *outcome)
+
+    def test_window_job_finalizes_on_the_manifest_and_leaves_the_console_open(self):
+        with patch.object(yakala, '_agent_notify') as notify:
+            outcome, process, popen, finalize, job = self.run_window(poll=None, manifest=True)
+        notify.assert_called_once_with(self.state, job['card_id'], 'started', job['card_path'], vault=self.vault)
+        self.assertEqual(outcome, ('completed', 'tamam'))
+        finalize.assert_called_once()
+        process.kill.assert_not_called()
+        self.assertTrue(popen.call_args.kwargs['creationflags'] & 0x10)  # CREATE_NEW_CONSOLE
+        self.assertNotIn('stdin', popen.call_args.kwargs)
+        self.assertEqual(yakala._agent_load_job(self.vault, self.state, job['id'])['gorunum'], 'pencere')
+
+    def test_closing_the_window_without_a_result_is_not_completion(self):
+        outcome, process, popen, finalize, job = self.run_window(poll=0, manifest=False)
+        self.assertEqual(outcome[0], 'approval_required')
+        finalize.assert_not_called()
+
+
+class AgentCodexWindowSessionTest(AgentFiles):
+    def setUp(self):
+        super().setUp()
+        self.codex_home = Path(self.tmp.name) / 'Codex Home'
+        self.sessions = self.codex_home / 'sessions' / '2026' / '10' / '18'
+        self.sessions.mkdir(parents=True)
+        self.started_ns = int(yakala.datetime.fromisoformat('2026-10-18T09:00:00+00:00').timestamp()) * 1000000000
+        environment = patch.dict(yakala.os.environ, CODEX_HOME=str(self.codex_home))
+        environment.start()
+        self.addCleanup(environment.stop)
+        clock = patch('time.time_ns', return_value=self.started_ns + 10000000000)
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def rollout(self, *, cwd=None, stamp='2026-10-18T09:00:01.000Z', payload=None):
+        session = str(uuid.uuid4())
+        path = self.sessions / ('rollout-2026-10-18T12-00-01-' + session + '.jsonl')
+        meta = {'id': session, 'timestamp': stamp, 'cwd': str(cwd or self.vault)}
+        if payload:
+            meta.update(payload)
+        path.write_bytes(json.dumps({'type': 'session_meta', 'payload': meta}).encode('utf-8') +
+                         b'\n' + b'\xff' * 100000)  # The transcript must never be decoded.
+        os.utime(path, ns=(self.started_ns + 2000000000, self.started_ns + 2000000000))
+        return session, path
+
+    def discover(self):
+        return yakala._agent_codex_window_session(self.vault, self.started_ns)
+
+    def test_only_new_matching_vault_metadata_supplies_the_session(self):
+        self.rollout(stamp='2026-10-18T08:59:59.999Z')  # An old session with a recent mtime.
+        self.rollout(cwd=self.state)
+        self.rollout(stamp='2026-10-18T09:00:11.000Z')  # Beyond the observed run.
+        expected, path = self.rollout()
+        self.assertEqual(self.discover(), expected)
+        self.assertNotEqual(expected, path.stem)
+
+    def test_timestamp_precision_does_not_lose_the_first_millisecond(self):
+        expected, path = self.rollout(stamp='2026-10-18T09:00:00.000Z')
+        self.assertEqual(yakala._agent_codex_window_session(self.vault, self.started_ns + 999999), expected)
+
+    def test_two_new_sessions_in_the_vault_are_ambiguous(self):
+        self.rollout()
+        self.rollout(stamp='2026-10-18T09:00:02.000Z')
+        with self.assertRaisesRegex(ValueError, 'birden fazla'):
+            self.discover()
+
+    def test_missing_or_invalid_metadata_never_supplies_an_identity(self):
+        self.assertIsNone(self.discover())
+        for payload in ({'id': str(uuid.uuid4())}, {'id': 'not-a-uuid'}, {'cwd': '.'},
+                        {'timestamp': '2026-10-18T09:00:01'}, {'timestamp': 'invalid'}):
+            with self.subTest(payload=payload):
+                self.rollout(payload=payload)
+        self.assertIsNone(self.discover())
+
+    def test_only_a_bounded_first_line_is_read(self):
+        expected, path = self.rollout()
+        first = path.open('rb')
+        with first:
+            meta = first.readline()
+        for header in (b'{}\n', b'x' * 65537 + b'\n', b'{bad json}\n'):
+            with self.subTest(header=header[:20]):
+                path.write_bytes(header + meta)
+                os.utime(path, ns=(self.started_ns + 2000000000, self.started_ns + 2000000000))
+                self.assertIsNone(self.discover())
+
+    def test_default_codex_home_is_used_when_environment_is_unset(self):
+        expected, path = self.rollout()
+        with patch.dict(yakala.os.environ), patch.object(yakala.Path, 'home', return_value=self.codex_home.parent):
+            yakala.os.environ.pop('CODEX_HOME', None)
+            self.codex_home.rename(self.codex_home.parent / '.codex')
+            self.assertEqual(self.discover(), expected)
+
+    def test_relative_codex_home_uses_the_vault_as_the_cli_does(self):
+        expected, path = self.rollout()
+        with patch.dict(yakala.os.environ, CODEX_HOME='../Codex Home'):
+            self.assertEqual(self.discover(), expected)
+
+    def test_window_finds_fixture_session_after_launch_before_finalizing(self):
+        self.configure('codex', gorunum='pencere')
+        result, job, card = self.queued()
+        folder = yakala._agent_job_dir(self.vault, self.state, job['id'])
+        observed = []
+        process = Mock(pid=777)
+
+        def launch(*args, **kwargs):
+            session, path = self.rollout()
+            observed.append(session)
+            (folder / 'result.json').write_text('{}', encoding='utf-8')
+            return process
+
+        with self.window_process_identity(process.pid), \
+                patch.object(yakala.subprocess, 'Popen', side_effect=launch), \
+                patch('time.time_ns', side_effect=[self.started_ns, self.started_ns + 10000000000]), \
+                patch.object(yakala, '_agent_finalize', return_value=('completed', 'tamam')) as finalize:
+            self.assertEqual(yakala._agent_run_window(self.vault, self.state, job, ['codex.exe']),
+                             ('completed', 'tamam'))
+        self.assertEqual(finalize.call_args.args[2]['session_id'], observed[0])
+        self.assertEqual(yakala._agent_load_job(self.vault, self.state, job['id'])['session_id'], observed[0])
+
+
 class AgentEnvironmentTest(AgentFiles):
     def test_job_is_its_own_session_even_when_started_from_an_agent(self):
         inherited = {'CLAUDECODE': '1', 'CLAUDE_CODE_CHILD_SESSION': '1', 'CLAUDE_CODE_ENTRYPOINT': 'cli'}

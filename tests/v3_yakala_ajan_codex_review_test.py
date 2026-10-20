@@ -178,6 +178,42 @@ class CodexFeatureReviewTest(AgentFiles):
         with self.assertRaisesRegex(ValueError, 'MCP sunuculari'):
             self.preflight(mcp_enabled=True, fail_mcp_disable=True)
 
+    def test_platform_and_view_matrix_keeps_tool_limits_and_compatible_filesystem_policy(self):
+        self.configure('codex')
+        _, job, _ = self.queued(url='https://example.com/post')
+        names = set()
+        for os_name, platform, view in (
+                (name, platform, view)
+                for name, platform in (('nt', 'win32'), ('posix', 'linux'), ('posix', 'darwin'))
+                for view in ('gizli', 'pencere')):
+            system = types.SimpleNamespace(**{**vars(yakala.os), 'name': os_name})
+            runtime = types.SimpleNamespace(**{**vars(yakala.sys), 'platform': platform})
+            with self.subTest(platform=platform, view=view), \
+                    patch.object(yakala, 'os', system), patch.object(yakala, 'sys', runtime), \
+                    patch.object(yakala, '_agent_window_supported', return_value=True), \
+                    patch.object(yakala, '_agent_executable', return_value=['codex']):
+                job['config']['gorunum'] = view
+                argv = yakala._agent_command(self.vault, self.state, job, job['config'])
+                self.assertIn('--strict-config', argv)
+                profile = self.assert_codex_filesystem_policy(argv)
+                if profile is not None:
+                    names.add(profile)
+                self.assertEqual(argv[argv.index('-a') + 1], 'never')
+                self.assertIn('agents.enabled=false', argv)
+                for feature in FEATURES:
+                    self.assertIn(['--disable', feature], [argv[i:i + 2] for i in range(len(argv))])
+                self.assertIn('mcp_servers.yakala.enabled=true', argv)
+                self.assertIn('mcp_servers.yakala.required=true', argv)
+                self.assertIn('web_search="disabled"', argv)
+                self.assertNotIn('apply_patch_freeform', argv)  # removed, not a security switch
+                self.assertNotIn('code_mode', argv)
+                self.assertNotIn('code_mode_host', argv)
+                self.assertEqual('exec' in argv, view == 'gizli')
+                if view == 'pencere':
+                    self.assertEqual(argv[-2], '--')
+        # A name copied from the user's config must not contribute narrower read/write grants.
+        self.assertEqual(len(names), 6)
+
 
 class CodexPermissionReviewTest(AgentFiles):
     @contextlib.contextmanager
@@ -244,6 +280,23 @@ class CodexPermissionReviewTest(AgentFiles):
                     finally:
                         path.unlink()
 
+    def test_missing_and_unrestricted_configs_preserve_the_existing_command_policy(self):
+        self.assertEqual(self.preflight(), ())
+        for path, _ in self.sources:
+            self.write_config(path, '# allowed_permission_profiles = [":workspace"]\n'
+                                    'model = "gpt-test"\n'
+                                    'notice = "allowed_permission_profiles"\n'
+                                    '[permissions.other.filesystem]\n":root" = "write"\n')
+        before = {path: path.read_bytes() for path, _ in self.sources}
+        self.assertEqual(self.preflight(), ())
+        self.assertEqual({path: path.read_bytes() for path, _ in self.sources}, before)
+        for view in ('gizli', 'pencere'):
+            with patch.object(yakala, '_agent_window_supported', return_value=True):
+                self.configure('codex', gorunum=view)
+                _, job, _ = self.queued()
+                with self.posix(), patch.object(yakala, '_agent_executable', return_value=['codex']):
+                    self.assert_codex_filesystem_policy(
+                        yakala._agent_command(self.vault, self.state, job, job['config']))
 
     def test_bad_oversized_or_unreadable_config_is_not_treated_as_missing(self):
         path = self.sources[0][0]
@@ -261,6 +314,31 @@ class CodexPermissionReviewTest(AgentFiles):
                 self.preflight()
         self.assertNotIn('private path', str(caught.exception))
 
+    def test_both_views_stop_the_job_and_leave_an_ascii_explanation_on_the_card(self):
+        self.write_config(self.sources[1][0], 'allowed_permission_profiles = [":workspace"]')
+        for view in ('gizli', 'pencere'):
+            with self.subTest(view=view), \
+                    patch.object(yakala, '_agent_window_supported', return_value=True), \
+                    patch.object(yakala, '_agent_executable', return_value=['codex']), \
+                    patch.object(yakala, '_run', return_value=(0, '--disable --ask-for-approval --strict-config', '')), \
+                    patch.object(yakala, '_agent_preflight', side_effect=self.job_preflight), \
+                    patch.object(yakala, '_agent_command') as command, \
+                    patch.object(yakala, '_agent_prepare_runtime') as runtime, \
+                    patch.object(yakala, '_agent_owned_process') as launch, \
+                    patch.object(yakala, '_agent_run_window') as window:
+                self.configure('codex', gorunum=view)
+                _, job, original = self.queued()
+                yakala._agent_run_job(self.vault, self.state, job)
+                command.assert_not_called()
+                runtime.assert_not_called()
+                launch.assert_not_called()
+                window.assert_not_called()
+                stored = yakala._agent_load_job(self.vault, self.state, job['id'])
+                card = yakala.find_card(self.vault, original['id'], self.state)
+                self.assertEqual(stored['state'], 'approval_required')
+                self.assertEqual(card['meta']['durum'], 'onay-bekliyor')
+                self.assertIn('allowed_permission_profiles', card['meta']['ajan_notu'])
+                self.assertTrue(card['meta']['ajan_notu'].isascii())
 
     def test_windows_rejects_managed_profile_fallback_before_launch(self):
         self.write_config(self.sources[1][0], 'allowed_permission_profiles = [":workspace"]')

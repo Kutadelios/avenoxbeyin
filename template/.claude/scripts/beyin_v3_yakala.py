@@ -7323,7 +7323,7 @@ def _capture_lock_path(vault):
 AGENT_SCHEMA = 1
 
 
-AGENT_VIEWS = ('gizli',)  # visible execution arrives in its own review step
+AGENT_VIEWS = ('gizli', 'pencere')  # hidden headless run, or a visible interactive client window
 
 
 AGENT_NETWORK = ('kisitli', 'acik')
@@ -7843,7 +7843,7 @@ def _agent_validate_settings(config, vault):
     if config.get('client') not in ('kapali', 'claude', 'codex'):
         raise ValueError('Ajan claude, codex veya kapali olmali.')
     if config.setdefault('gorunum', 'gizli') not in AGENT_VIEWS:  # jobs queued before the option
-        raise ValueError('Bu asamada ajan gorunumu gizli olmali.')
+        raise ValueError('Ajan gorunumu gizli veya pencere olmali.')
     if config.setdefault('ag', 'kisitli') not in AGENT_NETWORK:
         raise ValueError('Ajan ag ayari kisitli veya acik olmali.')
     for name, lower, upper in (('timeout_seconds', 30, 3600), ('max_queue', 1, 32)):
@@ -8416,6 +8416,20 @@ def _agent_preflight(client, prefix, vault=None):
     return ()
 
 
+def _agent_windows_argv(command):
+    """Check the exact CreateProcessW command line, including quoting and UTF-16 units.
+
+    A request length in Python characters is insufficient: JSON and Windows quoting
+    can expand it, and a supplementary Unicode character takes two UTF-16 units.
+    Never truncate an instruction or silently switch the user's selected view.
+    """
+    encoded = subprocess.list2cmdline(command).encode('utf-16-le', errors='surrogatepass')
+    if len(encoded) // 2 + 1 > 32767:  # includes the terminating UTF-16 NUL
+        raise ValueError('Istek Windows pencere komut satiri sinirini asiyor; '
+                         'kart korundu. Ajan gorunumunu gizli secip yeniden gonderin.')
+    return command
+
+
 def _agent_claude_tools(config):
     if _agent_open_network(config):
         return ['--tools', 'WebSearch', '--allowedTools', 'WebSearch,mcp__yakala__*']
@@ -8430,6 +8444,14 @@ def _agent_command(vault, state, job, config):
     if job['client'] == 'claude':
         mcp = {'mcpServers': {'yakala': {'type': 'stdio', 'command': helper[0], 'args': helper[1:]}}}
         _agent_json(folder / 'mcp.json', mcp)
+        if _agent_windowed(config):
+            # --permission-prompts is a print-mode contract; dontAsk and the fixed
+            # tool/MCP set carry the interactive boundary. A window is not a sandbox.
+            return _agent_windows_argv([*prefix, '--permission-mode', 'dontAsk', '--no-chrome',
+                    *_agent_claude_tools(config),
+                    '--strict-mcp-config', '--mcp-config', str(folder / 'mcp.json'),
+                    '--session-id', job['session_id'], '--name', 'Yakala-' + job['id'][:8],
+                    *config['extra_args'], '--', _agent_prompt(vault, job)])
         return [*prefix, '-p', '--permission-mode', 'dontAsk', '--permission-prompts', 'none',
                 '--no-chrome',
                 *_agent_claude_tools(config),
@@ -8455,6 +8477,9 @@ def _agent_command(vault, state, job, config):
     for key, value in settings:
         # JSON strings/arrays/booleans form a valid TOML value for these scalar-only settings.
         command += ['-c', key + '=' + json.dumps(value, ensure_ascii=True)]
+    if _agent_windowed(config):
+        return _agent_windows_argv([*command, '-C', str(vault),
+                                    *config['extra_args'], '--', _agent_prompt(vault, job)])
     return [*command, 'exec', '-C', str(vault), '--ignore-rules', '--json',
             '--skip-git-repo-check', '-o', str(folder / 'last-message.txt'), *config['extra_args'], '-']
 
@@ -8840,6 +8865,9 @@ def _agent_run_job(vault, state, job):
         prompt_path = folder / 'prompt.txt'
         _atomic_text(prompt_path, _agent_prompt(vault, job))
         _agent_prepare_runtime(vault, state, job)
+        if _agent_windowed(config):
+            terminal, reason = _agent_run_window(vault, state, job, command)
+            return _agent_end(vault, state, job, terminal, reason)
         started = time.monotonic()
         with prompt_path.open('rb') as incoming, (folder / 'events.jsonl').open('wb') as outgoing, \
                 (folder / 'stderr.log').open('wb') as error:
@@ -8902,6 +8930,105 @@ def _agent_run_job(vault, state, job):
             except OSError:
                 pass
     _agent_end(vault, state, job, terminal, reason)
+
+
+def _agent_codex_window_session(vault, started_ns):
+    """Match one new rollout using only its bounded first-line session metadata."""
+    import time
+    home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex').expanduser()
+    root = (Path(vault) / home).resolve() / 'sessions'  # relative homes use the CLI's cwd
+    _agent_no_links(root)
+    if not root.exists():
+        return None
+    # Metadata timestamps have millisecond precision. Do not infer identity from a recent
+    # mtime alone: an older conversation may have received a new message during this job.
+    lower, upper = started_ns // 1000000, time.time_ns() // 1000000
+    candidates = set()
+
+    def walk_error(exc):
+        raise exc
+
+    for directory, children, files in os.walk(root, followlinks=False, onerror=walk_error):
+        children[:] = [name for name in children if not _agent_reparse(Path(directory) / name)]
+        for name in files:
+            match = re.fullmatch(r'rollout-.+-([0-9a-f-]{36})\.jsonl', name)
+            if not match:
+                continue
+            path = _agent_no_links(Path(directory) / name)
+            if path.stat().st_mtime_ns < started_ns:
+                continue
+            with path.open('rb') as stream:
+                line = stream.readline(65537)
+            if len(line) > 65536:
+                continue
+            try:
+                row = json.loads(line)
+                if not isinstance(row, dict) or row.get('type') != 'session_meta':
+                    continue
+                meta = row.get('payload')
+                if not isinstance(meta, dict):
+                    continue
+                session = _agent_uuid(meta.get('id'))
+                stamp = datetime.fromisoformat(meta['timestamp'].replace('Z', '+00:00'))
+                stamp_ms = int(stamp.timestamp()) * 1000 + stamp.microsecond // 1000
+                if (stamp.tzinfo is None or not lower <= stamp_ms <= upper or
+                        session != match[1] or not isinstance(meta.get('cwd'), str) or
+                        not Path(meta['cwd']).is_absolute() or Path(meta['cwd']).resolve() != Path(vault).resolve()):
+                    continue
+                candidates.add(session)
+            except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+                continue
+    if len(candidates) > 1:
+        raise ValueError('Codex pencere oturumu belirsiz: ayni vault icin birden fazla yeni oturum var.')
+    return next(iter(candidates), None)
+
+
+def _agent_run_window(vault, state, job, command):
+    """Visible interactive client: the job ends when its complete tool writes result.json.
+
+    The console belongs to the person: it is not in a kill job and stays open after the result,
+    so the conversation can go on. The worker only waits for the manifest, the window closing,
+    the timeout or the agent being switched off; none of these closes the window.
+    """
+    import time
+    folder = _agent_job_dir(vault, state, job['id'])
+    config = job['config']
+    if not job.get('worker_identity'):
+        _agent_prepare_runtime(vault, state, job)
+    result = folder / 'result.json'
+    session_started_ns = time.time_ns()
+    process = subprocess.Popen(command, cwd=str(vault), env=_agent_env(state, job['id']), close_fds=True,
+                               creationflags=getattr(subprocess, 'CREATE_NEW_CONSOLE', 0x10))
+    job.update(agent_pid=process.pid, agent_identity=_agent_process_identity(process.pid), gorunum='pencere')
+    _agent_json(folder / 'job.json', job)
+    _agent_update_card(vault, job, 'ajanda', ajan_oturum=job.get('session_id'), ajan_asama='calisiyor')
+    _agent_log(state, job['card_id'], 'Pencerede basladi: ' + job['id'] + ' (' + job['client'] + ')')
+    _agent_notify(state, job['card_id'], 'started', job['card_path'], vault=vault)
+    started = time.monotonic()
+    while not result.is_file():
+        if process.poll() is not None:
+            time.sleep(1)  # a complete call racing the window being closed
+            if not result.is_file():
+                return 'approval_required', 'Pencere kapandi; ajan complete ile sonuc birakmadi, tamamlandi sayilmadi.'
+            break
+        if time.monotonic() - started >= config['timeout_seconds']:
+            return 'approval_required', 'Ajan sure icinde sonuc birakmadi; pencere acik birakildi, otomatik tekrar yok.'
+        if agent_settings(vault, state)['client'] == 'kapali':
+            return 'approval_required', 'Ajan kapatildi; pencere acik birakildi, is tamamlandi sayilmadi.'
+        time.sleep(0.5)
+    # result.json is published atomically by _agent_create_json only after fsync.
+    if job['client'] == 'codex':
+        try:
+            session = _agent_codex_window_session(vault, session_started_ns)
+        except (OSError, ValueError) as exc:
+            return 'approval_required', 'Codex pencere oturumu dogrulanamadi: ' + str(exc)[:800]
+        if not session:
+            return 'approval_required', ('Codex pencere oturum kimligi bulunamadi; CODEX_HOME/sessions '
+                                         'meta verisini incele. Sonuc korundu, hafizaya kayit yapilmadi.')
+        job['session_id'] = session
+        _agent_json(folder / 'job.json', job)
+        _agent_update_card(vault, job, 'ajanda', ajan_oturum=session, ajan_asama='calisiyor')
+    return _agent_finalize(vault, state, job)
 
 
 def _agent_worker(vault, state):
@@ -10579,7 +10706,7 @@ def main(argv=None, vault=None, state=None):
     agent = command_parser('ajan', help='Arka plan ajanini goster veya sec')
     agent.add_argument('client', nargs='?', choices=('claude', 'codex', 'kapali'))
     agent.add_argument('--ayar', type=Path, help='Ileri kullanici JSON ayarlari')
-    agent.add_argument('--gorunum', choices=AGENT_VIEWS, help='gizli (arka plan)')
+    agent.add_argument('--gorunum', choices=AGENT_VIEWS, help='gizli (arka plan) ya da pencere (canli izlenen Claude Code)')
     agent.add_argument('--ag', choices=AGENT_NETWORK,
                        help='kisitli (varsayilan: yalniz yakalanan URL ve ondan donen linkler) ya da acik (web aramasi)')
     send = command_parser('ajan-gonder', help='Kayitli tek karti acik istekle ajana ver')
