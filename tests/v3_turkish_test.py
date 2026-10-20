@@ -4,10 +4,12 @@ import importlib.util
 import json
 from pathlib import Path
 import sqlite3
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'template/.claude/scripts'))
 spec = importlib.util.spec_from_file_location('v3_turkish_evaluator', ROOT / 'scripts/evaluate_v3.py')
 evaluator = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(evaluator)
@@ -61,6 +63,7 @@ GUARDS = (
     ('sistem', 'sisteme'), ('durum', 'duruma'), ('platform', 'platforma'), ('alarm', 'alarma'),
     ('prompt', 'promptu'), ('backend', 'backendi'), ('trend', 'trendi'), ('build', 'buildi'),
     ('minimal', 'minimali'), ('anahtar', 'anahtarı'), ('sınır', 'sınırı'),
+    ('claude', 'claudenin'), ('claude', 'claudeye'), ('claude', 'claudede'),
 )
 
 FILLER = 'Bu sentetik test kaydıdır.'
@@ -200,6 +203,8 @@ class TurkishVerbIssueTest(VaultTestCase):
         self.ingest('tarih', 'Kaydın tarihi frontmatter alanında saklanır, dosya adında değil.',
                     'knowledge/tarih.md')
         self.ingest('docker', 'Docker imajı her sürümde yeniden derlenir.', 'knowledge/docker.md')
+        self.ingest('claude', 'Claude Code rehberi: araç çalıştırma ve bellek ayarları burada saklanır.',
+                    'knowledge/claude.md')
         self.ingest('mutfak', 'Mutfak alışverişi: elma, ekmek, zeytinyağı.', 'notes/mutfak.md')
 
     def context(self, query):
@@ -212,6 +217,9 @@ class TurkishVerbIssueTest(VaultTestCase):
             with self.subTest(passages=passages):
                 self.assertEqual(self.context('Mem0 kurulmalı mı?'), ['mem0'])
                 self.assertEqual(self.context('kayıt tarihi nerede'), ['tarih'])
+                self.assertEqual(self.context('Claude ayarları nerede'), ['claude'])
+                self.assertEqual(self.context("Claude'da bellek ayarları"), ['claude'])
+                self.assertEqual(self.context("Claude'un ayarları"), ['claude'])
 
     def test_imperative_prompt_stays_silent(self):
         for passages in (True, False):

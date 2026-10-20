@@ -505,8 +505,8 @@ def _harmonizes(stem, suffix):
     if tone not in ("a", "e"):
         return True
     for character in reversed(stem):
-        if character in _VOWELS:
-            return character not in ("a", "e") or character == tone
+        if character in ("a", "e"):
+            return character == tone
     return True
 
 
