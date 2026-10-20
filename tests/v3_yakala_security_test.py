@@ -605,8 +605,12 @@ class YakalaSecurityTest(unittest.TestCase):
                         with patch('subprocess.run', side_effect=subprocess.TimeoutExpired(cmd='cmd', timeout=1)) as run:
                             function(*args)
                         env = run.call_args.kwargs['env']
+                    if os.name == 'nt':
+                        # Windows environment names are case-insensitive: os.environ folds
+                        # http_proxy and HTTP_PROXY into one upper-case key.
+                        env = {key.upper(): item for key, item in env.items()}
                     for name, value in self.PROXIES.items():
-                        self.assertEqual(env.get(name), value)
+                        self.assertEqual(env.get(name.upper() if os.name == 'nt' else name), value)
 
     def test_stdlib_fetch_keeps_the_configured_proxy(self):
         """No empty ProxyHandler: urllib's default handler reads the environment and system proxy. Offline."""
