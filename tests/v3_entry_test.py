@@ -56,6 +56,24 @@ class EntryPresentationTest(unittest.TestCase):
             self.assertEqual(usage.returncode, 2)
             self.assertIn('--summary or --summary-file is required', usage.stderr.decode('utf-8'))
 
+    def test_trust_review_names_only_the_clients_whose_hooks_changed(self):
+        spec = importlib.util.spec_from_file_location('v3_entry_trust_review', ROOT / 'scripts/beyin_entry.py')
+        entry = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(entry)
+        updated = {'status': 'updated', 'from_version': '3.10.0', 'version': '3.11.0', 'trust_review_required': True}
+        kiro = entry.human_result(dict(updated, trust_review_files=['.kiro/hooks/beyin-v3.json']), 'update')
+        self.assertIn('.kiro/hooks/beyin-v3.json', kiro)
+        self.assertIn('Kiro: Agent Hooks', kiro)
+        self.assertNotIn('Codex', kiro)
+        both = entry.human_result(dict(updated, trust_review_files=['.kiro/hooks/beyin-v3.json', '.codex/hooks.json']),
+                                  'update')
+        self.assertLess(both.index('Codex: /hooks'), both.index('Kiro: Agent Hooks'))
+        # An updater from before the file list names no client rather than a wrong one.
+        older = entry.human_result(updated, 'update')
+        self.assertIn('kullandigin istemcide guven incelemesini', older)
+        self.assertNotIn('Codex', older)
+        self.assertNotIn('Hook tanimi', entry.human_result(dict(updated, trust_review_required=False), 'update'))
+
 
 # The installer pins a resolved absolute path; this is one another OS wrote into a synced vault (#249).
 FOREIGN_PIN = ('/home/ada/.local/state/beyin-v3/ab12' if sys.platform == 'win32' else

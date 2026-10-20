@@ -47,14 +47,37 @@ def default_state(vault: Path) -> Path:
     return base / "beyin-v3" / key
 
 
+def _is_absolute_cross_platform(raw: str) -> bool:
+    """True if a path is absolute on any supported platform (Windows or POSIX)."""
+    return bool(re.match(r"^([A-Za-z]:[/\\]|[/\\])", raw))
+
+
+def _resolve_state_path(pinned: Path) -> Path:
+    """Validate a pin even when non-strict realpath suppresses invalid-path errors."""
+    if "\0" in str(pinned):
+        raise ValueError("embedded null character in state path")
+    resolved = Path(pinned).expanduser().resolve()
+    try:
+        resolved.stat()
+    except FileNotFoundError:
+        pass  # A valid state directory may not have been created yet.
+    return resolved
+
+
 def resolve_state(vault: Path, pinned: Path) -> Path:
     """Resolve a foreign OS/user's conventional default; preserve custom and local pins."""
     expected = default_state(vault).resolve()
     raw = str(pinned)
-    if not raw:
+    if not raw or not raw.strip():
         return expected
     if _in_package_container(raw):
-        return Path(pinned).expanduser().resolve()
+        try:
+            resolved = _resolve_state_path(pinned)
+            if _is_absolute_cross_platform(str(resolved)):
+                return resolved
+        except (OSError, ValueError, RuntimeError):
+            pass
+        return expected
     portable = raw.replace("\\", "/")
     # Match complete standard layouts, rather than a generic /state/ or /local/ suffix.
     # A copied vault normally changes its absolute path and therefore its hash.
@@ -65,10 +88,15 @@ def resolve_state(vault: Path, pinned: Path) -> Path:
     local_parent = str(expected.parent).replace("\\", "/").casefold()
     if conventional and portable.rsplit("/", 1)[0].casefold() != local_parent:
         return expected
+    try:
+        resolved = _resolve_state_path(pinned)
+    except (OSError, ValueError, RuntimeError):
+        return expected
+
     if not Path(pinned).expanduser().is_absolute():
         if re.match(r"^[A-Za-z]:[/\\]", raw) or (sys.platform == "win32" and raw.startswith(("/", "\\"))):
             return expected
-    return Path(pinned).expanduser().resolve()
+    return resolved
 # Privacy must work in the contracted standalone core/no-sync checkout too.
 # Hygiene imports this same predicate instead of making retrieval depend on it.
 SENSITIVE_WORDS = re.compile(
