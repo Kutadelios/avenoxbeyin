@@ -533,7 +533,7 @@ def _attaches(stem, gate):
 
 
 def _harmonizes(stem, suffix):
-    """Weak vowel harmony: folding hides o/u/i fronting, so only a and e can decide."""
+    """Weak vowel harmony: only an unambiguous last vowel (a/e) can decide."""
     tone = next((c for c in suffix if c in _VOWELS), "")
     if tone not in ("a", "e"):
         return True
@@ -547,6 +547,11 @@ def _harmonizes(stem, suffix):
 def _stem(word):
     # Words under 5 characters are already stems; peeling them merges unrelated roots.
     while len(word) >= 5:
+        # Claude ends in the spelling of a Turkish locative suffix. Preserve the
+        # name after peeling a real suffix, without scanning past folded vowels
+        # (tarihte, hakime and kabulde need the existing weak harmony rule).
+        if word == "claude":
+            break
         for suffix, floor, gate in _SUFFIXES_BY_LAST.get(word[-1], ()):
             if not word.endswith(suffix):
                 continue
