@@ -33,6 +33,34 @@ NEGATIVES = (
     ('hand', 'handle'), ('gar', 'garden'), ('sta', 'state'), ('list', 'listen'),
     ('dur', 'durum'), ('sür', 'sürüm'), ('yay', 'yayın'), ('haf', 'hafta'),
     ('denedi', 'denetim'), ('kod', 'kot'), ('card', 'cart'), ('bulgu', 'bulk'),
+    # #430 vowel loss stays out where the short form is usually another word.
+    ('devir', 'devreye'), ('resim', 'resmi'), ('emir', 'emre'), ('karın', 'karne'),
+    ('burun', 'burn'), ('tren', 'trendi'), ('açık', 'açıklamasını'),
+    # #430 these imperative stems stay distinct: a command in a prompt is not a topic.
+    ('göster', 'göstermek'), ('çalıştır', 'çalıştırıyor'), ('değiştir', 'değiştirir'),
+)
+
+# Issue #430: one verb, one stem. Each group must fold onto a single token.
+VERB_GROUPS = (
+    ('kurulum', 'kurulmalı', 'kurulmasın', 'kurulur', 'kurulmuş', 'kuruldu', 'kurulacak',
+     'kurulacağı', 'kurulması', 'kurulmak', 'kuruluyor'),
+    ('yapılmalı', 'yapılır', 'yapıldı', 'yapılmış', 'yapılacak', 'yapılması'),
+    ('kullanılır', 'kullanılmalı', 'kullanıldı', 'kullanılması', 'kullanılıyor'),
+)
+
+# Issue #430: roots that lose their last vowel before a vowel suffix.
+VOWEL_LOSS = (
+    ('şehir', 'şehri'), ('fikir', 'fikri'), ('beyin', 'beyni'), ('metin', 'metninde'),
+    ('isim', 'ismini'), ('akıl', 'aklına'), ('kayıt', 'kaydı'), ('kısım', 'kısmı'),
+    ('vakit', 'vakti'), ('ağız', 'ağzı'), ('oğul', 'oğlu'), ('ömür', 'ömrü'),
+)
+
+# The verb rules must not reach these: m-final nouns take -a/-e, and loanwords ending in
+# a consonant cluster take a possessive vowel. Each pair must keep sharing one stem.
+GUARDS = (
+    ('sistem', 'sisteme'), ('durum', 'duruma'), ('platform', 'platforma'), ('alarm', 'alarma'),
+    ('prompt', 'promptu'), ('backend', 'backendi'), ('trend', 'trendi'), ('build', 'buildi'),
+    ('minimal', 'minimali'), ('anahtar', 'anahtarı'), ('sınır', 'sınırı'),
 )
 
 FILLER = 'Bu sentetik test kaydıdır.'
@@ -80,6 +108,21 @@ class TurkishStemTest(unittest.TestCase):
         for left, right in NEGATIVES:
             with self.subTest(pair=(left, right)):
                 self.assertNotEqual(self.stem(left), self.stem(right))
+
+    def test_passive_verb_forms_fold_onto_one_stem(self):
+        for group in VERB_GROUPS:
+            with self.subTest(verb=group[0]):
+                self.assertEqual(len({self.stem(word) for word in group}), 1)
+
+    def test_vowel_loss_forms_fold_onto_the_root(self):
+        for root, inflected in VOWEL_LOSS:
+            with self.subTest(root=root):
+                self.assertEqual(self.stem(root), self.stem(inflected))
+
+    def test_verb_rules_leave_nouns_and_loanwords_alone(self):
+        for root, inflected in GUARDS:
+            with self.subTest(root=root):
+                self.assertEqual(self.stem(root), self.stem(inflected))
 
     def test_stemming_replaces_rather_than_expands(self):
         # The strict gate counts matched query words, so a word may never become two tokens.
@@ -145,6 +188,36 @@ class TurkishStrictContextTest(VaultTestCase):
 
     def test_two_inflected_words_still_reach_strict_context(self):
         self.assertEqual(self.ids('kütüphanenin yedeklemeleri', strict=True), ['yedekleme'])
+
+
+class TurkishVerbIssueTest(VaultTestCase):
+    """Issue #430: the question and the note conjugate the same verb differently."""
+
+    def setUp(self):
+        super().setUp()
+        self.ingest('mem0', 'Mem0 kurulmasın; yerel hafıza yeterli, bulut bağımlılığı istenmiyor.',
+                    'knowledge/mem0.md')
+        self.ingest('tarih', 'Kaydın tarihi frontmatter alanında saklanır, dosya adında değil.',
+                    'knowledge/tarih.md')
+        self.ingest('docker', 'Docker imajı her sürümde yeniden derlenir.', 'knowledge/docker.md')
+        self.ingest('mutfak', 'Mutfak alışverişi: elma, ekmek, zeytinyağı.', 'notes/mutfak.md')
+
+    def context(self, query):
+        return [record['id'] for record in
+                self.store.context_for('claude', query, strict=True, budget_chars=2000)['records']]
+
+    def test_strict_context_matches_another_conjugation(self):
+        for passages in (True, False):
+            self.store.STRICT_PASSAGES = passages
+            with self.subTest(passages=passages):
+                self.assertEqual(self.context('Mem0 kurulmalı mı?'), ['mem0'])
+                self.assertEqual(self.context('kayıt tarihi nerede'), ['tarih'])
+
+    def test_imperative_prompt_stays_silent(self):
+        for passages in (True, False):
+            self.store.STRICT_PASSAGES = passages
+            with self.subTest(passages=passages):
+                self.assertEqual(self.context('şu testleri çalıştır ve sonucu göster'), [])
 
 
 class LegacyStateTest(VaultTestCase):
