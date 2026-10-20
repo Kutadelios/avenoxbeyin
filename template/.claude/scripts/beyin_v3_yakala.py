@@ -7951,12 +7951,13 @@ def configure_agent(vault, state, client, config_file=None, view=None, network=N
         config['ag'] = network
     _agent_validate_settings(config, vault)
     _agent_json(_agent_root(state) / 'config.json', config)
+    registered = _agent_register_toast(state, vault) if client != 'kapali' and os.name == 'nt' else None
     hint = ('Kayitli kart icin yakala ajan-gonder <id> --istek <istek> kullan' +
             (' (ekranda ' + ('Codex' if client == 'codex' else 'Claude Code') +
              ' penceresi acilir, canli izlenir).' if _agent_windowed(config)
-             else ' (arka planda; yakala ajan ile durum izlenir).'))
+             else ' (arka planda, bildirimle).'))
     return {'status': 'ajan_ayarlandi', 'ajan': client, 'gorunum': config['gorunum'], 'ag': config['ag'],
-            'timeout_seconds': config['timeout_seconds'],
+            'timeout_seconds': config['timeout_seconds'], 'bildirim_kayitli': registered,
             'ipucu': hint if client != 'kapali' else 'Yeni ajan isi baslatilmaz; calisan is guvenli durdurulur.'}
 
 
@@ -8810,6 +8811,10 @@ def _agent_end(vault, state, job, status, reason):
     except (OSError, ValueError) as exc:
         _agent_log(state, job['card_id'], 'Son kart guncellemesi bekliyor: ' + str(exc))
     _agent_log(state, job['card_id'], status + ': ' + reason)
+    event = 'approval' if job['card_reconcile'] else {
+        'completed': 'completed', 'failed': 'failed', 'approval_required': 'approval'}[status]
+    target = (job.get('outcome') or job['card_path']) if event == 'completed' else job['card_path']
+    _agent_notify(state, job['card_id'], event, target, vault=vault)
 
 
 def _agent_kill(owned):
@@ -8844,6 +8849,7 @@ def _agent_run_job(vault, state, job):
             job.update(agent_pid=owned.process.pid, agent_identity=_agent_process_identity(owned.process.pid))
             _agent_json(folder / 'job.json', job)
             _agent_log(state, job['card_id'], 'Basladi: ' + job['id'] + ' (' + job['client'] + ')')
+            _agent_notify(state, job['card_id'], 'started', job['card_path'], vault=vault)
             observed_session = False
             while owned.process.poll() is None:
                 if time.monotonic() - started >= config['timeout_seconds']:
@@ -8973,6 +8979,12 @@ def agent_status(vault, state):
                      for job in jobs[-50:]]}
 
 
+AGENT_TOAST_AUMID = 'AvenoxBeyin.Yakala.Agent'
+
+
+AGENT_TOAST_LINK = 'Beyin Yakala Ajan.lnk'
+
+
 def _agent_executable(client, configured=None):
     """Resolve a native CLI or bypass a known npm shim; never run a batch file.
 
@@ -9029,6 +9041,270 @@ def _agent_executable(client, configured=None):
             (not windows and not os.access(node, os.X_OK))):
         raise ValueError('Node dogrudan calistirilabilir bir dosya olmali.')
     return [str(node), str(script.absolute())]
+
+
+def _agent_toast_location():
+    appdata = Path(os.environ.get('APPDATA', str(Path.home() / 'AppData/Roaming')))
+    return appdata / 'Microsoft/Windows/Start Menu/Programs' / AGENT_TOAST_LINK
+
+
+def _agent_toast_marker(state):
+    return Path(state) / 'yakala' / 'ajan' / 'toast-registration.json'
+
+
+def _agent_toast_registered(state):
+    """A marker is valid only while the shortcut we installed is still intact."""
+    import hashlib
+    try:
+        marker = _agent_toast_marker(state)
+        if marker.is_symlink() or marker.stat().st_size > 16384:
+            return False
+        data = json.loads(marker.read_text(encoding='utf-8'))
+        link = _agent_toast_location()
+        return (isinstance(data, dict) and data.get('aumid') == AGENT_TOAST_AUMID and
+                data.get('shortcut') == str(link) and not link.is_symlink() and
+                0 < link.stat().st_size <= 1024 * 1024 and
+                data.get('sha256') == hashlib.sha256(link.read_bytes()).hexdigest())
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _agent_write_toast_shortcut(path, target, arguments, working_directory):
+    """Write an AUMID-bearing shell link with Unicode COM APIs, using ctypes only.
+
+    Only _agent_register_toast calls this helper, during explicit feature setup.
+    The PROPVARIANT borrows a live Python buffer for SetValue, which copies it;
+    PropVariantClear must not free that Python-owned buffer.
+    """
+    import ctypes as C
+    import uuid
+
+    class GUID(C.Structure):
+        _fields_ = [('data1', C.c_uint32), ('data2', C.c_uint16),
+                    ('data3', C.c_uint16), ('data4', C.c_ubyte * 8)]
+
+    class PROPERTYKEY(C.Structure):
+        _fields_ = [('fmtid', GUID), ('pid', C.c_uint32)]
+
+    class VALUE(C.Union):
+        _fields_ = [('text', C.c_void_p),
+                    ('storage', C.c_ubyte * (16 if C.sizeof(C.c_void_p) == 8 else 8))]
+
+    class PROPVARIANT(C.Structure):
+        _fields_ = [('vt', C.c_uint16), ('reserved1', C.c_uint16),
+                    ('reserved2', C.c_uint16), ('reserved3', C.c_uint16), ('value', VALUE)]
+
+    def guid(value):
+        return GUID.from_buffer_copy(uuid.UUID(value).bytes_le)
+
+    def check(result):
+        if result < 0:
+            raise OSError('Windows bildirim kimligi kaydedilemedi (HRESULT %08X).' % (result & 0xFFFFFFFF))
+
+    def call(pointer, index, types, *values):
+        table = C.cast(pointer, C.POINTER(C.POINTER(C.c_void_p))).contents
+        method = C.WINFUNCTYPE(C.c_int32, C.c_void_p, *types)(table[index])
+        return method(pointer, *values)
+
+    ole = C.WinDLL('ole32')
+    ole.CoInitializeEx.argtypes, ole.CoInitializeEx.restype = [C.c_void_p, C.c_uint32], C.c_int32
+    ole.CoUninitialize.argtypes, ole.CoUninitialize.restype = [], None
+    ole.CoCreateInstance.argtypes = [C.POINTER(GUID), C.c_void_p, C.c_uint32,
+                                     C.POINTER(GUID), C.POINTER(C.c_void_p)]
+    ole.CoCreateInstance.restype = C.c_int32
+    result = ole.CoInitializeEx(None, 2)  # COINIT_APARTMENTTHREADED
+    initialized = result >= 0
+    if not initialized and (result & 0xFFFFFFFF) != 0x80010106:  # an existing apartment is usable
+        check(result)
+    link, store, persist = C.c_void_p(), C.c_void_p(), C.c_void_p()
+    try:
+        clsid = guid('00021401-0000-0000-c000-000000000046')
+        iid_link = guid('000214f9-0000-0000-c000-000000000046')
+        iid_store = guid('886d8eeb-8cf2-4446-8d02-cdba1dbdcf99')
+        iid_persist = guid('0000010b-0000-0000-c000-000000000046')
+        check(ole.CoCreateInstance(C.byref(clsid), None, 1, C.byref(iid_link), C.byref(link)))
+        check(call(link, 20, [C.c_wchar_p], str(target)))  # IShellLinkW.SetPath
+        check(call(link, 11, [C.c_wchar_p], str(arguments)))  # SetArguments
+        check(call(link, 9, [C.c_wchar_p], str(working_directory)))  # SetWorkingDirectory
+        check(call(link, 7, [C.c_wchar_p], 'Beyin Yakala ajan bildirimleri'))  # SetDescription
+        check(call(link, 15, [C.c_int32], 7))  # SetShowCmd: SW_SHOWMINNOACTIVE
+        query = [C.POINTER(GUID), C.POINTER(C.c_void_p)]
+        check(call(link, 0, query, C.byref(iid_store), C.byref(store)))
+        key = PROPERTYKEY(guid('9f4c2855-9f79-4b39-a8d0-e1d42de1d5f3'), 5)
+        text = C.create_unicode_buffer(AGENT_TOAST_AUMID)
+        value = PROPVARIANT(vt=31)  # VT_LPWSTR
+        value.value.text = C.cast(text, C.c_void_p).value
+        check(call(store, 6, [C.POINTER(PROPERTYKEY), C.POINTER(PROPVARIANT)],
+                   C.byref(key), C.byref(value)))  # IPropertyStore.SetValue
+        check(call(store, 7, []))  # Commit
+        check(call(link, 0, query, C.byref(iid_persist), C.byref(persist)))
+        check(call(persist, 6, [C.c_wchar_p, C.c_int32], str(path), 1))  # IPersistFile.Save
+    finally:
+        for pointer in (persist, store, link):
+            if pointer:
+                call(pointer, 2, [])  # IUnknown.Release
+        if initialized:
+            ole.CoUninitialize()
+
+
+def _agent_register_toast(state, vault=None):
+    """Best-effort per-user toast identity setup; call only on explicit enable.
+
+    Never replace an unrelated shortcut. False is a setup warning, not a reason
+    to prevent capture or agent work. No registry or machine-wide settings change.
+    """
+    import hashlib
+    temporary = marker_temp = None
+    try:
+        if sys.platform != 'win32' or vault is None:
+            return False
+        vault = Path(vault).resolve(strict=True)
+        if not vault.is_dir():
+            return False
+        path = _agent_toast_location()
+        if path.exists() and not _agent_toast_registered(state):
+            return False
+        if path.is_symlink():
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        marker = _agent_toast_marker(state)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        target = Path(sys.executable).resolve(strict=True)
+        script = Path(__file__).resolve(strict=True)
+        arguments = subprocess.list2cmdline([str(script), '--vault', str(vault), 'ajan'])
+        fd, name = tempfile.mkstemp(prefix='.yakala-agent-', suffix='.lnk', dir=path.parent)
+        os.close(fd)
+        temporary = Path(name)
+        _agent_write_toast_shortcut(temporary, target, arguments, vault)
+        if not 0 < temporary.stat().st_size <= 1024 * 1024:
+            return False
+        digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
+        # Only this feature's own last-verified shortcut may be replaced.
+        if path.exists() and not _agent_toast_registered(state):
+            return False
+        os.replace(temporary, path)
+        temporary = None
+        data = {'aumid': AGENT_TOAST_AUMID, 'shortcut': str(path), 'sha256': digest}
+        fd, name = tempfile.mkstemp(prefix='.toast-', suffix='.json', dir=marker.parent)
+        marker_temp = Path(name)
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            json.dump(data, stream, ensure_ascii=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(marker_temp, marker)
+        marker_temp = None
+        return True
+    except Exception:
+        return False
+    finally:
+        for item in (temporary, marker_temp):
+            if item is not None:
+                try:
+                    item.unlink()
+                except OSError:
+                    pass
+
+
+def _agent_notification_uri(vault, target):
+    """Open only an existing vault note through its default file association."""
+    path = _agent_checked_path(Path(vault).resolve(), _agent_parts(target))
+    if not path.is_file() or path.suffix.lower() not in ('.md', '.txt'):
+        raise ValueError('Bildirim hedefi mevcut bir not olmali.')
+    return path.resolve().as_uri()
+
+
+def _agent_notify(state, card_id, event, target=None, *, vault=None):
+    """Send fixed status text and a checked note URI; failure never changes job status.
+
+    True means the notification API accepted the call, not that the user saw it.
+    Quiet hours, OS permissions, and desktop policy can suppress presentation.
+    """
+    import base64
+    from html import escape
+    messages = {
+        'queued': ('Beyne atıldı', 'İstek ajan kuyruğuna alındı.'),
+        'started': ('Beyin ajanı başladı', 'İstek arka planda işleniyor.'),
+        'completed': ('Beyin ajanı bitirdi', 'Sonuç ve kaynak bağlantısı vault hafızasına kaydedildi.'),
+        'failed': ('Beyin ajanı tamamlayamadı', 'Kart ve günlükte hata bilgisi var.'),
+        'approval': ('Beyin ajanı onay bekliyor', 'Devam etmek için kartı bir ajan oturumunda açın.'),
+    }
+    aliases = {'start': 'started', 'running': 'started', 'success': 'completed',
+               'done': 'completed', 'error': 'failed', 'hata': 'failed',
+               'onay-bekliyor': 'approval', 'islendi': 'completed', 'ajanda': 'started'}
+
+    def log(message):
+        try:
+            _agent_log(state, card_id, message)
+        except Exception:
+            pass
+
+    try:
+        if not isinstance(card_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', card_id):
+            return False
+        event = aliases.get(event, event)
+        if event not in messages:
+            log('notification=unknown-event')
+            return False
+        title, body = messages[event]
+        options = {'stdin': subprocess.DEVNULL, 'stdout': subprocess.DEVNULL,
+                   'stderr': subprocess.DEVNULL, 'timeout': 5, 'check': True,
+                   'close_fds': True}
+        if sys.platform == 'win32':
+            if not _agent_toast_registered(state):
+                log('notification=log-only reason=toast-identity-unavailable event=' + event)
+                return False
+            root = Path(os.environ.get('SystemRoot', r'C:\Windows'))
+            powershell = root / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+            if not powershell.is_file():
+                log('notification=log-only reason=powershell-unavailable event=' + event)
+                return False
+            launch = ''
+            if target is not None and vault is not None:
+                try:
+                    launch = _agent_notification_uri(vault, target)
+                except (OSError, ValueError, TypeError):
+                    log('notification=target-rejected event=' + event)
+            # This script is constant. JSON stdin becomes XML text nodes and
+            # attributes, never PowerShell source, XML markup, or a shell command.
+            script = r'''$ErrorActionPreference = 'Stop'
+$payload = ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd())
+$null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]
+$null = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType=WindowsRuntime]
+$xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+$nodes = $xml.GetElementsByTagName('text')
+$null = $nodes.Item(0).AppendChild($xml.CreateTextNode([string]$payload.title))
+$null = $nodes.Item(1).AppendChild($xml.CreateTextNode([string]$payload.body))
+if ($payload.launch) {
+    $xml.DocumentElement.SetAttribute('activationType', 'protocol')
+    $xml.DocumentElement.SetAttribute('launch', [string]$payload.launch)
+}
+$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('AvenoxBeyin.Yakala.Agent')
+$setting = $notifier.Setting  # Windows PowerShell 5.1 projects this WinRT enum as null
+if ($null -ne $setting -and [string]$setting -ne 'Enabled') { exit 2 }
+$notifier.Show($toast)
+'''
+            encoded = base64.b64encode(script.encode('utf-16le')).decode('ascii')
+            command = [str(powershell), '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded]
+            options.pop('stdin')
+            options['input'] = json.dumps({'title': title, 'body': body, 'launch': launch}, ensure_ascii=True).encode('ascii')
+            options['creationflags'] = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
+        elif sys.platform == 'darwin':
+            executable = '/usr/bin/osascript'
+            script = 'on run argv\n display notification (item 2 of argv) with title (item 1 of argv)\nend run'
+            command = [executable, '-e', script, title, body]
+        else:
+            executable = shutil.which('notify-send')
+            if not executable:
+                log('notification=log-only reason=notify-send-unavailable event=' + event)
+                return False
+            command = [executable, '--app-name=Beyin Yakala', '--', title, escape(body)]
+        subprocess.run(command, **options)
+        log('notification=accepted event=' + event)
+        return True
+    except Exception:
+        log('notification=log-only reason=backend-failed')
+        return False
 
 
 _AGENT_MCP_INPUT = 1024 * 1024
