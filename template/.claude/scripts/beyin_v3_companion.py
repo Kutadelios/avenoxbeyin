@@ -535,6 +535,23 @@ def clip(text, budget, tail=False, both=False):
     return marker + text[-keep:] if tail else text[:keep] + marker
 
 
+def project_rule_directory(vault, folder):
+    """Find the real spelling of one mapped path without walking the vault tree."""
+    from beyin_v3 import _path_redirected
+    from beyin_v3_projects import _scope_key, _scope_path
+    try:
+        current = Path(vault).resolve(strict=True)
+        for part in _scope_path(folder).split('/'):
+            matches = [entry for entry in current.iterdir()
+                       if _scope_key(entry.name) == _scope_key(part)]
+            if len(matches) != 1 or _path_redirected(matches[0]) or not matches[0].is_dir():
+                return None
+            current = matches[0]
+        return current
+    except (ValueError, OSError, RuntimeError):
+        return None
+
+
 def excerpt_person(text, limit=400):
     """Excerpt essential identity and declaration from a person note.
 
@@ -601,11 +618,15 @@ def person_sources(vault, target=None):
     return found
 
 
-def context(store, budget, session, harness, query='', receipt='', warning='', project=None, report=None):
+def context(store, budget, session, harness, query='', receipt='', warning='', project=None, report=None,
+            rules_project=None):
     """Budget actual displayed text, not repeated JSON metadata; never cut a record header.
 
     A dict passed as report receives the companion Kurallar.md share of the returned text
-    (#374); doctor reads it, the hooks pass nothing."""
+    (#374); doctor reads it, the hooks pass nothing. project scopes rules and retrieval;
+    rules_project, the project found from the working directory, scopes the rules alone (#288)."""
+    if not (isinstance(rules_project, str) and rules_project.strip()):
+        rules_project = project
     target = directory(store.vault_root)
     hygiene_line = ''
     if target is not None:
@@ -619,7 +640,7 @@ def context(store, budget, session, harness, query='', receipt='', warning='', p
         return clip(header + 'Multiple companion directories: read the user-selected identity sources.\n', budget)
     snapshot = store.source_snapshot(NAMES, budget_chars=200000,
                                      source_directory=target.relative_to(store.vault_root).as_posix(),
-                                     text_transform=lambda name, text: excerpt(name, text, project=project))
+                                     text_transform=lambda name, text: excerpt(name, text, project=rules_project))
     records = snapshot['records']
     notice = ''
     if snapshot['missing_sources']:
@@ -628,13 +649,29 @@ def context(store, budget, session, harness, query='', receipt='', warning='', p
         notice += 'Changed companion sources excluded; read current files.\n'
     sections = [(f'\n[{r["source"]}]\n', r['text'], Path(r['source']).name)
                 for r in records]
-    if project and isinstance(project, str) and project.strip():
-        proj_clean = project.strip()
+    if rules_project and isinstance(rules_project, str) and rules_project.strip():
+        proj_clean = rules_project.strip()
         if not (proj_clean.startswith(('/', '\\')) or '..' in proj_clean.replace('\\', '/').split('/')):
+            candidate_dirs = []
+            try:
+                from beyin_v3_projects import read_project_scopes, _scope_key
+                scopes = read_project_scopes(store.vault_root)
+                if scopes and scopes.get('folders'):
+                    p_key = _scope_key(proj_clean)
+                    for f_key, p_name in scopes['folders']:
+                        if _scope_key(p_name) == p_key:
+                            candidate_dirs.append(project_rule_directory(store.vault_root, f_key))
+            except Exception:
+                pass
             for folder in ('projects', 'Projeler', 'projeler'):
-                found = False
+                candidate_dirs.append(project_rule_directory(store.vault_root, folder + '/' + proj_clean))
+
+            found = False
+            for cand_dir in candidate_dirs:
+                if cand_dir is None:
+                    continue
                 for p_name in ('Kurallar.md', '.rules.md', 'rules.md'):
-                    lexical = store.vault_root / folder / proj_clean / p_name
+                    lexical = cand_dir / p_name
                     from beyin_v3 import _path_redirected
                     if any(_path_redirected(part) for part in (lexical, *lexical.parents)
                            if part != store.vault_root and part.is_relative_to(store.vault_root)):
@@ -646,7 +683,7 @@ def context(store, budget, session, harness, query='', receipt='', warning='', p
                             project_snapshot = store.source_snapshot(
                                 [p_name], source_directory=p_rel, budget_chars=200000,
                                 text_transform=lambda name, text: filter_scoped_rules(
-                                    without_v2_window(text), active_project=project))
+                                    without_v2_window(text), active_project=rules_project))
                             for record in project_snapshot['records']:
                                 if record['text'].strip():
                                     sections.append((f"\n[{record['source']}]\n", record['text'], 'Kurallar.md'))

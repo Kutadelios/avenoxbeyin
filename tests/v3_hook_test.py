@@ -1276,6 +1276,49 @@ runpy.run_path({str(HOOK)!r}, run_name='__main__')
                               origin={'kind': 'channel', 'server': 'telegram'})
         self.assertIn('Synthetic Reviewer', resp['hookSpecificOutput']['additionalContext'])
 
+    def test_hook_resolves_project_from_vault_cwd_without_explicit_payload(self):
+        """Hook resolves active project from cwd within vault and injects its Kurallar.md (#288)."""
+        engine = self.seed()
+        proj_dir = self.vault / 'projects/alpha'
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        (proj_dir / 'Kurallar.md').write_text('# Alpha Kurallari\n- **kural:** ALPHA_HOOK_RULE\n', encoding='utf-8')
+        (self.vault / 'notes/alpha_note.md').write_text('---\n{"id": "alpha-note", "kind": "note", "project": "alpha", "visibility": "internal"}\n---\nAlpha Note\n', encoding='utf-8')
+        engine.sync()
+
+        # SessionStart inside projects/alpha without payload['project']
+        payload = dict(self.payload, hook_event_name='SessionStart', cwd=str(proj_dir), prompt='Alpha query')
+        payload.pop('project', None)
+        response = self.invoke(payload, 'claude')
+        context = response.get('hookSpecificOutput', {}).get('additionalContext', '')
+        self.assertIn('ALPHA_HOOK_RULE', context)
+
+        # Negative control: SessionStart at vault root does not inject project rules
+        root_payload = dict(self.payload, hook_event_name='SessionStart', cwd=str(self.vault), prompt='Root query')
+        root_payload.pop('project', None)
+        root_response = self.invoke(root_payload, 'claude')
+        root_context = root_response.get('hookSpecificOutput', {}).get('additionalContext', '')
+        self.assertNotIn('ALPHA_HOOK_RULE', root_context)
+
+    def test_cwd_project_selects_rules_without_narrowing_retrieval(self):
+        """A project found from cwd picks the project rules only; retrieval keeps notes without that field (#288)."""
+        from beyin_v3_sync import SyncEngine
+        general = self.vault / 'notes/genel.md'
+        general.parent.mkdir()
+        general.write_text('---\n' + json.dumps({'id': 'genel', 'kind': 'task', 'revision': 1, 'status': 'active',
+                                                 'visibility': 'internal'}) +
+                           '\n---\nKuzeyrüzgarı kalibrasyonunu Synthetic Reviewer yürütüyor.\n', encoding='utf-8')
+        alpha = self.vault / 'projects/alpha'
+        alpha.mkdir(parents=True)
+        (alpha / 'Kurallar.md').write_text('# Alpha\n- **kural:** ALPHA_ONLY_RULE\n', encoding='utf-8')
+        SyncEngine(self.vault, self.state).sync()
+        turn = self.lifecycle('UserPromptSubmit', 'alpha-turn', 'claude', prompt='Kuzeyrüzgarı kalibrasyonunu kim yürütüyor',
+                              cwd=str(alpha))
+        self.assertIn('Synthetic Reviewer', turn.get('hookSpecificOutput', {}).get('additionalContext', ''))
+        opening = self.lifecycle('SessionStart', 'alpha-open', 'claude', cwd=str(alpha))
+        context = opening.get('hookSpecificOutput', {}).get('additionalContext', '')
+        self.assertIn('ALPHA_ONLY_RULE', context)
+        self.assertIn('Synthetic Reviewer', context)
+
 
 
 class HookFailOpenTest(unittest.TestCase):

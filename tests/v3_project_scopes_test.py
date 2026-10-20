@@ -366,6 +366,72 @@ class ProjectScopesTest(unittest.TestCase):
         self.assertEqual(added['status'], 'saved')
         self.assertIn('Projeler/Beta', added['folders'])
 
+    def test_resolve_active_project_conventions(self):
+        """resolve_active_project resolves a vault working directory to its project (#288, #403)."""
+        import beyin_v3_projects as projects
+        # Standard conventions: projects/<name>, Projeler/<name>, projeler/<name>
+        (self.vault / 'projects/alpha').mkdir(parents=True, exist_ok=True)
+        self.assertEqual(projects.resolve_active_project(self.vault, self.vault / 'projects/alpha'), 'alpha')
+
+        (self.vault / 'Projeler/Beta/nested').mkdir(parents=True, exist_ok=True)
+        self.assertEqual(projects.resolve_active_project(self.vault, self.vault / 'Projeler/Beta/nested'), 'Beta')
+
+        # Negative controls: vault root itself or outside directories return None
+        self.assertIsNone(projects.resolve_active_project(self.vault, self.vault))
+        outside = Path(self.tmp.name) / 'outside'
+        outside.mkdir(parents=True, exist_ok=True)
+        self.assertIsNone(projects.resolve_active_project(self.vault, outside))
+
+    def test_resolve_active_project_from_scoped_folder_and_companion_loading(self):
+        """Active project resolves from .beyin-projects.json and companion loads its Kurallar.md (#288)."""
+        import beyin_v3_projects as projects
+        import beyin_v3_companion as companion
+        custom_folder = '🏰 300-Projects/serai'
+        (self.vault / custom_folder).mkdir(parents=True, exist_ok=True)
+        self.scopes({'folders': {custom_folder: 'serai'}})
+
+        # CWD inside mapped folder resolves project
+        self.assertEqual(projects.resolve_active_project(self.vault, self.vault / custom_folder), 'serai')
+
+        # Companion context loads rules from this custom mapped project folder
+        comp_dir = self.vault / '🔮 850-Companion'
+        comp_dir.mkdir(parents=True, exist_ok=True)
+        (comp_dir / 'Core.md').write_text('# Core\nKimlik.\n', encoding='utf-8')
+        (comp_dir / 'Kurallar.md').write_text('# Kurallar\n- **kural:** GLOBAL_RULE\n- [kapsam: other] OTHER_RULE\n', encoding='utf-8')
+        (comp_dir / 'Last-Session.md').write_text('# Son oturum\n', encoding='utf-8')
+        (comp_dir / 'Threads.md').write_text('# Threads\n', encoding='utf-8')
+        (self.vault / custom_folder / 'Kurallar.md').write_text('# Serai Kuralları\n- **kural:** SERAI_CUSTOM_RULE\n', encoding='utf-8')
+
+        for f in ('Core.md', 'Kurallar.md', 'Last-Session.md', 'Threads.md'):
+            self.store.ingest({'id': f, 'kind': 'note', 'status': 'active',
+                               'source': f'🔮 850-Companion/{f}', 'text': (comp_dir / f).read_text(encoding='utf-8')})
+        self.store.ingest({'id': 'serai-rules', 'kind': 'note', 'status': 'active',
+                           'source': f'{custom_folder}/Kurallar.md', 'text': (self.vault / custom_folder / 'Kurallar.md').read_text(encoding='utf-8')})
+
+        text = companion.context(self.store, 8000, 'test-session', 'claude', project='serai')
+        self.assertIn('SERAI_CUSTOM_RULE', text)
+        self.assertIn('GLOBAL_RULE', text)
+        self.assertNotIn('OTHER_RULE', text)
+
+    def test_mapped_rules_preserve_path_spelling_and_visibility(self):
+        import beyin_v3_companion as companion
+        from beyin_v3_sync import SyncEngine
+        folder = self.vault / 'Custom/MiXeD'
+        folder.mkdir(parents=True)
+        self.scopes({'folders': {'CUSTOM/mixed': 'alpha'}})
+        source = folder / 'Kurallar.md'
+        for fields, visible in (({'visibility': 'internal'}, True),
+                                ({'visibility': 'private'}, False),
+                                ({'visibility': 'internal', 'trust': 'untrusted'}, False)):
+            with self.subTest(fields=fields):
+                source.write_text('---\n' + json.dumps(dict(id='alpha-rules', kind='note', **fields)) +
+                                  '\n---\n- **kural:** MAPPED_RULE_SENTINEL\n', encoding='utf-8')
+                SyncEngine(self.vault, self.store.state_dir).sync()
+                text = companion.context(self.store, 10000, 'mapped-rules', 'claude', rules_project='alpha')
+                self.assertEqual('\n[Custom/MiXeD/Kurallar.md]\n' in text, visible)
+                self.assertEqual('MAPPED_RULE_SENTINEL' in text, visible)
+                self.assertLessEqual(len(text), 10000)
+
 
 class TestResolveActiveProject(unittest.TestCase):
     def setUp(self):
