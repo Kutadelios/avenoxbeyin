@@ -603,17 +603,19 @@ class SyncEngine:
         if not isinstance(relative, str) or Path(relative).is_absolute() or '..' in Path(relative).parts:
             raise ValueError('relative source required')
         path = self.root / relative
+        # Non-strict resolve no longer raises for loops on Python 3.13+.
+        # Reject links before resolution can change their spelling or target.
+        cursor = path
+        while cursor != self.root:
+            if cursor.is_symlink():
+                raise ValueError('symlink source rejected')
+            cursor = cursor.parent
         try:
             resolved = path.resolve()
         except (RuntimeError, OSError):
             raise ValueError('symlink source rejected')
         if not resolved.is_relative_to(self.root):
             raise ValueError('source outside vault')
-        cursor = path
-        while cursor != self.root:
-            if cursor.is_symlink():
-                raise ValueError('symlink source rejected')
-            cursor = cursor.parent
         if existing and not path.is_file():
             raise ValueError('source missing')
         return path
@@ -628,7 +630,7 @@ class SyncEngine:
         cursor, boundary = str(path), str(self.root.parent)
         while cursor != boundary:
             if _path_redirected(cursor):
-                # Preserve the original outside-vault vs symlink rejection reason.
+                # Apply the same link rejection policy as direct source access.
                 checked = self._path(relative, existing=True)
                 return checked, checked.resolve()
             cursor = os.path.dirname(cursor)
