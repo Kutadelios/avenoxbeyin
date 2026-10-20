@@ -29,10 +29,18 @@ def working_directory(payload, harness):
         if value is None:
             value = os.environ.get('CLAUDE_PROJECT_DIR') if harness == 'claude' else None
         if value is None:
-            value = os.getcwd()
-    if not isinstance(value, str) or not value or not Path(value).is_absolute():
+            try:
+                value = os.getcwd()
+            except OSError:
+                return None
+    if not isinstance(value, str) or not value:
         return None
-    return Path(value).resolve()
+    try:
+        path = Path(value)
+        return path.resolve() if path.is_absolute() else None
+    except (RuntimeError, OSError, ValueError):
+        # Deleted process directories, invalid paths and symlink loops carry no origin.
+        return None
 
 
 def origin(payload, harness, vault=None):
