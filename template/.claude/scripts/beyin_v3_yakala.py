@@ -7010,7 +7010,11 @@ def default_state(vault):
 def resolve_state(vault):
     config = Path(vault) / '.beyin-runtime.json'
     try:
-        pinned = Path(json.loads(config.read_text(encoding='utf-8'))['state']).expanduser()
+        raw_state = json.loads(config.read_text(encoding='utf-8'))['state']
+        if not isinstance(raw_state, str) or '\0' in raw_state:
+            pinned = None
+        else:
+            pinned = Path(raw_state).expanduser()
     except (OSError, ValueError, KeyError, TypeError):
         pinned = None
     # A pin from another OS through a synced vault is not absolute here (#249).

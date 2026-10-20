@@ -35,6 +35,32 @@ class YakalaSecurityTest(unittest.TestCase):
     def windows(self):
         return patch.object(yakala, 'os', types.SimpleNamespace(**{**vars(os), 'name': 'nt'}))
 
+    def test_invalid_state_pin_falls_back_before_path_construction(self):
+        invalid = str(self.root / 'bad') + '\0state'
+        for raw in (invalid, None, 123, ['state']):
+            with self.subTest(raw=raw):
+                (self.vault / '.beyin-runtime.json').write_text(
+                    json.dumps({'state': raw}), encoding='utf-8')
+                original_path = yakala.Path
+
+                def checked_path(value):
+                    if value == invalid:
+                        self.fail('invalid state pin reached pathlib')
+                    return original_path(value)
+
+                with patch.object(yakala, 'Path', side_effect=checked_path), \
+                        patch.object(yakala, 'default_state', return_value=self.root / 'fallback-state'):
+                    actual = yakala.resolve_state(self.vault)
+                self.assertEqual(actual, self.root / 'fallback-state')
+                # The fallback is usable by callers that create their runtime directory.
+                actual.mkdir(parents=True, exist_ok=True)
+
+    def test_valid_custom_state_pin_is_preserved(self):
+        state = self.root.resolve() / 'custom-state'
+        (self.vault / '.beyin-runtime.json').write_text(
+            json.dumps({'state': str(state)}), encoding='utf-8')
+        self.assertEqual(yakala.resolve_state(self.vault), state)
+
     def test_windows_url_selection_is_private_on_new_and_existing_cards(self):
         with self.windows():
             first = yakala.capture(self.vault, url='https://example.com/a', text='musteri adresi')
