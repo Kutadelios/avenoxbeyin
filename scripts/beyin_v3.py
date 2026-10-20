@@ -893,6 +893,11 @@ def parser():
     triage = sub.add_parser("triage", help="Vault digestion report: inbox items, stale tasks, and weekly knowledge summary")
     triage.add_argument("--stale-days", type=int, default=14, help="Days of inactivity before an open task is considered stale (default: 14)")
     triage.add_argument("--digest-days", type=int, default=7, help="Days to look back for knowledge notes and outcomes (default: 7)")
+    audit_parser = sub.add_parser("audit", help="Advisory memory auditor: detect near-duplicates, staleness, and contradictions")
+    audit_parser.add_argument("target", nargs="?", default=None, help="Specific markdown note to audit against vault memory (optional)")
+    audit_parser.add_argument("--threshold", type=float, default=0.60, help="Lexical overlap threshold 0.0..1.0 (default: 0.60)")
+    audit_parser.add_argument("--min-shared", type=int, default=5, help="Minimum shared topical terms (default: 5)")
+    audit_parser.add_argument("--limit", type=int, default=20, help="Maximum findings to return (default: 20)")
     settings = sub.add_parser("preferences", help="Control automatic local checks and injected context")
     settings.add_argument("--profile", choices=("normal", "economical", "manual"))
     settings.add_argument("--auto-sync", choices=("on", "off"))
@@ -1541,6 +1546,17 @@ def main(argv=None, return_result=False):
             _ensure_scripts_path()
             import beyin_v3_triage as triage_module
             result = triage_module.triage(vault, state=state, stale_days=args.stale_days, digest_days=args.digest_days)
+        elif args.command == "audit":
+            _ensure_scripts_path()
+            import beyin_v3_audit as audit_module
+            result = audit_module.audit_memory(
+                vault,
+                state=state,
+                target_file=args.target,
+                threshold=args.threshold,
+                min_shared=args.min_shared,
+                limit=args.limit,
+            )
         elif args.command == "ingest":
             payload = read_json(args.file)
             result = [store.ingest(record) for record in payload] if isinstance(payload, list) else store.ingest(payload)
