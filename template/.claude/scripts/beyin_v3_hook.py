@@ -115,6 +115,15 @@ def atomic(path, data):
     _safe_replace(temporary, path)
 
 
+def record_error(state, exc):
+    """hook-error.json is a diagnostic only. A state folder that refuses the write (read-only,
+    full disk) must not turn the fail-open handler itself into a traceback (#417)."""
+    try:
+        atomic(Path(state) / "hook-error.json", {"at": time.time(), "error": type(exc).__name__})
+    except OSError:
+        pass
+
+
 def output_context(harness, event, text):
     # OpenCode's vault plugin parses the Claude/Codex shape, so one parser serves three clients.
     return {"injectSteps": [{"ephemeralMessage": text}]} if harness == "antigravity" else {"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}
@@ -432,7 +441,7 @@ def drain_queue(vault, state):
         if skills.get("unmanaged"):
             result = dict(result, skill_unmanaged=skills["unmanaged"])
     except Exception as exc:
-        atomic(state / "hook-error.json", {"at": time.time(), "error": type(exc).__name__})
+        record_error(state, exc)
         return {"processed": 0, "failed": len(pending), "pending": len(pending)}
     atomic(state / "hook-health.json", {"at": time.time(), "worker_pid": os.getpid(), "sync": result})
     # A degraded scan is complete but excluded one or more invalid sources. The
@@ -764,7 +773,7 @@ def main():
                    "V3 automatic check deferred by your interval preference. Read current sources or use beyin.py context for fresh information.")
             print(json.dumps(output_context(args.harness, event, notice + msg)))
             return
-        atomic(state / "hook-error.json", {"at": time.time(), "error": type(exc).__name__})
+        record_error(state, exc)
         if not args.metadata_only and locals().get("event") in ("SessionStart", "UserPromptSubmit"):
             print(json.dumps(output_context(args.harness, event, notice + "V3 source sync failed or conflicted; metadata remains queued. Run the local CLI doctor and verify current Markdown sources.")))
         else:
