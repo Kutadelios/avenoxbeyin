@@ -6355,6 +6355,8 @@ class _WindowsPopupBroker:
                 # empty. Keep the protocol phase so those packets are still accepted.
                 if pipe_deadline is None:
                     pipe_deadline = time.monotonic() + 1
+                    # Drain once before checking an expired activation deadline too.
+                    continue
             if ((stage in ('warming', 'activating', 'closing') and time.monotonic() >= deadline)
                     or (pipe_deadline is not None and stage != 'closing' and time.monotonic() >= pipe_deadline)):
                 if capture_id and not done:

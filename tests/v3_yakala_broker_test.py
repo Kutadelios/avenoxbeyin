@@ -260,6 +260,21 @@ class BrokerRecoveryTest(unittest.TestCase):
         self.assertNotIn('gecici hata', self.log())
         self.assertNotIn('sonucu bilinmiyor', self.log())
 
+    def test_final_packets_at_activation_deadline_are_drained_before_recovery(self):
+        # Expire the handshake before the first receive after ACTIVATE, without
+        # relying on scheduling delays. That receive queues ACTIVE/DONE and EOF.
+        with patch.object(self.broker_class, 'ACTIVE_TIMEOUT', 0):
+            self.start('eof_delayed_active_done', 'normal')
+            self.press()
+            self.assert_recovered()
+        previous = self.owners[0]
+        self.assertTrue(previous.eof_queued)
+        self.assertTrue(previous.done_seen)
+        self.assertEqual(sum(m['type'] == 'ACTIVATE' for m in previous.sent), 1)
+        self.assertEqual(self.owners[-1].sent, [])
+        self.assertNotIn('gecici hata', self.log())
+        self.assertNotIn('sonucu bilinmiyor', self.log())
+
     def test_stuck_reader_after_exit_has_bounded_wait_and_does_not_replay_capture(self):
         self.start('exit_stuck_reader', 'normal')
         self.press()
