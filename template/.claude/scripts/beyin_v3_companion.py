@@ -325,7 +325,21 @@ def excerpt(name, text, project=None):
     if name == 'Last-Session.md':
         previous = re.search(r'(?im)^## (?:Previous|Önceki)', text)
         if previous:
-            return text[:previous.start()]
+            head = text[:previous.start()]
+            tail = text[previous.start():]
+            pointers = []
+            for line in tail.splitlines():
+                s = line.strip()
+                if re.match(r'(?im)^## (?:Previous|Önceki)', s):
+                    pointers.append(line)
+                elif re.match(r'(?im)^(?:Arşiv(?:lenen metin)?|Archive(?:d text)?):', s):
+                    pointers.append(line)
+                    break
+                elif re.match(r'(?im)^## ', s):
+                    break
+            if len(pointers) > 1:
+                return head + '\n'.join(pointers) + '\n'
+            return head
     if name == 'Kurallar.md':
         return filter_scoped_rules(without_v2_window(text), active_project=project)
     return text
@@ -538,6 +552,72 @@ def project_rule_directory(vault, folder):
         return None
 
 
+def excerpt_person(text, limit=400):
+    """Excerpt essential identity and declaration from a person note.
+
+    Preserves title, Beyan, Temaslar and key facts, while omitting empty template placeholders.
+    """
+    lines = []
+    current_section = None
+    section_lines = []
+
+    def flush_section():
+        nonlocal current_section, section_lines
+        if not current_section:
+            lines.extend(section_lines)
+        else:
+            substantive = [l for l in section_lines if l.strip() and not l.strip().startswith('<!--')]
+            if len(substantive) > 1:
+                lines.extend(substantive)
+        section_lines = []
+
+    for line in text.splitlines():
+        if line.startswith('## '):
+            flush_section()
+            current_section = line.strip()
+            section_lines = [line]
+        elif current_section:
+            section_lines.append(line)
+        else:
+            lines.append(line)
+    flush_section()
+
+    result = '\n'.join(lines).strip()
+    return result[:limit] if len(result) > limit else result
+
+
+def person_sources(vault, target=None):
+    """Find user-owned person note sources in order, bounded to protect opening budget."""
+    vault = Path(vault).resolve()
+    candidates = ['notes/kisiler', 'notes/kisi', 'kisiler']
+    if target is not None:
+        target = Path(target).resolve()
+        if target.is_relative_to(vault):
+            rel = target.relative_to(vault).as_posix()
+            candidates.extend([f'{rel}/kisiler', f'{rel}/notes/kisiler'])
+    found = []
+    seen = set()
+    from beyin_v3 import _path_redirected
+    for folder in candidates:
+        lexical = vault / folder
+        if any(_path_redirected(part) for part in (lexical, *lexical.parents)
+               if part != vault and part.is_relative_to(vault)):
+            continue
+        try:
+            resolved = lexical.resolve()
+            if resolved.is_relative_to(vault) and resolved.is_dir() and not resolved.is_symlink():
+                for p_file in sorted(resolved.glob('*.md')):
+                    if (p_file.is_file() and not p_file.is_symlink() and
+                            not p_file.name.startswith('.') and p_file not in seen):
+                        seen.add(p_file)
+                        found.append(p_file)
+                        if len(found) >= 50:
+                            return found
+        except (ValueError, OSError):
+            continue
+    return found
+
+
 def context(store, budget, session, harness, query='', receipt='', warning='', project=None, report=None,
             rules_project=None):
     """Budget actual displayed text, not repeated JSON metadata; never cut a record header.
@@ -614,6 +694,33 @@ def context(store, budget, session, harness, query='', receipt='', warning='', p
                         pass
                 if found:
                     break
+    all_persons = person_sources(store.vault_root, target=target)
+    person_count = 0
+    for p_file in all_persons:
+        if person_count >= 5:
+            break
+        try:
+            p_rel = p_file.relative_to(store.vault_root.resolve()).parent.as_posix()
+            p_snapshot = store.source_snapshot(
+                [p_file.name], source_directory=p_rel, budget_chars=2000,
+                text_transform=lambda name, text: excerpt_person(text))
+            for record in p_snapshot['records']:
+                body = record['text'].strip()
+                if body:
+                    try:
+                        from beyin_v3_sync import parse
+                        meta, _ = parse(p_file.read_text(encoding='utf-8', errors='replace'))
+                        facts = meta.get('facts')
+                        if isinstance(facts, dict) and facts:
+                            fact_items = [f'{k}: {v}' for k, v in facts.items() if v and isinstance(v, (str, int))]
+                            if fact_items:
+                                body = f'{body}\n[Bilgiler: {" · ".join(fact_items)}]'
+                    except Exception:
+                        pass
+                    sections.append((f"\n[{record['source']}]\n", clip(body, 400), 'Kisi.md'))
+                    person_count += 1
+        except (ValueError, OSError):
+            pass
     fixed = len(header) + len(notice) + sum(len(label) for label, _, _ in sections)
     if fixed > budget:
         return clip(header + notice + 'Read companion files: ' + ', '.join(r['source'] for r in records), budget)
@@ -676,6 +783,15 @@ def context(store, budget, session, harness, query='', receipt='', warning='', p
     else:
         ranked = {'records': []}
     used = {r['source'] for r in records}
+    for label, _, _ in sections:
+        clean = label.strip()
+        if clean.startswith('[') and clean.endswith(']'):
+            used.add(clean[1:-1].strip())
+    try:
+        used.update(p.relative_to(store.vault_root.resolve()).as_posix()
+                    for p in all_persons)
+    except (ValueError, OSError):
+        pass
     retrieval_used = 0
     retrieval_cap = retrieval_share if companion_clipped else remaining
     for record in ranked.get('records', []):
