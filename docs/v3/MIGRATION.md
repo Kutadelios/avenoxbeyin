@@ -235,7 +235,10 @@ count can therefore be smaller than `potential_missing_receipts`, which counts
 every finished checkpoint. Checkpoints recorded before this field existed have
 no prompt marker, so the ratio starts with sessions after the upgrade and stays
 `null` until one is observed. A receipt whose `created_at` cannot be read never
-covers a session.
+covers a session. The global bridge installs no UserPromptSubmit, so sessions
+outside the vault never count; `without_prompt` reports how many finished
+sessions were left out, and `without_prompt_with_receipt` how many of them
+wrote a receipt anyway.
 
 ## Validation boundary
 
