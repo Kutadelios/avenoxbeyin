@@ -13,7 +13,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import posixpath
 import time
+import unicodedata
 
 LEARNING_STATE_FILE = "learning-state.jsonl"
 LEARNING_LOCK_FILE = "learning-state.lock"
@@ -85,6 +87,11 @@ def _normalize_session(session: str | None) -> str:
     return session_str[:24]
 
 
+def _source_key(source: str) -> str:
+    """Compare source identities across Windows separators and Unicode filename forms."""
+    return unicodedata.normalize("NFC", posixpath.normpath(source.strip().replace("\\", "/"))).casefold()
+
+
 def _check_source_trust(state: Path, source: str) -> None:
     """Validate that source is not marked private or untrusted."""
     if not source:
@@ -94,16 +101,16 @@ def _check_source_trust(state: Path, source: str) -> None:
         try:
             from contextlib import closing
             import sqlite3
-            with closing(sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True, timeout=5)) as db:
-                # instr() also finds notes that merely mention the path in their text; only the
-                # record whose own id or source is this path decides (any match, not the first).
-                rows = db.execute(
-                    "SELECT payload FROM records WHERE id = ? OR instr(payload, ?) > 0",
-                    (source, source)
-                ).fetchall()
+            with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
+                # Learning is an explicit CLI write, not a hook hot path. Compare all own
+                # identities so alternate path spelling cannot bypass private metadata.
+                target = _source_key(source)
+                rows = db.execute("SELECT payload FROM records").fetchall()
                 for (payload,) in rows:
                     rec = json.loads(payload)
-                    if source not in (rec.get("id"), rec.get("source")):
+                    identities = (_source_key(value) for value in (rec.get("id"), rec.get("source"))
+                                  if isinstance(value, str) and value.strip())
+                    if target not in identities:
                         continue
                     if (rec.get("visibility") == "private" or
                         rec.get("trust") == "untrusted" or
@@ -120,6 +127,7 @@ def _check_source_trust(state: Path, source: str) -> None:
 def stage_candidate(state: Path, session: str, candidate: str, source: str = "", scope: str = "global") -> dict:
     """Stage a learning candidate into learning-state.jsonl."""
     state = Path(state)
+    source = str(source).strip()
     _check_source_trust(state, source)
 
     cand_text = str(candidate).strip()

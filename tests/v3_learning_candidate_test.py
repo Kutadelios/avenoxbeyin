@@ -271,6 +271,27 @@ class LearningCandidateLedgerTest(unittest.TestCase):
         rec = learning.stage_candidate(self.state, "sess-priv", "Özetten aday", source="notes/a-özet.md")
         self.assertEqual(rec["source"], "notes/a-özet.md")
 
+    def test_private_source_aliases_cannot_bypass_real_sync_metadata(self):
+        import unicodedata
+        source = 'notes/özel.md'
+        (self.vault / source).write_text('---\nvisibility: private\n---\nSentetik gizli not\n',
+                                         encoding='utf-8', newline='\n')
+        self.assertEqual(self.engine.sync()['status'], 'succeeded')
+        for alias in (' notes/özel.md ', 'notes/./özel.md', 'notes/alt/../özel.md',
+                      'notes\\özel.md', 'NOTES/ÖZEL.MD', unicodedata.normalize('NFD', source)):
+            with self.subTest(source=alias), self.assertRaises(ValueError):
+                learning.stage_candidate(self.state, 'private-alias', 'Sentetik aday', source=alias)
+        self.assertFalse((self.state / 'learning-state.jsonl').exists())
+
+    def test_private_source_check_uses_a_percent_encoded_sqlite_uri(self):
+        state = self.root / 'state # Ölçüm %'
+        (self.vault / 'notes/private.md').write_text('---\nvisibility: private\n---\nSentetik gizli not\n',
+                                                   encoding='utf-8', newline='\n')
+        self.assertEqual(SyncEngine(self.vault, state).sync()['status'], 'succeeded')
+        with self.assertRaises(ValueError):
+            learning.stage_candidate(state, 'private-uri', 'Sentetik aday', source='notes/private.md')
+        self.assertFalse((state / 'learning-state.jsonl').exists())
+
     def test_scope_isolation(self):
         learning.stage_candidate(self.state, "sess-1", "Global learning", scope="global")
         learning.stage_candidate(self.state, "sess-2", "Project A learning", scope="projectA")
