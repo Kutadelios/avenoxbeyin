@@ -12,6 +12,7 @@ import stat
 import tempfile
 import sys
 import time
+import unicodedata
 
 # Keep adjacent installed modules importable when this file is loaded by path.
 _MODULE_DIR = str(Path(__file__).resolve().parent)
@@ -601,7 +602,11 @@ class SyncEngine:
         if not isinstance(relative, str) or Path(relative).is_absolute() or '..' in Path(relative).parts:
             raise ValueError('relative source required')
         path = self.root / relative
-        if not path.resolve().is_relative_to(self.root):
+        try:
+            resolved = path.resolve()
+        except (RuntimeError, OSError):
+            raise ValueError('symlink source rejected')
+        if not resolved.is_relative_to(self.root):
             raise ValueError('source outside vault')
         cursor = path
         while cursor != self.root:
@@ -640,7 +645,7 @@ class SyncEngine:
             stat = None
         if stat is not None and stat.st_ino:
             return stat.st_dev, stat.st_ino
-        return os.path.normcase(str(path))
+        return unicodedata.normalize('NFC', os.path.normcase(str(path)))
 
     def _canonical_refs(self, metadata):
         """Store validated refs as vault-relative POSIX paths, like receipt refs."""
