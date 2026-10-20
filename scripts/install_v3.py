@@ -248,10 +248,10 @@ def semantic_unchanged(name, baseline, current, previous, kept=(), user_excluded
             if cur_state == bef_state:
                 return True
             try:
-                if not Path(cur_state).expanduser().is_absolute() or not Path(bef_state).expanduser().is_absolute():
+                if not Path(cur_state).expanduser().is_absolute() and Path(bef_state).expanduser().is_absolute():
                     return True
             except (RuntimeError, ValueError):
-                return True
+                return False
             def _is_default_layout(s):
                 portable = str(s).replace("\\", "/").rstrip("/")
                 return bool(re.search(r"/beyin-v3/[0-9a-fA-F]{16}$", portable))
