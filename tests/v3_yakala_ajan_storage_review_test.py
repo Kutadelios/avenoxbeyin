@@ -270,6 +270,29 @@ else:
         yakala._agent_json(folder / 'download-manifests/track.mp3.json', item)
         return job, item, data
 
+    def test_download_final_publication_also_works_without_hard_links(self):
+        job, item, data = self.prepared_download()
+        with self.no_links():
+            published = yakala._agent_publish_downloads(self.vault, self.state, job, {'downloads': [item]})
+        target = Path(published[0]['path'])
+        self.assertEqual(target.read_bytes(), data)
+        self.assertFalse(target.with_name(target.name + '.part').exists())
+        saved = json.loads((yakala._agent_job_dir(self.vault, self.state, job['id']) / 'job.json').read_text(encoding='utf-8'))
+        self.assertEqual(saved['publication_intents'][0]['state'], 'published')
+        self.assertEqual(saved['published'], published)
+
+    def test_download_conflict_keeps_user_bytes_and_complete_part(self):
+        job, item, data = self.prepared_download()
+        destination = Path(job['config']['downloads_dir'])
+        destination.mkdir()
+        target = destination / ('track-yakala-' + job['id'][:8] + '.mp3')
+        target.write_bytes(b'USER TRACK')
+        with self.no_links(), self.assertRaises(FileExistsError):
+            yakala._agent_publish_downloads(self.vault, self.state, job, {'downloads': [item]})
+        self.assertEqual(target.read_bytes(), b'USER TRACK')
+        self.assertEqual(target.with_name(target.name + '.part').read_bytes(), data)
+        self.assertEqual(job['published'], [])
+
 
 class CaptureStoreScopeTest(StorageFiles):
     def test_unrelated_case_variants_of_dosyalar_are_readable_and_searchable(self):
@@ -353,6 +376,58 @@ class CaptureStoreScopeTest(StorageFiles):
         with self.assertRaises(ValueError):
             yakala._agent_read_note(safe)
         self.assertEqual(yakala._agent_note_search(self.vault, 'PRIVATE_CANARY', self.state)['matches'], [])
+
+
+class CaptureLockScopeTest(StorageFiles):
+    @unittest.skipIf(os.name == 'nt', 'Windows uses its existing named mutex')
+    def test_agent_disabled_capture_creates_no_vault_lock_or_agent_state(self):
+        yakala.capture(self.vault, text='ordinary capture', state=self.state)
+        self.assertFalse((self.vault / '.beyin-yakala-card.lock').exists())
+        self.assertTrue(yakala._capture_lock_path(self.vault).is_file())
+        self.assertFalse((self.local_state / 'yakala/ajan').exists())
+        self.assertFalse((self.state / 'yakala/ajan').exists())
+
+    @unittest.skipIf(os.name == 'nt', 'Windows uses its existing named mutex')
+    def test_lock_domain_does_not_change_with_enabled_agent_or_pinned_state(self):
+        expected = yakala._capture_lock_path(self.vault)
+        self.note('.beyin-runtime.json', json.dumps({'state': str(self.state)}))
+        for client in ('claude', 'kapali'):
+            yakala._agent_json(yakala._agent_root(self.state) / 'config.json',
+                               dict(yakala._agent_defaults(self.vault), client=client))
+            yakala.capture(self.vault, text=client, state=self.state)
+            self.assertEqual(yakala._capture_lock_path(self.vault), expected)
+        self.assertFalse((self.vault / '.beyin-yakala-card.lock').exists())
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX cross-process flock integration')
+    def test_different_explicit_states_still_serialize_two_real_processes(self):
+        program = '''
+from pathlib import Path
+import sys
+sys.path.insert(0, sys.argv[1])
+import beyin_v3_yakala as yakala
+yakala.default_state = lambda vault: Path(sys.argv[3])
+print('ready', flush=True)
+yakala.capture(Path(sys.argv[2]), text='from child', state=Path(sys.argv[4]))
+print('captured', flush=True)
+'''
+        process = None
+        try:
+            with yakala._WindowsCommitLock(self.vault):
+                process = subprocess.Popen([sys.executable, '-c', program, str(SCRIPTS), str(self.vault),
+                                            str(self.local_state), str(self.base / 'another-selected-state')],
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=inherited_env())
+                self.assertEqual(process.stdout.readline().strip(), 'ready')
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    process.communicate(timeout=0.3)
+                self.assertEqual(yakala.cards(self.vault, self.state), [])
+            output, error = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, error)
+            self.assertIn('captured', output)
+            self.assertEqual(len(yakala.cards(self.vault, self.state)), 1)
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
 
 
 if __name__ == '__main__':

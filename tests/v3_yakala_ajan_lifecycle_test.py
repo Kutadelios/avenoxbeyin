@@ -1,3 +1,4 @@
+from v3_package_helpers import inherited_env
 """Process generation, orphan revocation and independent POSIX deadline regressions.
 
 No agent CLI, model or network request runs. POSIX integration tests create only
@@ -160,6 +161,84 @@ class AgentProcessIdentityTest(unittest.TestCase):
             yakala._agent_process_identity(123)
 
 
+class AgentOrphanRecoveryTest(fixtures.AgentFiles):
+    def test_cli_lifetime_budget_starts_after_preflight(self):
+        self.configure(timeout_seconds=30)
+        _, job, _ = self.queued()
+        clock = [0]
+        owned = types.SimpleNamespace(process=types.SimpleNamespace(
+            pid=os.getpid(), poll=Mock(return_value=0), wait=Mock(return_value=0)), close=Mock())
+
+        def preflight(*_):
+            clock[0] = 125000000000  # several slow, independently bounded discovery probes
+            return []
+
+        with patch.object(yakala, '_agent_executable', return_value=['fake-cli']), \
+                patch.object(yakala, '_agent_preflight', side_effect=preflight), \
+                patch.object(yakala, '_agent_owned_process', return_value=owned), \
+                patch('time.monotonic_ns', side_effect=lambda: clock[0]):
+            yakala._agent_run_job(self.vault, self.state, job)
+        saved = yakala._agent_load_job(self.vault, self.state, job['id'])
+        self.assertEqual(saved['runtime_deadline_ns'], 155000000000)
+
+    def recover(self, identity, *, identity_lookup=None):
+        self.configure()
+        _, old, card = self.queued(text='Interrupted job')
+        old.update(state='running', agent_pid=os.getpid(), worker_pid=os.getpid(),
+                   worker_identity=yakala._agent_process_identity(os.getpid()),
+                   runtime_deadline_ns=time.monotonic_ns() + 60000000000)
+        if identity is not None:
+            old['agent_identity'] = identity
+        yakala._agent_json(yakala._agent_job_dir(self.vault, self.state, old['id']) / 'job.json', old)
+        _, next_job, _ = self.queued(text='Next independent job')
+
+        def run(vault, state, job):
+            recovered = yakala._agent_load_job(vault, state, old['id'])
+            self.assertEqual(recovered['state'], 'approval_required')
+            with self.assertRaisesRegex(ValueError, 'not running'):
+                yakala._agent_require_live_job(recovered)
+            yakala._agent_end(vault, state, job, 'approval_required', 'Test complete.')
+
+        with patch.object(yakala, '_agent_run_job', side_effect=run) as run_job, \
+                patch.object(yakala, '_agent_process_identity', wraps=yakala._agent_process_identity,
+                             side_effect=identity_lookup), \
+                patch.object(yakala.os, 'kill') as kill, \
+                patch.object(yakala.os, 'killpg', create=True) as killpg:
+            self.assertEqual(yakala._agent_worker(self.vault, self.state), 0)
+        kill.assert_not_called()
+        killpg.assert_not_called()
+        self.assertEqual([call.args[2]['id'] for call in run_job.call_args_list], [next_job['id']])
+        recovered = yakala._agent_load_job(self.vault, self.state, old['id'])
+        self.assertEqual(recovered['state'], 'approval_required')
+        # The terminal state must still revoke tools after process metadata becomes
+        # readable again, even while that stored worker generation is live.
+        self.assertTrue(yakala._agent_same_process(recovered['worker_identity']))
+        with self.assertRaisesRegex(ValueError, 'not running'):
+            yakala._agent_require_live_job(recovered)
+        self.assertEqual(yakala.release_agent_card(self.vault, self.state, card['id'])['status'], 'ajan_karti_serbest')
+        return recovered
+
+    def test_reused_agent_pid_never_blocks_queue_or_receives_signal(self):
+        identity = yakala._agent_process_identity(os.getpid())
+        self.recover(dict(identity, birth=identity['birth'] + '-old'))
+
+    def test_legacy_pid_only_job_is_quarantined_without_rerun_or_signal(self):
+        self.recover(None)
+
+    def test_unqueryable_reused_agent_pid_is_quarantined_without_blocking_queue(self):
+        identity = {'pid': os.getpid(), 'kind': 'windows-filetime', 'birth': 'old-process-generation'}
+        recovered = self.recover(identity, identity_lookup=PermissionError(5, 'Access denied'))
+        self.assertIn('surec kimligi dogrulanamadi', recovered['result_summary'])
+        self.assertIn('kismi etkiler bilinmiyor', recovered['result_summary'])
+
+    def test_guardian_identity_becoming_unreadable_during_wait_is_quarantined(self):
+        identity = yakala._agent_process_identity(os.getpid())
+        with patch('time.sleep') as sleep:
+            recovered = self.recover(identity, identity_lookup=[identity, OSError('Process metadata unavailable')])
+        sleep.assert_called_once_with(0.1)
+        self.assertIn('surec kimligi dogrulanamadi', recovered['result_summary'])
+
+
 class AgentBridgeLeaseTest(unittest.TestCase):
     setUp = fixtures.AgentBridgeFilesTest.setUp
     call = fixtures.AgentBridgeFilesTest.call
@@ -210,6 +289,102 @@ class AgentBridgeLeaseTest(unittest.TestCase):
         self.assertIn('capabilities', responses[0]['result'])
         self.assertEqual(responses[1]['error']['code'], -32000)
         self.assertNotIn('tools', responses[1].get('result', {}))
+
+
+@unittest.skipIf(os.name == 'nt', 'POSIX guardian integration; Windows uses its native Job Object.')
+class AgentPosixGuardianTest(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory(prefix='yakala-guardian-')
+        self.addCleanup(folder.cleanup)
+        self.folder = Path(folder.name)
+
+    def wait_for(self, predicate, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.02)
+        self.fail('Expected process boundary did not complete before timeout.')
+
+    def child_command(self):
+        ids = self.folder / 'child-pids.json'
+        child = ('import os,sys,json,time,subprocess; from pathlib import Path; '
+                 'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"]); '
+                 'Path(sys.argv[1]).write_text(json.dumps([os.getpid(),child.pid])); time.sleep(60)')
+        return [sys.executable, '-c', child, str(ids)], ids
+
+    def assert_children_stopped(self, ids):
+        pids = json.loads(ids.read_text())
+        self.wait_for(lambda: all(yakala._agent_process_identity(pid) is None for pid in pids))
+
+    def test_independent_deadline_stops_cli_and_grandchild(self):
+        command, ids = self.child_command()
+        owned = yakala._AgentPosixProcess(command, deadline_ns=time.monotonic_ns() + 1200000000,
+                                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL, close_fds=True)
+        self.addCleanup(owned.close)
+        self.wait_for(ids.is_file)
+        owned.process.wait(timeout=5)
+        with self.assertRaises(TimeoutError):
+            owned.result_code()
+        self.assert_children_stopped(ids)
+
+    def test_expired_guardian_never_starts_the_cli(self):
+        marker = self.folder / 'must-not-start'
+        command = [sys.executable, '-c', 'from pathlib import Path; import sys; Path(sys.argv[1]).touch()', str(marker)]
+        owned = yakala._AgentPosixProcess(command, deadline_ns=time.monotonic_ns() - 1,
+                                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL, close_fds=True)
+        self.addCleanup(owned.close)
+        owned.process.wait(timeout=5)
+        with self.assertRaises(TimeoutError):
+            owned.result_code()
+        self.assertFalse(marker.exists())
+
+    def test_successful_cli_exit_code_is_preserved_and_group_is_reaped(self):
+        command, ids = self.child_command()
+        command[2] = command[2].removesuffix('time.sleep(60)') + 'raise SystemExit(7)'
+        owned = yakala._AgentPosixProcess(command,
+                                          deadline_ns=time.monotonic_ns() + 5000000000,
+                                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL, close_fds=True)
+        self.addCleanup(owned.close)
+        owned.process.wait(timeout=5)
+        self.assertEqual(owned.result_code(), 7)
+        self.assert_children_stopped(ids)
+
+    def test_worker_sigkill_closes_guardian_cli_and_grandchild_without_pid_signal(self):
+        command, ids = self.child_command()
+        guardian = self.folder / 'guardian.json'
+        worker_code = '''
+import json,sys,time
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+import beyin_v3_yakala as y
+owned=y._AgentPosixProcess(json.loads(sys.argv[2]),deadline_ns=time.monotonic_ns()+60000000000,
+                         stdin=y.subprocess.DEVNULL,stdout=y.subprocess.DEVNULL,
+                         stderr=y.subprocess.DEVNULL,close_fds=True)
+Path(sys.argv[3]).write_text(json.dumps(y._agent_process_identity(owned.process.pid)))
+time.sleep(60)
+'''
+        worker = subprocess.Popen([sys.executable, '-c', worker_code, str(fixtures.SCRIPTS),
+                                   json.dumps(command), str(guardian)], stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, close_fds=True, env=inherited_env())
+
+        def close_worker():
+            if worker.poll() is None:
+                worker.kill()
+            worker.wait(timeout=5)
+            worker.stderr.close()
+
+        self.addCleanup(close_worker)
+        self.wait_for(lambda: ids.is_file() and guardian.is_file())
+        identity = json.loads(guardian.read_text())
+        self.assertTrue(yakala._agent_same_process(identity))
+        worker.kill()  # Only the Popen we just created, never a durable PID.
+        worker.wait(timeout=5)
+        self.wait_for(lambda: not yakala._agent_same_process(identity))
+        self.assert_children_stopped(ids)
 
 
 if __name__ == '__main__':
