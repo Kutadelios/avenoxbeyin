@@ -4383,8 +4383,18 @@ def _windows_window_owner(hwnd, pid):
     return actual.value == pid
 
 
+class _WindowsPopupTransientError(ValueError):
+    """A lost popup/handshake can be replaced once its owned process has been reaped."""
+
+
 class _WindowsPopupBroker:
     """Exactly one owned child, warm or active. A repeated key changes focus, never the capture."""
+
+    WARM_TIMEOUT = 6
+    ACTIVE_TIMEOUT = 4
+    RETRY_DELAY = 0.5
+    FAILURE_WINDOW = 120
+    FAILURE_LIMIT = 3
 
     def __init__(self, command, grant, log, validate_window=_windows_window_owner, on_ready=None, on_failure=None):
         self.command, self.grant, self.log, self.validate_window = command, grant, log, validate_window
@@ -4438,10 +4448,11 @@ class _WindowsPopupBroker:
             while self.owned.process.poll() is None and time.monotonic() < end:
                 time.sleep(0.01)
         if self.owned:
-            try:
-                self.owned.close()
-            finally:
-                self.owned = None
+            self.owned.close()
+            if self.owned.process.poll() is None:
+                raise ValueError('Onceki pencere sonlandirilamadi')
+            # Retain ownership if close/wait fails. A replacement must never overlap it.
+            self.owned = None
         if self.pipe:
             self.pipe.finish(0)
             self.pipe = None
@@ -4460,87 +4471,36 @@ class _WindowsPopupBroker:
 
     def _run(self):
         import time
+        failures = []
         try:
             while not self.stopping.is_set():
-                instance = self._spawn()
-                stage, deadline, sent_focus, capture_id = 'warming', time.monotonic() + 6, 0, None
-                done = False
-                while not self.stopping.is_set():
-                    # Consume queued final packets before observing pipe EOF/process exit.
-                    while True:
-                        message = self.pipe.receive()
-                        if message is None:
-                            break
-                        if not _protocol_valid(message, instance, ('READY', 'ACTIVE', 'DONE', 'ERROR')):
-                            raise ValueError('IPC surum/sema/instance uyusmazligi')
-                        if message['type'] == 'ERROR':
-                            raise ValueError('Pencere baslatilamadi')
-                        if message['type'] == 'READY':
-                            hwnd = message.get('hwnd')
-                            if stage != 'warming' or type(hwnd) is not int or hwnd <= 0:
-                                raise ValueError('Gecersiz READY')
-                            if message.get('pid') != self.owned.process.pid or not self.validate_window(hwnd, self.owned.process.pid):
-                                raise ValueError('READY pencere sahibi uyusmuyor')
-                            stage = 'ready'
-                            if self.on_ready:
-                                try:
-                                    self.on_ready()
-                                except Exception:
-                                    pass
-                        elif message['type'] == 'ACTIVE':
-                            if stage != 'activating' or message.get('capture_id') != capture_id:
-                                raise ValueError('Gecersiz ACTIVE')
-                            stage = 'active'
-                        elif message['type'] == 'DONE':
-                            if stage not in ('active', 'activating') or message.get('capture_id') != capture_id:
-                                raise ValueError('Gecersiz DONE')
-                            stage, deadline, done = 'closing', time.monotonic() + 2, True
-                    child = self.owned.process
-                    if child.poll() is not None:
-                        if stage in ('warming', 'ready'):
-                            raise ValueError('Hazir pencere beklenmedik bicimde kapandi')
-                        if stage in ('activating', 'active') or (stage == 'closing' and not done):
-                            # No DONE (a closed pipe is not one): the result is unknown, so say so and never retry it.
-                            self.log('Yakalama penceresi DONE olmadan kapandi (cikis kodu %s); kaydin sonucu bilinmiyor.'
-                                     % child.returncode)
-                        break
-                    if self.pipe.failed.is_set() and stage != 'closing':
-                        if stage in ('warming', 'ready'):
-                            raise ValueError('READY kanali kapandi')
-                        # EOF may race the final exit. Never start a replacement until this owner is dead.
-                        stage, deadline = 'closing', time.monotonic() + 1
-                    if stage in ('warming', 'activating', 'closing') and time.monotonic() >= deadline:
-                        raise ValueError('Pencere el sikisma zaman asimi')
+                try:
+                    sent_focus = self._run_popup()
+                except _WindowsPopupTransientError as exc:
                     with self.lock:
-                        request, number, latest = self.request, self.focus_number, self.latest_context
-                    if stage == 'ready' and request:
-                        capture_id, context = request
-                        try:
-                            granted = bool(self.grant(child.pid))
-                        except OSError:
-                            granted = False
-                        message = _protocol_message('ACTIVATE', instance, capture_id=capture_id, context=context,
-                                                    source_hwnd=(latest or context).get('hwnd', 0), foreground_granted=granted)
-                        if not self.pipe.send(message):
-                            raise ValueError('ACTIVATE iletilemedi')
-                        stage, deadline, sent_focus = 'activating', time.monotonic() + 4, number
-                    elif stage == 'active' and number != sent_focus:
-                        try:
-                            granted = bool(self.grant(child.pid))
-                        except OSError:
-                            granted = False
-                        if not self.pipe.send(_protocol_message('FOCUS', instance, capture_id=capture_id,
-                                                                source_hwnd=(latest or {}).get('hwnd', 0),
-                                                                foreground_granted=granted)):
-                            raise ValueError('FOCUS iletilemedi')
-                        sent_focus = number
-                    self.wake.wait(0.015)
-                    self.wake.clear()
-                self._drop()
-                with self.lock:
-                    # A key which arrived while closing is a new request; never replay the old one.
-                    self.request = ((secrets.token_hex(16), self.latest_context)
-                                    if self.focus_number > sent_focus and self.latest_context else None)
+                        # The failed capture's outcome is unknown. Never replay it, including
+                        # focus presses queued before the failure. Later presses are new captures.
+                        self.request = self.latest_context = None
+                    self._drop()  # a cleanup failure is terminal, never permission to spawn again
+                    if self.stopping.is_set():
+                        break
+                    at = time.monotonic()
+                    failures = [stamp for stamp in failures if at - stamp <= self.FAILURE_WINDOW]
+                    failures.append(at)
+                    reason = '%s (%d sn icinde %d/%d gecici hata)' % (
+                        exc, self.FAILURE_WINDOW, len(failures), self.FAILURE_LIMIT)
+                    if len(failures) >= self.FAILURE_LIMIT:
+                        self._failure(reason)
+                        break
+                    self.log('Yakalama penceresi: ' + reason + '; onceki surec kapandi, '
+                             '%s sn sonra yeniden isitilacak. Kisayol dinleyicisi calisiyor.' % self.RETRY_DELAY)
+                    self.stopping.wait(self.RETRY_DELAY)
+                else:
+                    self._drop()
+                    with self.lock:
+                        # A key which arrived while closing is a new request; never replay the old one.
+                        self.request = ((secrets.token_hex(16), self.latest_context)
+                                        if self.focus_number > sent_focus and self.latest_context else None)
         except Exception as exc:
             if not self.stopping.is_set():
                 self._failure(str(exc) if isinstance(exc, ValueError) else type(exc).__name__)
@@ -4549,6 +4509,88 @@ class _WindowsPopupBroker:
                 self._drop()
             except Exception:
                 pass
+
+    def _run_popup(self):
+        import time
+        instance = self._spawn()
+        stage, deadline, sent_focus, capture_id = 'warming', time.monotonic() + self.WARM_TIMEOUT, 0, None
+        done = False
+        while not self.stopping.is_set():
+            # Consume queued final packets before observing pipe EOF/process exit.
+            while True:
+                message = self.pipe.receive()
+                if message is None:
+                    break
+                if not _protocol_valid(message, instance, ('READY', 'ACTIVE', 'DONE', 'ERROR')):
+                    raise ValueError('IPC surum/sema/instance uyusmazligi')
+                if message['type'] == 'ERROR':
+                    raise ValueError('Pencere baslatilamadi')
+                if message['type'] == 'READY':
+                    hwnd = message.get('hwnd')
+                    if stage != 'warming' or type(hwnd) is not int or hwnd <= 0:
+                        raise ValueError('Gecersiz READY')
+                    if message.get('pid') != self.owned.process.pid or not self.validate_window(hwnd, self.owned.process.pid):
+                        raise ValueError('READY pencere sahibi uyusmuyor')
+                    stage = 'ready'
+                    if self.on_ready:
+                        try:
+                            self.on_ready()
+                        except Exception:
+                            pass
+                elif message['type'] == 'ACTIVE':
+                    if stage != 'activating' or message.get('capture_id') != capture_id:
+                        raise ValueError('Gecersiz ACTIVE')
+                    stage = 'active'
+                elif message['type'] == 'DONE':
+                    if stage not in ('active', 'activating') or message.get('capture_id') != capture_id:
+                        raise ValueError('Gecersiz DONE')
+                    stage, deadline, done = 'closing', time.monotonic() + 2, True
+            child = self.owned.process
+            if child.poll() is not None:
+                if stage in ('warming', 'ready'):
+                    raise _WindowsPopupTransientError('Hazir pencere beklenmedik bicimde kapandi (asama: %s)' % stage)
+                if stage in ('activating', 'active') or (stage == 'closing' and not done):
+                    # No DONE (a closed pipe is not one): the result is unknown, so say so and never retry it.
+                    self.log('Yakalama penceresi DONE olmadan kapandi (cikis kodu %s); kaydin sonucu bilinmiyor.'
+                             % child.returncode)
+                    raise _WindowsPopupTransientError('Etkin pencere beklenmedik bicimde kapandi (asama: %s)' % stage)
+                break
+            if self.pipe.failed.is_set() and stage != 'closing':
+                if stage in ('warming', 'ready'):
+                    raise _WindowsPopupTransientError('READY kanali kapandi (asama: %s)' % stage)
+                # EOF may race the final exit. Never start a replacement until this owner is dead.
+                stage, deadline = 'closing', time.monotonic() + 1
+            if stage in ('warming', 'activating', 'closing') and time.monotonic() >= deadline:
+                if capture_id and not done:
+                    self.log('Yakalama penceresi DONE olmadan zaman asimina ugradi; kaydin sonucu bilinmiyor, '
+                             'bu yakalama tekrar denenmeyecek.')
+                raise _WindowsPopupTransientError('Pencere el sikisma zaman asimi (asama: %s)' % stage)
+            with self.lock:
+                request, number, latest = self.request, self.focus_number, self.latest_context
+            if stage == 'ready' and request:
+                capture_id, context = request
+                try:
+                    granted = bool(self.grant(child.pid))
+                except OSError:
+                    granted = False
+                message = _protocol_message('ACTIVATE', instance, capture_id=capture_id, context=context,
+                                            source_hwnd=(latest or context).get('hwnd', 0), foreground_granted=granted)
+                if not self.pipe.send(message):
+                    raise _WindowsPopupTransientError('ACTIVATE iletilemedi')
+                stage, deadline, sent_focus = 'activating', time.monotonic() + self.ACTIVE_TIMEOUT, number
+            elif stage == 'active' and number != sent_focus:
+                try:
+                    granted = bool(self.grant(child.pid))
+                except OSError:
+                    granted = False
+                if not self.pipe.send(_protocol_message('FOCUS', instance, capture_id=capture_id,
+                                                        source_hwnd=(latest or {}).get('hwnd', 0),
+                                                        foreground_granted=granted)):
+                    raise _WindowsPopupTransientError('FOCUS iletilemedi')
+                sent_focus = number
+            self.wake.wait(0.015)
+            self.wake.clear()
+        return sent_focus
 
     def close(self):
         self.stopping.set()
