@@ -3462,6 +3462,24 @@ def _escape_scope(front, source, popup):
     return 'consume' if source and front == source else 'pass'
 
 
+def _win_escape_modified(event):
+    """Whether an Esc that reached the popup carries Shift, Ctrl, Alt or Win: the hook's rule for Tk.
+
+    Tk on Windows reports Shift 0x1, Control 0x4 and Alt 0x20000 in event.state; Caps 0x2, Num 0x8
+    and Scroll Lock 0x20 are lock states, so a plain Esc with them still cancels. Tk leaves the
+    Windows key out of event.state; GetKeyState reads it as of this key message on the GUI thread.
+    """
+    if getattr(event, 'state', 0) & 0x20005:
+        return True
+    try:
+        import ctypes
+        user32 = ctypes.WinDLL('user32')
+        user32.GetKeyState.argtypes, user32.GetKeyState.restype = [ctypes.c_int], ctypes.c_short
+        return any(user32.GetKeyState(key) & 0x8000 for key in (0x5B, 0x5C))  # VK_LWIN, VK_RWIN
+    except (AttributeError, OSError):
+        return False
+
+
 def _win_escape_guard(root, popup, source, dismiss):
     """Esc closes the open popup wherever the keyboard focus went, until the popup closes.
 
@@ -4955,7 +4973,11 @@ def popup(vault, context=None, state=None, root=None, session=None):
         root.destroy()
         return 'break'
 
-    root.bind('<Escape>', dismiss if windows else lambda _e: close())
+    def escape(event):
+        # Tk's <Escape> matches any modifier state; like the hook, only a plain Esc cancels.
+        return None if _win_escape_modified(event) else dismiss(event)
+
+    root.bind('<Escape>', escape if windows else lambda _e: close())
     if windows:
         root.protocol('WM_DELETE_WINDOW', dismiss)
         close_label = canvas.create_text(W - pad, 33, text='×', anchor='e', fill=P['muted'], font=_font(20))
