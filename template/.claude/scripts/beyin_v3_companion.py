@@ -521,11 +521,15 @@ def clip(text, budget, tail=False, both=False):
     return marker + text[-keep:] if tail else text[:keep] + marker
 
 
-def context(store, budget, session, harness, query='', receipt='', warning='', project=None, report=None):
+def context(store, budget, session, harness, query='', receipt='', warning='', project=None, report=None,
+            rules_project=None):
     """Budget actual displayed text, not repeated JSON metadata; never cut a record header.
 
     A dict passed as report receives the companion Kurallar.md share of the returned text
-    (#374); doctor reads it, the hooks pass nothing."""
+    (#374); doctor reads it, the hooks pass nothing. project scopes rules and retrieval;
+    rules_project, the project found from the working directory, scopes the rules alone (#288)."""
+    if not (isinstance(rules_project, str) and rules_project.strip()):
+        rules_project = project
     target = directory(store.vault_root)
     hygiene_line = ''
     if target is not None:
@@ -539,7 +543,7 @@ def context(store, budget, session, harness, query='', receipt='', warning='', p
         return clip(header + 'Multiple companion directories: read the user-selected identity sources.\n', budget)
     snapshot = store.source_snapshot(NAMES, budget_chars=200000,
                                      source_directory=target.relative_to(store.vault_root).as_posix(),
-                                     text_transform=lambda name, text: excerpt(name, text, project=project))
+                                     text_transform=lambda name, text: excerpt(name, text, project=rules_project))
     records = snapshot['records']
     notice = ''
     if snapshot['missing_sources']:
@@ -548,8 +552,8 @@ def context(store, budget, session, harness, query='', receipt='', warning='', p
         notice += 'Changed companion sources excluded; read current files.\n'
     sections = [(f'\n[{r["source"]}]\n', r['text'], Path(r['source']).name)
                 for r in records]
-    if project and isinstance(project, str) and project.strip():
-        proj_clean = project.strip()
+    if rules_project and isinstance(rules_project, str) and rules_project.strip():
+        proj_clean = rules_project.strip()
         if not (proj_clean.startswith(('/', '\\')) or '..' in proj_clean.replace('\\', '/').split('/')):
             candidate_dirs = []
             try:
@@ -580,7 +584,7 @@ def context(store, budget, session, harness, query='', receipt='', warning='', p
                             project_snapshot = store.source_snapshot(
                                 [p_name], source_directory=p_rel, budget_chars=200000,
                                 text_transform=lambda name, text: filter_scoped_rules(
-                                    without_v2_window(text), active_project=project))
+                                    without_v2_window(text), active_project=rules_project))
                             for record in project_snapshot['records']:
                                 if record['text'].strip():
                                     sections.append((f"\n[{record['source']}]\n", record['text'], 'Kurallar.md'))

@@ -593,15 +593,7 @@ def main():
                 store = MemoryStore(state, vault)
             query = prompt_text(payload)
             project = payload.get('project')
-            project = project.strip() if isinstance(project, str) and project.strip() else None
-            if project is None:
-                # Claude Code and Antigravity send a working directory, not a project (#288, #403).
-                from beyin_v3_bridge import working_directory
-                from beyin_v3_projects import resolve_active_project
-                try:
-                    project = resolve_active_project(vault, working_directory(payload, args.harness))
-                except Exception:
-                    project = None
+            project = project if isinstance(project, str) and project.strip() else None
             session = hashlib.sha256(str(payload.get('session_id', 'unknown')).encode()).hexdigest()[:24]
             warning = ('V3 source sync is still running; this context comes from the previous index. '
                        'Verify current Markdown sources before relying on it.\n') if pending else ''
@@ -627,13 +619,26 @@ def main():
             limit = client_budget(args.harness, settings['context_chars'])
             receipt = receipt_context(vault, state)
             if event == 'SessionStart' or relevant(query):
+                # Claude Code and Antigravity send a working directory, not a project (#288, #403).
+                # A project found from it selects the project rules only: as a retrieval scope it
+                # would hide every note that does not carry that project field.
+                rules_project = project
+                if rules_project is None:
+                    from beyin_v3_bridge import working_directory
+                    from beyin_v3_projects import resolve_active_project
+                    try:
+                        rules_project = resolve_active_project(vault, working_directory(payload, args.harness))
+                    except Exception:
+                        rules_project = None
                 # The opening may carry its own machine-local budget (#140); never a vault preference.
                 limit = client_budget(args.harness, opening_budget(state, settings['context_chars']))
-                text = companion_context(store, limit, session, args.harness, query, receipt, warning, project=project)
+                text = companion_context(store, limit, session, args.harness, query, receipt, warning, project=project,
+                                         rules_project=rules_project)
                 smaller = client_rebudget(args.harness, limit, notice + text)
                 if smaller is not None:
                     limit = smaller
-                    text = companion_context(store, limit, session, args.harness, query, receipt, warning, project=project)
+                    text = companion_context(store, limit, session, args.harness, query, receipt, warning,
+                                             project=project, rules_project=rules_project)
             else:
                 # Per-turn automatic context is strict: only meaningful lexical matches are
                 # injected, and an empty match injects nothing at all instead of a receipt

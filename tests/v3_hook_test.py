@@ -1244,6 +1244,26 @@ runpy.run_path({str(HOOK)!r}, run_name='__main__')
         root_context = root_response.get('hookSpecificOutput', {}).get('additionalContext', '')
         self.assertNotIn('ALPHA_HOOK_RULE', root_context)
 
+    def test_cwd_project_selects_rules_without_narrowing_retrieval(self):
+        """A project found from cwd picks the project rules only; retrieval keeps notes without that field (#288)."""
+        from beyin_v3_sync import SyncEngine
+        general = self.vault / 'notes/genel.md'
+        general.parent.mkdir()
+        general.write_text('---\n' + json.dumps({'id': 'genel', 'kind': 'task', 'revision': 1, 'status': 'active',
+                                                 'visibility': 'internal'}) +
+                           '\n---\nKuzeyrüzgarı kalibrasyonunu Synthetic Reviewer yürütüyor.\n', encoding='utf-8')
+        alpha = self.vault / 'projects/alpha'
+        alpha.mkdir(parents=True)
+        (alpha / 'Kurallar.md').write_text('# Alpha\n- **kural:** ALPHA_ONLY_RULE\n', encoding='utf-8')
+        SyncEngine(self.vault, self.state).sync()
+        turn = self.lifecycle('UserPromptSubmit', 'alpha-turn', 'claude', prompt='Kuzeyrüzgarı kalibrasyonunu kim yürütüyor',
+                              cwd=str(alpha))
+        self.assertIn('Synthetic Reviewer', turn.get('hookSpecificOutput', {}).get('additionalContext', ''))
+        opening = self.lifecycle('SessionStart', 'alpha-open', 'claude', cwd=str(alpha))
+        context = opening.get('hookSpecificOutput', {}).get('additionalContext', '')
+        self.assertIn('ALPHA_ONLY_RULE', context)
+        self.assertIn('Synthetic Reviewer', context)
+
 
 if __name__ == '__main__':
     unittest.main()
