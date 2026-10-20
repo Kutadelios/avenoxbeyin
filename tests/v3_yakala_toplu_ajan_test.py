@@ -754,8 +754,12 @@ class BatchStatusAndCliTest(BatchFiles):
             self.assertEqual(row['ozet'], 'Kaynak incelendi.')
             self.assertTrue((self.vault / row['sonuc']).is_file())
             self.assertTrue((self.vault / row['receipt']).is_file())
-            self.assertIn(row['job_id'], last.read_text(encoding='utf-8'))
-        self.assertIn('Existing user context.', last.read_text(encoding='utf-8'))
+            job = yakala._agent_load_job(self.vault, self.state, row['job_id'])
+            # The finalizer writes a short journal pointer; Last-Session stays untouched.
+            self.assertIn('<!-- yakala-ajan:' + row['job_id'] + ' -->',
+                          (self.vault / job['journal']).read_text(encoding='utf-8'))
+            self.assertNotIn(row['job_id'], last.read_text(encoding='utf-8'))
+        self.assertEqual(last.read_text(encoding='utf-8'), '# Last session\n\nExisting user context.\n')
 
     def test_model_complete_submission_is_not_worker_verified_completion(self):
         self.configure()
