@@ -8,6 +8,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from unittest.mock import Mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'template/.claude/scripts'))
@@ -152,10 +153,35 @@ class IngestServerTest(unittest.TestCase):
         except urllib.error.HTTPError as err:
             self.assertEqual(err.code, 413)
             err.close()
-        except (urllib.error.URLError, ConnectionError, OSError) as err:
+        except (urllib.error.URLError, ConnectionError) as err:
             # If underlying TCP socket was reset by kernel before response body was read
             reason = getattr(err, "reason", err)
-            self.assertTrue(isinstance(reason, (OSError, ConnectionError)) or "reset" in str(err).lower() or "pipe" in str(err).lower() or "aborted" in str(err).lower())
+            self.assertIsInstance(reason, ConnectionError)
+
+    def test_json_response_tolerates_disconnects_at_each_write_stage(self):
+        for stage in ('headers', 'body', 'flush'):
+            for error in (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                with self.subTest(stage=stage, error=error.__name__):
+                    handler = object.__new__(ingest_server.IngestHandler)
+                    handler.send_response = Mock()
+                    handler.send_header = Mock()
+                    handler.end_headers = Mock()
+                    handler.wfile = Mock()
+                    write = {'headers': handler.end_headers, 'body': handler.wfile.write,
+                             'flush': handler.wfile.flush}[stage]
+                    write.side_effect = error('client disconnected')
+                    handler._send_json(413, {'error': 'payload_too_large'})
+                    write.assert_called_once()
+
+    def test_json_response_does_not_hide_unrelated_io_errors(self):
+        handler = object.__new__(ingest_server.IngestHandler)
+        handler.send_response = Mock()
+        handler.send_header = Mock()
+        handler.end_headers = Mock()
+        handler.wfile = Mock()
+        handler.wfile.write.side_effect = OSError('unrelated I/O failure')
+        with self.assertRaisesRegex(OSError, 'unrelated I/O failure'):
+            handler._send_json(200, {'status': 'ok'})
 
     def test_symlink_default_inbox_cannot_create_external_file(self):
         outside = Path(self.tmp.name) / 'outside'
@@ -245,4 +271,3 @@ class IngestServerTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
