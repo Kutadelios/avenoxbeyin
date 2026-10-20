@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import ExitStack
 from datetime import datetime, timezone
 import json
 import os
@@ -879,19 +880,35 @@ class SyncEngine:
             candidate['same_content'] = None
         return candidate
 
-    def _recover(self, db):
+    def _recover(self, db, note_locks=None):
+        from beyin_v3_notes import NoteConflict, locked
         completed, conflicts = [], []
         for entry in sorted(self.journal.glob('*.json')):
             try:
                 intent = json.loads(entry.read_text(encoding='utf-8'))
-                path = self._path(intent['source'])
-                actual = _hash(path.read_bytes()) if path.exists() else None
-                desired = _hash(intent['content'])
-                if actual == intent['old_hash']:
-                    atomic(path, intent['content'])
-                elif actual != desired:
-                    conflicts.append({'source': intent['source'], 'reason': 'recovery conflict; manual edit preserved'})
-                    continue
+                # Failed note-create operations can leave an intent behind. Its
+                # replay is a note writer too. Never wait here while holding a DB
+                # transaction: another writer may hold the note lock and need it.
+                with ExitStack() as guard:
+                    if intent.get('kind') == 'note':
+                        try:
+                            guard.enter_context(locked(self, timeout=0))
+                        except NoteConflict:
+                            # A live writer holds the lock (the OS releases it when a
+                            # process dies). Its own sync, or a later one, replays this
+                            # journal; a concurrent hook sync is not a source conflict.
+                            continue
+                    path = self._path(intent['source'])
+                    actual = _hash(path.read_bytes()) if path.exists() else None
+                    desired = _hash(intent['content'])
+                    if actual == intent['old_hash']:
+                        atomic(path, intent['content'])
+                    elif actual != desired:
+                        conflicts.append({'source': intent['source'], 'reason': 'recovery conflict; manual edit preserved'})
+                        continue
+                    if note_locks is not None:
+                        # Reserve replayed notes until commit AND journal cleanup.
+                        note_locks.enter_context(guard.pop_all())
                 if intent['kind'] == 'receipt':
                     event = intent['event']
                     for ref in event['refs']:
@@ -903,7 +920,7 @@ class SyncEngine:
                             raise ReceiptConflict('event id collision during recovery')
                     db.execute('INSERT OR IGNORE INTO receipts VALUES (?,?)', (event['event_id'], _json(event)))
                 completed.append(entry)
-            except (ValueError, OSError, KeyError) as exc:
+            except (ValueError, OSError, KeyError, NoteConflict) as exc:
                 conflicts.append({'journal': entry.name, 'reason': str(exc)})
         return completed, conflicts
 
@@ -996,6 +1013,10 @@ class SyncEngine:
 
     def sync(self, full=False, recover_views=False):
         """Index the vault. `full` reads every source: no stored stat signature is taken on trust."""
+        with ExitStack() as note_locks:
+            return self._sync(full, recover_views, note_locks)
+
+    def _sync(self, full, recover_views, note_locks):
         # Serialize recovery, source scan and projection across local processes.
         with self.store._connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -1014,7 +1035,7 @@ class SyncEngine:
                 except (ValueError, TypeError):
                     pass
             db.execute("INSERT OR REPLACE INTO metadata VALUES ('last_sync_time', ?)", (str(now_sec),))
-            completed, recovery_conflicts = self._recover(db)
+            completed, recovery_conflicts = self._recover(db, note_locks)
             receipt_warnings, receipt_conflicts = self._scan_receipts(db)
             # The layout file is shared through git and can arrive malformed (for
             # example with merge markers). Indexing, receipts and hooks keep working;
@@ -1238,7 +1259,16 @@ class SyncEngine:
         self._record_redactions(redacted)
         return self._write_diagnostics(dict(result_record, redacted=redacted, secrets_redacted=redacted), result)
 
+    def note_read(self, source):
+        from beyin_v3_notes import read
+        return read(self, source)
+
+    def note_edit(self, request):
+        from beyin_v3_notes import apply
+        return apply(self, request)
+
     def note_create(self, source, text, metadata=None):
+        from beyin_v3_notes import locked
         if not isinstance(text, str) or not text.strip() or (metadata is not None and not isinstance(metadata, dict)):
             raise ValueError('note text and metadata required')
         if text.lstrip().startswith('---'):
@@ -1274,24 +1304,28 @@ class SyncEngine:
         text, redacted = self._protect(text)
         metadata, meta_redacted = self._protect_metadata(metadata)
         redacted += meta_redacted
-        path = self._path(source)
         intended = render(metadata, text+'\n')
-        with self.store._connect() as db:
-            db.execute('BEGIN IMMEDIATE')
-            if path.exists():
-                raise ValueError('source exists; preserve and edit deliberately')
-            self._intent(source, None, intended, 'note')
-        result = self.sync()
-        record_id = metadata.get('id', 'md-' + _hash(source)[:24])
-        if self._source_issues(result, source, record_id):
-            raise RevisionConflict('note requires projection review')
-        with self.store._connect() as db:
-            row = db.execute('SELECT payload FROM records WHERE id=?', (record_id,)).fetchone()
-        if not row:
-            raise RevisionConflict('created note missing from projection')
-        record = json.loads(row[0])
-        if record.get('source') != source or record.get('source_sha256') != _hash(intended) or path.read_bytes() != intended.encode('utf-8'):
-            raise RevisionConflict('created note source readback mismatch')
+        # All participating note writers share this vault-local lock, even when
+        # clients use different state roots. Acquire it before the DB transaction.
+        with locked(self):
+            self._refuse_excluded(source)
+            path = self._path(source)
+            with self.store._connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                if path.exists():
+                    raise ValueError('source exists; preserve and edit deliberately')
+                self._intent(source, None, intended, 'note')
+            result = self.sync()
+            record_id = metadata.get('id', 'md-' + _hash(source)[:24])
+            if self._source_issues(result, source, record_id):
+                raise RevisionConflict('note requires projection review')
+            with self.store._connect() as db:
+                row = db.execute('SELECT payload FROM records WHERE id=?', (record_id,)).fetchone()
+            if not row:
+                raise RevisionConflict('created note missing from projection')
+            record = json.loads(row[0])
+            if record.get('source') != source or record.get('source_sha256') != _hash(intended) or path.read_bytes() != intended.encode('utf-8'):
+                raise RevisionConflict('created note source readback mismatch')
         self._record_redactions(redacted)
         return {'status': 'succeeded', 'source': source, 'redacted': redacted,
                 'secrets_redacted': redacted, 'warnings': result['warnings'],

@@ -670,6 +670,8 @@ def main(argv=None):
             if hasattr(stream, 'reconfigure'):
                 stream.reconfigure(errors='replace')
     command = argv[0] if argv else 'doctor'
+    if command in ('note-read', 'note-edit'):
+        human = False  # These commands have a JSON contract, including on a terminal.
     vault = Path(__file__).resolve().parent
     stamp = vault / '.beyin-version'
     installed_version = None
