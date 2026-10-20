@@ -185,6 +185,8 @@ okumadan oluştur, satır sonlarını dönüştürme:
 Her `old` boş olmayan metin olmalı ve uygulandığı anda tam bir kez geçmelidir;
 birden çok düzenleme sırayla uygulanır. Mevcut dosyada tam `content` verilmez.
 Yeni dosyada `expected_sha256: null` ve `content` kullan, `edits` verme.
+`secret-filter` açıksa sır içeren sonuç yazımdan ve yedekten önce reddedilir;
+metin sessizce değiştirilmez. Önceden yazılmış sırrı silen düzenleme kabul edilir.
 `--file -` (varsayılan) JSON'u stdin'den okur. Çıktı her zaman JSON'dur:
 `written` veya `unchanged` çıkış 0, `conflict` çıkış 2, `error` çıkış 1.
 Eksik kaynak argümanı, eksik `--file` değeri ve bilinmeyen seçenek gibi komut

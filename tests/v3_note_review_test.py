@@ -319,6 +319,45 @@ print(json.dumps(result))
         refresh.assert_not_called()
         replace.assert_not_called()
 
+    def test_flat_view_in_rollback_safe_table_is_protected_without_header(self):
+        source = 'daily/2026-10-19.md'
+        path = self.write(source)
+        with self.engine.store._connect() as db:
+            db.execute('CREATE TABLE receipt_flat_views(path TEXT PRIMARY KEY, hash TEXT NOT NULL)')
+            db.execute('INSERT INTO receipt_flat_views VALUES (?,?)', (source, '0' * 64))
+        with self.assertRaisesRegex(ValueError, 'managed source'):
+            self.engine.note_read(source)
+        with self.assertRaisesRegex(ValueError, 'managed source'):
+            self.engine.note_edit(self.request(source))
+        self.assertEqual(path.read_bytes(), b'alpha\nbeta\n')
+        self.assertFalse((self.vault / notes.LOCAL_DIRECTORY / 'backups').exists())
+
+    def test_secret_filter_rejects_new_and_edited_secrets_before_backup(self):
+        from beyin_v3_preferences import save
+        save(self.vault, {'secret_filter': True})
+        source = 'notes/secret-test.md'
+        token = 'ghp_' + 'x' * 30  # synthetic provider-format fixture
+        request = {'source': source, 'expected_sha256': None, 'content': token}
+        with self.assertRaisesRegex(ValueError, 'secret_filter'):
+            self.engine.note_edit(request)
+        self.assertFalse((self.vault / source).exists())
+        path = self.write(source)
+        request = self.request(source)
+        request['edits'][0]['new'] = token
+        with self.assertRaisesRegex(ValueError, 'secret_filter'):
+            self.engine.note_edit(request)
+        self.assertEqual(path.read_bytes(), b'alpha\nbeta\n')
+        self.assertFalse((self.vault / notes.LOCAL_DIRECTORY / 'backups').exists())
+        # Removing a pre-existing secret is allowed; byte preservation still applies.
+        path.write_bytes((token + '\r\n').encode())
+        request = {'source': source, 'expected_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                   'edits': [{'old': token, 'new': '[removed]'}]}
+        self.assertEqual(self.engine.note_edit(request)['status'], 'written')
+        self.assertEqual(path.read_bytes(), b'[removed]\r\n')
+        save(self.vault, {'secret_filter': False})
+        self.assertEqual(self.engine.note_edit({'source': 'notes/opt-out.md',
+                         'expected_sha256': None, 'content': token})['status'], 'written')
+
     def test_human_daily_without_current_view_tracking_remains_editable(self):
         source = 'daily/2026-10-19.md'
         for tracking in ('absent', 'retired'):

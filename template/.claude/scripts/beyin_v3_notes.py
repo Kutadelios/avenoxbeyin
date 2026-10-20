@@ -132,9 +132,12 @@ def _refuse_tracked_view(engine, source):
     # Current ownership rows still make it a managed view. Use the canonical
     # source, not a filename pattern or historical provenance of a retired view.
     with engine.store._connect() as db:
-        exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_views'").fetchone()
-        if exists and db.execute('SELECT 1 FROM receipt_views WHERE path=?', (source,)).fetchone():
-            raise ValueError('managed source; use the dedicated V3 command')
+        # #411 keeps flat ownership outside the table understood by older engines.
+        # Check both schemas so either PR can be installed independently.
+        for table in ('receipt_views', 'receipt_flat_views'):
+            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+            if exists and db.execute(f'SELECT 1 FROM {table} WHERE path=?', (source,)).fetchone():
+                raise ValueError('managed source; use the dedicated V3 command')
 
 
 def _bytes(path):
@@ -272,6 +275,10 @@ def _apply(engine, request, committed):
         updated = text.encode('utf-8')  # Keeps BOM and untouched CRLF bytes exactly.
         if updated == raw:
             return {'status': 'unchanged', 'source': source, 'sha256': actual}
+        # Preserve the exact requested bytes. With the opt-in filter enabled,
+        # reject a secret-bearing result instead of silently rewriting its anchors.
+        if engine._protect(text)[1]:
+            raise ValueError('secret_filter rejected note-edit content; remove secrets before retrying')
         backup = None
         if raw is not None:
             backups = folder / 'backups'
