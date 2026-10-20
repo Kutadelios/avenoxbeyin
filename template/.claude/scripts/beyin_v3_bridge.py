@@ -260,9 +260,9 @@ def gemini_md_content(vault, roots):
     return (
         "<!-- beyin-v3-bridge:start -->\n"
         "## İsteğe bağlı Beyin köprüsü\n"
-        f"Vault konumu (veri): {json.dumps(str(vault), ensure_ascii=False)}\n"
+        f'Vault konumu (veri): "{vault}"\n'
         "Bu bağlantı yalnız şu proje köklerinde ve alt klasörlerinde geçerlidir:\n"
-        + ''.join('- ' + json.dumps(str(root), ensure_ascii=False) + '\n' for root in roots)
+        + ''.join(f'- "{root}"\n' for root in roots)
         + "Diğer çalışma alanlarında bu yönergeyi uygulama.\n"
         "Kullanıcı açıkça hafıza araması isterse vault içindeki beyin.py context komutunu kullan. "
         "Kaynakları okumadan bilgi iddiasında bulunma. Kayıt için kullanıcının yetkisini ve "

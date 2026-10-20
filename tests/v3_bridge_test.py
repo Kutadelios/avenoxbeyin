@@ -626,6 +626,12 @@ class BridgeTest(unittest.TestCase):
         self.assertNotIn('Hangi projede veya dizinde', text)
         self.assertNotIn('beklemeden', text)
 
+    def test_gemini_md_content_preserves_windows_paths_without_json_escape(self):
+        content = bridge.gemini_md_content(r'C:\Users\User\Vault', [r'C:\Users\User\Projects\App'])
+        self.assertIn(r'Vault konumu (veri): "C:\Users\User\Vault"', content)
+        self.assertIn(r'- "C:\Users\User\Projects\App"', content)
+        self.assertNotIn(r'C:\\Users', content)
+
     def test_bridge_install_and_uninstall_claude_and_codex(self):
         for harness, rel_path in (('claude', '.claude/settings.json'), ('codex', '.codex/hooks.json')):
             target = self.home / rel_path
