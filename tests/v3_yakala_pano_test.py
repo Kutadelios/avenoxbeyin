@@ -788,7 +788,7 @@ class PopupWiringTest(ScreenshotFiles, unittest.TestCase):
             self.assertIn('> aklıma gelen', self.card(result)['body'])
             self.assertEqual(root.seen[0][0], 'Aklındakini yaz…')
             self.assertNotIn('GÖRSEL', root.seen[0][1])
-        # The reader found no picture: the path text is saved exactly as it was before the fix.
+        # The reader found no picture: the path text is retained exactly as originally.
         result, _, _ = self.popup(REPORTED, {'image': False, 'png': None, 'dib': None}, [('key', '<Return>')])
         self.assertEqual(result['kaynak_turu'], 'metin')
         self.assertIn('> ' + REPORTED, self.card(result)['body'])
@@ -1186,7 +1186,7 @@ class WindowsClipboardTest(unittest.TestCase):
         try:
             root.withdraw()
             clip = yakala._clipboard(root).strip()
-            # This is the text the popup used to save as the note; the fix depends on recognising it.
+            # This is the text the popup used to save as the note; the resolution depends on recognising it.
             self.assertEqual(clip, str(path).replace('\\', '/'))
             self.assertEqual(yakala.snip_path(clip), clip)
             thumb = yakala._image_thumb(root, self.image(clip))

@@ -309,8 +309,10 @@ okunmaz; açık sayfanın yüklenmiş adresi kullanılır. Eklenti, yeniden baş
 erişilebilirlik başlatma bayrağı gerekmez. Tek görünür renderer, pencere/süreç sahipliği ve
 okuma öncesi/sonrası sayfa URL'si doğrulanır. Birden fazla görünür renderer, görünmeyen belge,
 değişen sayfa veya zaman aşımı varsa URL verilmez. Bağlantı iki okumada değişirse yalnız imleç
-bağlantısı atılır. Sayfa ve imleç okuması tek bir yardımcı süreçte, 1 saniyelik bütçe içinde
-yapılır.
+bağlantısı atılır. Sayfa ve imleç okuması tek bir yardımcı süreçte, 1,8 saniyelik bütçe içinde
+yapılır. Chromium web erişilebilirliğini bir süre kullanılmayınca kapatır; o zaman ilk okuma boş
+gelir, renderer'a bir UI Automation isteğiyle erişilebilirlik açılır ve belge en fazla 0,8 saniye
+beklenir. Erişilebilirlik zaten açıksa okuma eskisi gibi kısa sürer.
 Opera Air 136.0.6008.70 üzerinde bayraksız ayrı profilde temel sağlayıcı yolu ölçüldü;
 oturum açılmış YouTube/Instagram akışlarında kullanıcı kabul testi ayrıca yapılmalıdır.
 
@@ -392,7 +394,7 @@ WGC, Windows 10 1903+ API yoludur; destek/izin/sürücü başarısızsa PrintWin
 Korumalı/GPU/exclusive-fullscreen uygulamaların tamamı için başarı veya HDR renk doğruluğu
 iddia edilmez. Herhangi bir başarısızlık eski panoyu otomatik kaynak yapmaz.
 
-UIA/pano için dış bekleme 1 saniye, WGC için 2,5 saniye, PrintWindow için 1,2 saniyedir;
+UIA/pano için dış bekleme 1 saniye (Opera okuyucusu 1,8 saniye), WGC için 2,5 saniye, PrintWindow için 1,2 saniyedir;
 süreç başlatma/sonlandırma ek giderleri olabilir. PNG/DIB en fazla **16.777.216 piksel**,
 görüntü payload'ı 64 MiB, metin UTF-8 payload'ı 4 MiB, IPC metadata'sı 64 KiB kabul eder.
 Büyük ilan edilmiş PNG boyutu Tk'ye verilmez. Kart/ham geçici yazım hataları temizlenir;
@@ -533,6 +535,9 @@ URL kullanıcı bilgileri ve bozuk adresler reddedilir. Defuddle ve yt-dlp'ye UR
 DNS yanıtları da denetlenir; Python HTTP yolunun yönlendirmeleri aynı kapıdan geçer. DNS geçici
 olarak çözümlenemezse kart hata notuyla kalır, sıradaki kartlar işlenmeye devam eder.
 
-Bu denetimler ilk hedefteki özel adresleri engeller. Yardımcı araçların kendi yönlendirmeleri ve
-DNS rebinding için tam ağ izolasyonu sağlamaz. Ham kaynak metni güvenilmeyen veri olarak işaretlenir;
+Python HTTP yolu bağlanırken adı yeniden çözer, her cevabı aynı kapıdan geçirir ve soketi denetlenen
+IP adresine açar (TLS yine asıl sunucu adını doğrular). Denetimden sonra değişen bir DNS cevabı
+(rebinding) bu yolu yerel adrese yönlendiremez. Sistemde proxy ayarlıysa hedefi proxy çözer; bu bağlama
+proxy'nin kendisine uygulanmaz. Defuddle ve yt-dlp adı kendileri yeniden çözer ve kendi yönlendirmelerini
+izler; bu iki yardımcı için ağ çıkışı izolasyonu yoktur. Ham kaynak metni güvenilmeyen veri olarak işaretlenir;
 metnin içindeki rol değişikliği, komut çalıştırma ve dosya silme istekleri talimat sayılmaz.
