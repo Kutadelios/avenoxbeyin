@@ -91,3 +91,13 @@ Günlük aranabilir bir yönlendirme notudur; kullanıcı isteği veya sonuç ö
 günlüğe kopyalanmaz. Aynı iş yeniden sonlandırılırsa iş kimliğiyle yinelenmesi
 önlenir. Eşzamanlı kullanıcı değişikliği fark edilirse yazma durur; mevcut not
 ezilmez. Last-Session bu katmanda da değiştirilmez.
+
+## Masaüstü bildirimleri
+
+Ajan başlangıcı, tamamlanması ve onay gereksinimi sabit başlık/metinle bildirilir.
+Özel istek veya sonuç özeti bildirim metnine girmez. Windows'ta kayıtlı uygulama
+kimliği ve sabit PowerShell betiği kullanılır; veri JSON üzerinden taşınır.
+Bildirim API'sinin çağrıyı kabul etmesi kullanıcının bildirimi gördüğünü kanıtlamaz.
+İşletim sistemi bildirimi engellese de iş durumu `yakala ajan` ile okunabilir;
+bildirim başarısızlığı doğrulanmış receipt veya sonuç durumunu değiştirmez.
+Gerçek Windows masaüstü sunumu bu Linux çalışmasında ölçülmemiştir.
