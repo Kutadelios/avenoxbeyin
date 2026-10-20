@@ -727,7 +727,7 @@ def main(argv=None):
                     if force_json:
                         error = {'error': 'SystemExit', 'message': message}
                         print(json.dumps(error, ensure_ascii=True), file=sys.stderr)
-                        sys.exit(1)
+                        self.exit(2)
                     super().error(message)
 
             parser = _UpdateArgumentParser()

@@ -1789,6 +1789,9 @@ def main(argv=None, return_result=False):
         # No traceback or raw input dump: callers retain their local source files.
         error = {"error": type(exc).__name__, "message": str(exc)}
         code = 1
+        if isinstance(exc, ArgumentParsingError):
+            error["error"] = "SystemExit"
+            code = 2
         if args.command in NOTE_JSON_COMMANDS:
             from beyin_v3_notes import NoteConflict, NotePartialWrite
             code = 2 if isinstance(exc, NoteConflict) else 1
