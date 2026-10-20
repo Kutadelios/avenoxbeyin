@@ -739,11 +739,28 @@ def recap_bounds_inverted(since, until):
     return first > last
 
 
-def parser():
-    root = argparse.ArgumentParser(description=__doc__)
+class ArgumentParsingError(Exception):
+    pass
+
+
+class JsonAwareArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args, is_json=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.is_json = is_json
+
+    def error(self, message):
+        if self.is_json:
+            raise ArgumentParsingError(message)
+        super().error(message)
+
+
+def parser(is_json=False):
+    root = JsonAwareArgumentParser(description=__doc__, is_json=is_json)
     root.add_argument("--vault", required=True, type=Path, help="Existing vault directory")
     root.add_argument("--state", type=Path, help="Local state directory outside the vault")
-    sub = root.add_subparsers(dest="command", required=True)
+    root.add_argument("--json", action="store_true", help="Format output as JSON")
+    sub = root.add_subparsers(dest="command", required=True,
+                              parser_class=lambda **kw: JsonAwareArgumentParser(is_json=is_json, **kw))
     sub.add_parser("init", help="Initialize local state; installs no hooks or services")
     sync_parser = sub.add_parser("sync", help="Reconcile Markdown sources into local state")
     sync_parser.add_argument("--full", action="store_true",
@@ -888,30 +905,39 @@ def parser():
 def main(argv=None, return_result=False):
     if hasattr(sys.stdin, "reconfigure"):
         sys.stdin.reconfigure(encoding="utf-8-sig")
-    argument_parser = parser()
-    args = argument_parser.parse_args(argv)
-    receipt_flags = args.command == "receipt" and any(
-        getattr(args, name) is not None for name in ("event_id", "summary", "summary_file", "ref", "link", "session"))
-    if receipt_flags:
-        for stream in (sys.stdout, sys.stderr):
-            if hasattr(stream, "reconfigure"):
-                stream.reconfigure(encoding="utf-8")
-        if args.file is not None:
-            argument_parser.error("--file cannot be combined with receipt flags")
-        if args.event_id is None:
-            argument_parser.error("--event-id is required in flag mode")
-        if args.summary is not None and args.summary_file is not None:
-            argument_parser.error("use exactly one of --summary and --summary-file")
-        if args.summary is None and args.summary_file is None:
-            argument_parser.error("--summary or --summary-file is required in flag mode")
-        if not args.ref:
-            argument_parser.error("--ref is required in flag mode (at least one)")
-    if args.command == "recap":
-        # Usage errors, raised before any state is opened or synced.
-        if args.days is not None and (args.since is not None or args.until is not None):
-            args.usage_error("argument --days: not allowed with argument --since/--until")
-        if args.since is not None and args.until is not None and recap_bounds_inverted(args.since, args.until):
-            args.usage_error("argument --since: must not be after --until")
+    args_list = list(sys.argv[1:] if argv is None else argv)
+    is_json = "--json" in args_list
+    argument_parser = parser(is_json=is_json)
+    try:
+        args = argument_parser.parse_args(argv)
+        receipt_flags = args.command == "receipt" and any(
+            getattr(args, name) is not None for name in ("event_id", "summary", "summary_file", "ref", "link", "session"))
+        if receipt_flags:
+            for stream in (sys.stdout, sys.stderr):
+                if hasattr(stream, "reconfigure"):
+                    stream.reconfigure(encoding="utf-8")
+            if args.file is not None:
+                argument_parser.error("--file cannot be combined with receipt flags")
+            if args.event_id is None:
+                argument_parser.error("--event-id is required in flag mode")
+            if args.summary is not None and args.summary_file is not None:
+                argument_parser.error("use exactly one of --summary and --summary-file")
+            if args.summary is None and args.summary_file is None:
+                argument_parser.error("--summary or --summary-file is required in flag mode")
+            if not args.ref:
+                argument_parser.error("--ref is required in flag mode (at least one)")
+        if args.command == "recap":
+            # Usage errors, raised before any state is opened or synced.
+            if args.days is not None and (args.since is not None or args.until is not None):
+                args.usage_error("argument --days: not allowed with argument --since/--until")
+            if args.since is not None and args.until is not None and recap_bounds_inverted(args.since, args.until):
+                args.usage_error("argument --since: must not be after --until")
+    except ArgumentParsingError as exc:
+        error = {"error": "SystemExit", "message": str(exc)}
+        if return_result:
+            return error, 1
+        print(json.dumps(error, ensure_ascii=True), file=sys.stderr)
+        return 1
     try:
         vault = args.vault.expanduser().resolve()
         if not vault.is_dir():
