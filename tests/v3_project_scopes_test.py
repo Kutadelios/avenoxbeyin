@@ -413,6 +413,26 @@ class ProjectScopesTest(unittest.TestCase):
         self.assertIn('GLOBAL_RULE', text)
         self.assertNotIn('OTHER_RULE', text)
 
+    def test_mapped_rules_preserve_path_spelling_and_visibility(self):
+        import beyin_v3_companion as companion
+        from beyin_v3_sync import SyncEngine
+        folder = self.vault / 'Custom/MiXeD'
+        folder.mkdir(parents=True)
+        self.scopes({'folders': {'CUSTOM/mixed': 'alpha'}})
+        source = folder / 'Kurallar.md'
+        for fields, visible in (({'visibility': 'internal'}, True),
+                                ({'visibility': 'private'}, False),
+                                ({'visibility': 'internal', 'trust': 'untrusted'}, False)):
+            with self.subTest(fields=fields):
+                source.write_text('---\n' + json.dumps(dict(id='alpha-rules', kind='note', **fields)) +
+                                  '\n---\n- **kural:** MAPPED_RULE_SENTINEL\n', encoding='utf-8')
+                SyncEngine(self.vault, self.store.state_dir).sync()
+                text = companion.context(self.store, 10000, 'mapped-rules', 'claude', rules_project='alpha')
+                self.assertEqual('\n[Custom/MiXeD/Kurallar.md]\n' in text, visible)
+                self.assertEqual('MAPPED_RULE_SENTINEL' in text, visible)
+                self.assertLessEqual(len(text), 10000)
+
+
 class TestResolveActiveProject(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -521,6 +521,23 @@ def clip(text, budget, tail=False, both=False):
     return marker + text[-keep:] if tail else text[:keep] + marker
 
 
+def project_rule_directory(vault, folder):
+    """Find the real spelling of one mapped path without walking the vault tree."""
+    from beyin_v3 import _path_redirected
+    from beyin_v3_projects import _scope_key, _scope_path
+    try:
+        current = Path(vault).resolve(strict=True)
+        for part in _scope_path(folder).split('/'):
+            matches = [entry for entry in current.iterdir()
+                       if _scope_key(entry.name) == _scope_key(part)]
+            if len(matches) != 1 or _path_redirected(matches[0]) or not matches[0].is_dir():
+                return None
+            current = matches[0]
+        return current
+    except (ValueError, OSError, RuntimeError):
+        return None
+
+
 def context(store, budget, session, harness, query='', receipt='', warning='', project=None, report=None,
             rules_project=None):
     """Budget actual displayed text, not repeated JSON metadata; never cut a record header.
@@ -563,14 +580,16 @@ def context(store, budget, session, harness, query='', receipt='', warning='', p
                     p_key = _scope_key(proj_clean)
                     for f_key, p_name in scopes['folders']:
                         if _scope_key(p_name) == p_key:
-                            candidate_dirs.append(store.vault_root / f_key)
+                            candidate_dirs.append(project_rule_directory(store.vault_root, f_key))
             except Exception:
                 pass
             for folder in ('projects', 'Projeler', 'projeler'):
-                candidate_dirs.append(store.vault_root / folder / proj_clean)
+                candidate_dirs.append(project_rule_directory(store.vault_root, folder + '/' + proj_clean))
 
             found = False
             for cand_dir in candidate_dirs:
+                if cand_dir is None:
+                    continue
                 for p_name in ('Kurallar.md', '.rules.md', 'rules.md'):
                     lexical = cand_dir / p_name
                     from beyin_v3 import _path_redirected
