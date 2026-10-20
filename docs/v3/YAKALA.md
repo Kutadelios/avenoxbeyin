@@ -548,3 +548,7 @@ IP adresine açar (TLS yine asıl sunucu adını doğrular). Denetimden sonra de
 proxy'nin kendisine uygulanmaz. Defuddle ve yt-dlp adı kendileri yeniden çözer ve kendi yönlendirmelerini
 izler; bu iki yardımcı için ağ çıkışı izolasyonu yoktur. Ham kaynak metni güvenilmeyen veri olarak işaretlenir;
 metnin içindeki rol değişikliği, komut çalıştırma ve dosya silme istekleri talimat sayılmaz.
+
+### Eşzamanlı kart yazımı
+
+Kart ve ham kaynak sonucu yalnız çıkarım başındaki bayt görüntüsü hâlâ geçerliyse birlikte kaydedilir. Başka bir yakalama veya iş kartı değiştirdiyse geç sonuç üzerine yazmaz. POSIX üzerinde kilit vault içindeki bir dosyaya değil, yerel durum kökünde dizinin aygıt/inode kimliğine bağlanır; farklı state seçimi aynı kart için ikinci bir kilit alanı oluşturmaz. Windows mevcut adlandırılmış mutex yolunu kullanır. Bu kilit yalnız aynı makinede bu modül üzerinden yazan süreçleri koordine eder.
