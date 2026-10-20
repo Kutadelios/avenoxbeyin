@@ -268,6 +268,71 @@ class IngestServerTest(unittest.TestCase):
         self.assertIn("--port", proc.stdout)
         self.assertIn("--token", proc.stdout)
 
+    def test_stress_http_socket_resilience(self):
+        import socket
+        import struct
+        import threading
+        import time
+        server = ingest_server.create_server(self.vault, port=0)
+        port = server.server_address[1]
+        # The server already survived a dropped client before #393; what changed is that the
+        # drop no longer reaches handle_error, which prints a traceback for every request.
+        errors, accepted, closed = [], [], []
+        server.handle_error = lambda request, address: errors.append(address)
+        process_request = server.process_request
+        server.process_request = lambda request, address: (accepted.append(1), process_request(request, address))
+        shutdown_request = server.shutdown_request
+        server.shutdown_request = lambda request: (closed.append(1), shutdown_request(request))
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        self.addCleanup(lambda: (server.shutdown(), server.server_close(), t.join(2)))
+
+        # Winsock linger uses two shorts; POSIX uses two native ints.
+        linger = struct.pack('hh' if sys.platform == 'win32' else 'ii', 1, 0)
+
+        # 1. Connection reset during read
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect(("127.0.0.1", port))
+        s.sendall(b"POST /ingest HTTP/1.1\r\nContent-Length: 100\r\n\r\n")
+        s.sendall(b"half data")
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+        s.close()
+        time.sleep(0.05)
+
+        # 2. Connection closed immediately after connect
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect(("127.0.0.1", port))
+        s.close()
+        time.sleep(0.05)
+
+        # 3. Connection reset during OPTIONS
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect(("127.0.0.1", port))
+        s.sendall(b"OPTIONS /ingest HTTP/1.1\r\n\r\n")
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+        s.close()
+        time.sleep(0.05)
+
+        # 4. Connection reset during GET
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect(("127.0.0.1", port))
+        s.sendall(b"GET /health HTTP/1.1\r\n\r\n")
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+        s.close()
+        time.sleep(0.05)
+
+        # 5. Server remains healthy and accepts new normal requests
+        import urllib.request
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health") as resp:
+            self.assertEqual(resp.status, 200)
+        # A reset that lands before accept() may never reach the server (ECONNABORTED), so wait
+        # for every accepted request, the /health one included, instead of a fixed count.
+        deadline = time.monotonic() + 10
+        while len(closed) < len(accepted) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(len(closed), len(accepted))
+        self.assertEqual(errors, [])
+
 
 if __name__ == '__main__':
     unittest.main()
