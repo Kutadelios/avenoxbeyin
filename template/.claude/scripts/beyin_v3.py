@@ -57,6 +57,18 @@ def _is_absolute_cross_platform(raw: str) -> bool:
     return bool(re.match(r"^([A-Za-z]:[/\\]|[/\\])", raw))
 
 
+def _resolve_state_path(pinned: Path) -> Path:
+    """Validate a pin even when non-strict realpath suppresses invalid-path errors."""
+    if "\0" in str(pinned):
+        raise ValueError("embedded null character in state path")
+    resolved = Path(pinned).expanduser().resolve()
+    try:
+        resolved.stat()
+    except FileNotFoundError:
+        pass  # A valid state directory may not have been created yet.
+    return resolved
+
+
 def resolve_state(vault: Path, pinned: Path) -> Path:
     """Resolve a foreign OS/user's conventional default; preserve custom and local pins."""
     expected = default_state(vault).resolve()
@@ -65,7 +77,7 @@ def resolve_state(vault: Path, pinned: Path) -> Path:
         return expected
     if _in_package_container(raw):
         try:
-            resolved = Path(pinned).expanduser().resolve()
+            resolved = _resolve_state_path(pinned)
             if _is_absolute_cross_platform(str(resolved)):
                 return resolved
         except (OSError, ValueError, RuntimeError):
@@ -82,7 +94,7 @@ def resolve_state(vault: Path, pinned: Path) -> Path:
     if conventional and portable.rsplit("/", 1)[0].casefold() != local_parent:
         return expected
     try:
-        resolved = Path(pinned).expanduser().resolve()
+        resolved = _resolve_state_path(pinned)
     except (OSError, ValueError, RuntimeError):
         return expected
 

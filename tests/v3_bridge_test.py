@@ -558,7 +558,7 @@ class BridgeTest(unittest.TestCase):
         # Verify GEMINI.md has pointer and preserved custom rule
         md_text = gemini_md.read_text(encoding='utf-8')
         self.assertIn('<!-- beyin-v3-bridge:start -->', md_text)
-        self.assertIn(str(self.vault), md_text)
+        self.assertIn(json.dumps(str(self.vault), ensure_ascii=False), md_text)
         self.assertIn('Keep this rule safe.', md_text)
         self.assertTrue((gemini_dir / 'GEMINI.md.bak').is_file())
 
@@ -622,7 +622,7 @@ class BridgeTest(unittest.TestCase):
     def test_antigravity_pointer_keeps_the_project_allowlist(self):
         bridge.install_bridge(self.vault, self.state, 'antigravity', [self.project], home=self.home)
         text = bridge.global_gemini_md_path(home=self.home).read_text(encoding='utf-8')
-        self.assertIn(str(self.project), text)
+        self.assertIn('- ' + json.dumps(str(self.project), ensure_ascii=False) + '\n', text)
         self.assertNotIn('Hangi projede veya dizinde', text)
         self.assertNotIn('beklemeden', text)
 
