@@ -11,7 +11,7 @@ assignees: ''
 
 ## Sorun ve beklenen davranış
 
-<!-- Ne yaptınız, ne oldu, ne olmasını bekliyordunuz? -->
+<!-- Ne yaptınız, gerçekte ne oldu ve ne olmasını bekliyordunuz? -->
 
 ## Ortam
 
@@ -22,10 +22,16 @@ assignees: ''
 
 ## Yeniden üretim
 
+<!-- Gerçekten denediğiniz adımları ve mümkünse sentetik örnek veriyi paylaşın.
+Doğrulayamadığınız adımları veya varsayımları belirtin. -->
+
 1.
 2.
 
 ## Hata çıktısı
+
+<!-- Temizlenmiş gerçek çıktı veya gözlemi ekleyin. Yalnızca AI/statik analiz bulgusuysa belirtin;
+kök nedeni bulmanız ya da düzeltme yazmanız gerekmez. -->
 
 ```text
 Temizlenmiş hata çıktısını buraya ekleyin.
