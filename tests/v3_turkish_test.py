@@ -63,6 +63,8 @@ GUARDS = (
     ('sistem', 'sisteme'), ('durum', 'duruma'), ('platform', 'platforma'), ('alarm', 'alarma'),
     ('prompt', 'promptu'), ('backend', 'backendi'), ('trend', 'trendi'), ('build', 'buildi'),
     ('minimal', 'minimali'), ('anahtar', 'anahtarı'), ('sınır', 'sınırı'),
+    # A folded i/u cannot reveal fronting, so older vowels must not veto suffixes.
+    ('tarih', 'tarihte'), ('hakim', 'hakime'), ('kalori', 'kaloriler'), ('kabul', 'kabulde'),
     ('claude', 'claudenin'), ('claude', 'claudeye'), ('claude', 'claudede'),
 )
 
@@ -126,6 +128,12 @@ class TurkishStemTest(unittest.TestCase):
         for root, inflected in GUARDS:
             with self.subTest(root=root):
                 self.assertEqual(self.stem(root), self.stem(inflected))
+
+    def test_claude_keeps_its_literal_root_without_matching_a_truncated_name(self):
+        for word in ('claude', 'claudenin', 'claudeye', 'claudede'):
+            with self.subTest(word=word):
+                self.assertEqual(self.stem(word), 'claude')
+        self.assertNotEqual(self.stem('clau'), self.stem('claude'))
 
     def test_stemming_replaces_rather_than_expands(self):
         # The strict gate counts matched query words, so a word may never become two tokens.
@@ -220,6 +228,28 @@ class TurkishVerbIssueTest(VaultTestCase):
                 self.assertEqual(self.context('Claude ayarları nerede'), ['claude'])
                 self.assertEqual(self.context("Claude'da bellek ayarları"), ['claude'])
                 self.assertEqual(self.context("Claude'un ayarları"), ['claude'])
+
+    def test_ambiguous_last_vowels_keep_real_note_matches(self):
+        pairs = (('tarih', 'tarihte'), ('hakim', 'hakime'),
+                 ('kalori', 'kaloriler'), ('kabul', 'kabulde'))
+        for i, (_, written) in enumerate(pairs):
+            self.ingest('weak-%s' % i, written + ' hakkında sentetik kayıt.',
+                        'knowledge/weak-%s.md' % i)
+        for passages in (True, False):
+            self.store.STRICT_PASSAGES = passages
+            for i, (query, _) in enumerate(pairs):
+                with self.subTest(query=query, passages=passages):
+                    expected = ['weak-%s' % i]
+                    if query == 'tarih':
+                        expected.append('tarih')
+                    self.assertCountEqual(self.context(query), expected)
+
+    def test_truncated_name_does_not_find_claude(self):
+        for passages in (True, False):
+            self.store.STRICT_PASSAGES = passages
+            with self.subTest(passages=passages):
+                self.assertEqual(self.context('clau'), [])
+                self.assertEqual(self.context('Claude'), ['claude'])
 
     def test_imperative_prompt_stays_silent(self):
         for passages in (True, False):
