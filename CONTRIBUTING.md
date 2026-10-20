@@ -39,7 +39,7 @@ Teknik ayrıntılar için: [Runtime Sözleşmesi](docs/v3/RUNTIME.md) · [Markdo
 
 ## 3. Bakım turları nasıl işliyor?
 
-Avenoxbeyin'de PR'ların nasıl incelendiğini bilmek, hazırladığınız katkının hızlıca kabul edilmesini sağlar:
+Avenoxbeyin'de PR'ların nasıl incelendiğini bilmek, katkınızı incelemeye hazırlamanıza yardımcı olur:
 
 - **Gerçek ortamda yeniden üretim:** Her turda açık PR ve issue'lar incelenir; her PR ayrı bir çalışma ağacında (`git worktree`) test edilir. PR'daki iddia güncel `main` üzerinde gerçek kurulum, gerçek veritabanı satırı veya gerçek dosya ile yeniden üretilir; testteki mock/sahte satır tek başına kanıt sayılmaz. Regresyon testinin düzeltme olmadan düştüğü (`RED`) bizzat doğrulanır.
 - **Yazarlık ve commit bütünlüğü:** Katkıcı commit'leri yeniden yazılmaz (rebase, squash veya force-push yapılmaz). Gereken küçük düzeltmeler varsa maintainer tarafından dalınıza küçük ve ayrı bir commit olarak eklenir; PR `merge commit` ile ana dala alınır ve yazarlığınız tam korunur. Maintainer commit'i varsa PR yorumunda neyin neden değiştirildiği açıklanır.
@@ -53,7 +53,7 @@ Avenoxbeyin'de PR'ların nasıl incelendiğini bilmek, hazırladığınız katk�
 - Mevcut kod düzenini ve konvansiyonları takip edin; aynı işi yapan ikinci bir modül veya gereksiz soyutlama eklemeyin.
 - Hata düzeltirken hatayı kanıtlayan ve düzeltme olmadan düşen bir **regresyon testi** ekleyin.
 - V3 test keşfi: Testler repo kökünde `tests/v3_*test.py` deseniyle keşfedilir. Alt süreç (subprocess) açan testlerde ortamı `tests/v3_package_helpers.inherited_env()` ile kurun (bu kural, aktif ajan oturumundaki `BEYIN_V3_SKIP` değişkeninin testi sahte biçimde yeşile boyamasını önler).
-- **Geriye dönük uyumluluk ve Rollback kuralı:** Kalıcı ayar, yeni istemci adı ya da kurulum bileşeni ekleyen bir PR'da önceki sürüme rollback senaryosu mutlaka denenmelidir. Eski sürümlerin `validate()` fonksiyonu bilinmeyen anahtarları reddettiği için, yeni kalıcı ayarlar `.beyin-preferences.json` yerine `state/` altında ayrı bir dosyada tutulmalıdır.
+- **Geriye dönük uyumluluk ve Rollback kuralı:** Kalıcı ayar, yeni istemci adı ya da kurulum bileşeni ekleyen bir PR'da önceki sürüme rollback senaryosu mutlaka denenmelidir. Eski sürümlerin `validate()` fonksiyonu bilinmeyen anahtarları ve desteklenen aralığın dışındaki değerleri reddettiği için, yeni kalıcı ayarlar `.beyin-preferences.json` yerine `state/` altında ayrı bir dosyada tutulmalıdır.
 - Semantik testlerde [sabit sentetik fixture ve holdout beklentilerini](docs/v3/SEMANTIC-TEST-CONTRACT.md) yalnızca puan yükseltmek amacıyla değiştirmeyin. Testlerde gerçek kullanıcı vault'u yerine sentetik veriler ve geçici dizinler kullanın.
 
 ### Temel test komutları (repo kökünde):
@@ -107,4 +107,6 @@ PR açmadan önce:
 
 Gerçek kişisel notları, özel çalışma alanlarını, sohbet kayıtlarını, dosya yollarını, token veya API anahtarlarını asla issue, PR, test fixture'ı veya loglara eklemeyin. Test ve örneklerde her zaman sentetik veriler kullanın.
 
-Ciddi bir güvenlik açığı bulursanız, bunu herkese açık bir issue'da paylaşmak yerine GitHub'ın özel güvenlik bildirimi (Security Advisory) kanalını veya repo maintainer'ı ile doğrudan özel iletişimi tercih edin.
+Ciddi bir güvenlik açığı bulursanız, ayrıntıları herkese açık bir issue'da paylaşmak yerine, kullanılabilir durumdaysa GitHub'ın özel güvenlik bildirim kanalını veya maintainer ile özel iletişimi tercih edin. Özel bildirim kanalının etkinleştirilmesi maintainer kararıdır.
+
+Bu rehber, [#427](https://github.com/avenoxai/avenoxbeyin/issues/427) içindeki @ersn-dev taslağı ve maintainer açıklamalarından yararlanır. Depo ayarları ve bakım rollerinin paylaşılması gibi diğer öneriler ayrı değerlendirilir; rehberin eklenmesi issue'nun tamamını çözmez.
