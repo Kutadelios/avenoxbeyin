@@ -99,6 +99,17 @@ class AgentFiles(unittest.TestCase):
         self.spawn = patch.object(yakala, '_agent_spawn_worker', return_value=types.SimpleNamespace(pid=1234))
         self.spawned = self.spawn.start()
         self.addCleanup(self.spawn.stop)
+        # Preflight tests must not read the developer/CI host's managed policies.
+        codex_config = patch.object(yakala, '_agent_codex_config_files', return_value=())
+        self.codex_config_files = codex_config.start()
+        self.addCleanup(codex_config.stop)
+        codex_home = patch.object(yakala, '_agent_codex_home', return_value=base / 'codex-home')
+        self.codex_home = codex_home.start()
+        self.addCleanup(codex_home.stop)
+        codex_mdm = patch.object(yakala, '_agent_codex_mdm_preflight')
+        codex_mdm.start()
+        self.addCleanup(codex_mdm.stop)
+
     def configure(self, client='claude', **values):
         values.setdefault('downloads_dir', str(self.downloads))
         path = Path(self.tmp.name) / 'agent-options.json'
@@ -541,6 +552,25 @@ class AgentCommandTest(AgentFiles):
         for flag in ('--bare', '--dangerously-skip-permissions', 'bypassPermissions'):
             self.assertNotIn(flag, argv)
 
+    def test_codex_template_uses_platform_permissions_and_never_claims_a_preset_thread_id(self):
+        argv, request, result, job, prefix = self.command('codex')
+        self.assertEqual(argv[:len(prefix)], prefix)
+        self.assertNotIn(request, argv)
+        self.assertIn('exec', argv)
+        self.assert_codex_filesystem_policy(argv)
+        self.assertIn('never', argv)
+        self.assertIn('--ignore-rules', argv)
+        self.assertIn('--json', argv)
+        self.assertIn('--skip-git-repo-check', argv)
+        self.assertIn('features.shell_tool=false', argv)
+        self.assertIn('features.apps=false', argv)
+        self.assertIn('web_search="disabled"', argv)
+        self.assertIn('mcp_servers.yakala.enabled=true', argv)
+        self.assertNotIn('--session-id', argv)
+        self.assertNotIn('--ephemeral', argv)
+        for flag in ('danger-full-access', '--yolo', '--dangerously-bypass-approvals-and-sandbox'):
+            self.assertNotIn(flag, argv)
+
 
 class AgentNetworkOptionTest(AgentFiles):
     """ag=kisitli is the default (exact source URLs only); ag=acik is an explicit research opt-in."""
@@ -571,6 +601,10 @@ class AgentNetworkOptionTest(AgentFiles):
         for rule in ('yalniz herkese acik bilgi', 'arama sorgusuna, URL', 'approval_required") ile kullanicidan izin'):
             self.assertIn(rule, prompt)
 
+    def test_open_network_turns_codex_hosted_search_on(self):
+        codex, _ = self.argv('codex', 'acik')
+        self.assertIn('web_search="live"', codex)
+        self.assertNotIn('web_search="disabled"', codex)
 
     def test_open_network_skips_the_exact_url_capability_check(self):
         self.configure('claude')
@@ -701,6 +735,116 @@ class AgentEnvironmentTest(AgentFiles):
             self.assertNotIn(name, env)
 
 
+class AgentPreflightTest(AgentFiles):
+    HELP = ('--print -p --permission-mode --permission-prompts --tools --allowedTools --disallowedTools '
+            '--strict-mcp-config --mcp-config --session-id --append-system-prompt '
+            '--output-format --max-budget-usd --sandbox -s --json -C --cd '
+            '--output-last-message -o --skip-git-repo-check --ignore-rules '
+            '--ask-for-approval -a --config -c --disable --strict-config')
+
+    def invoke(self, mcp='[]', plugins='{"installed": [], "available": []}', help_text=None, client='codex'):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if '--version' in argv:
+                stdout = ('2.1.296 (Claude Code)' if client == 'claude' else 'codex-cli 0.163.0')
+                if help_text is not None:
+                    stdout = help_text
+            elif 'mcp' in argv and 'list' in argv:
+                stdout = mcp
+            elif 'plugin' in argv and 'list' in argv:
+                stdout = plugins
+            elif 'features' in argv and 'list' in argv:
+                value = 'false' if '--disable' in argv else 'true'
+                stdout = ''.join(name + ' stable ' + value + '\n' for name in yakala.CODEX_DISABLED)
+            else:
+                stdout = self.HELP if help_text is None else help_text
+            return subprocess.CompletedProcess(argv, 0, stdout.encode('utf-8'), b'')
+
+        system = types.SimpleNamespace(**{**vars(os), 'name': 'posix'})
+        with patch.object(yakala, 'os', system), patch.object(yakala.subprocess, 'run', side_effect=run):
+            result = yakala._agent_preflight(client, [client], self.vault)
+        return result, calls
+
+    def test_empty_known_inventory_is_accepted_without_a_model_call(self):
+        for client in ('claude', 'codex'):
+            with self.subTest(client=client):
+                result, calls = self.invoke(client=client)
+                self.assertTrue(calls)
+                for argv, kwargs in calls:
+                    self.assertFalse(kwargs.get('shell', False))
+                    self.assertTrue('--help' in argv or '--version' in argv or 'list' in argv, argv)
+                    self.assertEqual(kwargs.get('cwd'), str(self.vault))
+
+    def test_enabled_existing_mcp_is_refused(self):
+        with self.assertRaises((ValueError, RuntimeError, OSError)):
+            self.invoke(mcp='[{"name": "unbounded", "enabled": true}]')
+
+    def test_unknown_mcp_inventory_shape_is_refused(self):
+        for response in ('{}', 'null', 'not json'):
+            with self.subTest(response=response), self.assertRaises((ValueError, RuntimeError, OSError)):
+                self.invoke(mcp=response)
+
+    def test_enabled_existing_plugin_is_refused(self):
+        with self.assertRaises((ValueError, RuntimeError, OSError)):
+            self.invoke(plugins='{"installed": [{"pluginId": "other@market", "enabled": true}], "available": []}')
+
+    def test_unknown_plugin_inventory_shape_is_refused(self):
+        for response in ('[]', '{}', 'null', 'not json'):
+            with self.subTest(response=response), self.assertRaises((ValueError, RuntimeError, OSError)):
+                self.invoke(plugins=response)
+
+    def test_user_mcp_server_is_switched_off_for_the_run_only(self):
+        calls = []
+        enabled = '[{"name": "node_repl", "enabled": true}, {"name": "old", "enabled": false}]'
+        off = '[{"name": "node_repl", "enabled": false}, {"name": "old", "enabled": false}]'
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            if 'mcp' in argv and 'list' in argv:
+                stdout = off if 'mcp_servers.node_repl.enabled=false' in argv else enabled
+            elif 'plugin' in argv and 'list' in argv:
+                stdout = '{"installed": [], "available": []}'
+            elif '--version' in argv:
+                stdout = 'codex-cli 0.163.0'
+            elif 'features' in argv and 'list' in argv:
+                value = 'false' if '--disable' in argv else 'true'
+                stdout = ''.join(name + ' stable ' + value + '\n' for name in yakala.CODEX_DISABLED)
+            else:
+                stdout = self.HELP
+            return subprocess.CompletedProcess(argv, 0, stdout.encode('utf-8'), b'')
+
+        system = types.SimpleNamespace(**{**vars(os), 'name': 'posix'})
+        with patch.object(yakala, 'os', system), patch.object(yakala.subprocess, 'run', side_effect=run):
+            self.assertEqual(yakala._agent_preflight('codex', ['codex'], self.vault), ('node_repl',))
+        listing = [argv for argv in calls if 'list' in argv and 'features' not in argv]
+        for feature in ('plugins', 'unified_exec', 'computer_use'):
+            self.assertTrue(all(feature in argv for argv in listing), feature)
+
+    def test_unsafe_mcp_name_is_refused_not_quoted(self):
+        for name in ('a.b', 'x y', 'yakala', ''):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                self.invoke(mcp=json.dumps([{'name': name, 'enabled': True}]))
+
+    def test_codex_command_disables_every_bypass_feature_and_named_servers(self):
+        self.configure('codex')
+        result, job, card = self.queued(url='https://example.com/post')
+        job['codex_mcp_off'] = ['node_repl']
+        with patch.object(yakala, '_agent_executable', return_value=['codex']):
+            argv = yakala._agent_command(self.vault, self.state, job, job['config'])
+        for feature in yakala.CODEX_DISABLED:
+            self.assertIn(feature, argv)
+        self.assertIn('mcp_servers.node_repl.enabled=false', argv)
+        self.assertLess(argv.index('mcp_servers.node_repl.enabled=false'), argv.index('exec'))
+
+    def test_unsupported_cli_does_not_silently_drop_required_flags(self):
+        for client, output in (('codex', 'Usage: old-codex exec PROMPT'),
+                               ('claude', '2.1.258 (Claude Code)'), ('claude', 'unexpected version output')):
+            with self.subTest(client=client, output=output), self.assertRaises((ValueError, RuntimeError, OSError)):
+                self.invoke(client=client, help_text=output)
+
+
 class AgentEventsTest(AgentFiles):
     def events(self, client, rows):
         path = Path(self.tmp.name) / 'agent.log'
@@ -736,7 +880,20 @@ class AgentEventsTest(AgentFiles):
                                          'permission_denials': [{'tool_name': 'Bash', 'tool_input': {}}]}])
         self.assertTrue(result['denied'])
 
+    def test_codex_thread_started_and_completed_are_parsed_from_jsonl(self):
+        session = str(uuid.uuid4())
+        result = self.events('codex', ['worker header', {'type': 'thread.started', 'thread_id': session},
+                                       {'type': 'turn.started'},
+                                       {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'Tamam.'}},
+                                       {'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output_tokens': 2}}])
+        self.assertEqual(result['session_id'], session)
+        self.assertTrue(result['ok'])
 
+    def test_codex_failed_turn_never_becomes_success(self):
+        result = self.events('codex', [{'type': 'thread.started', 'thread_id': str(uuid.uuid4())},
+                                       {'type': 'turn.failed', 'error': {'message': 'Rate limit exceeded'}}])
+        self.assertFalse(result['ok'])
+        self.assertTrue(result['error'])
 
     def test_unstructured_or_truncated_log_is_not_proof_of_success(self):
         for client in ('claude', 'codex'):
@@ -1171,6 +1328,12 @@ class AgentPlatformTest(unittest.TestCase):
                 mock.patch.object(Path, 'read_text', side_effect=AssertionError('shim read')):
             self.assertEqual(yakala._agent_executable('claude', str(shim)), [str(native)])
 
+    def test_codex_npm_script_and_sibling_node(self):
+        shim = self.file('npm/codex.cmd')
+        script = self.file('npm/node_modules/@openai/codex/bin/codex.js')
+        node = self.file('npm/node.exe')
+        with mock.patch.object(yakala.sys, 'platform', 'win32'):
+            self.assertEqual(yakala._agent_executable('codex', shim), [str(node), str(script)])
 
     def test_unknown_batch_and_missing_package_fail_closed(self):
         bad = self.file('npm/unknown.cmd')

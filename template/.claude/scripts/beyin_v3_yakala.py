@@ -7749,7 +7749,7 @@ def _agent_load_job(vault, state, job_id):
         raise ValueError('Ajan is kaydi gecersiz.')
     job = json.loads(path.read_text(encoding='utf-8'))
     if (not isinstance(job, dict) or job.get('schema') != AGENT_SCHEMA or job.get('id') != job_id or
-            job.get('vault') != str(Path(vault).resolve()) or job.get('client') not in ('claude',)):
+            job.get('vault') != str(Path(vault).resolve()) or job.get('client') not in ('claude', 'codex')):
         raise ValueError('Ajan is kaydi baska vaulta ait veya semasi desteklenmiyor.')
     # Reject a damaged record here, before queue ordering or worker dispatch can
     # let one malformed job stop every unrelated request in this vault.
@@ -7840,8 +7840,8 @@ def _agent_validate_settings(config, vault):
         raise ValueError('Ajan JSON ayarlari bilinmeyen alan iceriyor.')
     if config.get('schema') != AGENT_SCHEMA or config.get('vault') != str(Path(vault).resolve()):
         raise ValueError('Ajan ayari baska vaulta ait veya semasi desteklenmiyor.')
-    if config.get('client') not in ('kapali', 'claude'):
-        raise ValueError('Bu asamada ajan claude veya kapali olmali.')
+    if config.get('client') not in ('kapali', 'claude', 'codex'):
+        raise ValueError('Ajan claude, codex veya kapali olmali.')
     if config.setdefault('gorunum', 'gizli') not in AGENT_VIEWS:  # jobs queued before the option
         raise ValueError('Ajan gorunumu gizli veya pencere olmali.')
     if config.setdefault('ag', 'kisitli') not in AGENT_NETWORK:
@@ -8094,6 +8094,275 @@ def _agent_spawn_worker(vault, state):
                                 **({} if os.name == 'nt' else {'start_new_session': True}))
 
 
+CODEX_MIN_VERSION = (0, 155, 1)
+
+
+CODEX_WINDOWS_MIN_VERSION = (0, 163, 0)
+
+
+CODEX_DISABLED = ('shell_tool', 'unified_exec', 'view_image', 'apps', 'multi_agent', 'multi_agent_v2', 'plugins',
+                  'remote_plugin', 'computer_use', 'browser_use', 'browser_use_external', 'in_app_browser',
+                  'image_generation', 'goals')
+
+
+def _agent_codex_flags(mcp_off=()):
+    # Disable the V2 selector and the model-selected agent surface too. In 0.155.1,
+    # --disable multi_agent alone still allows V2 tools chosen by config or model metadata.
+    flags = ['-a', 'never', '-c', 'agents.enabled=false']
+    for feature in CODEX_DISABLED:
+        flags += ['--disable', feature]
+    for name in mcp_off:  # names checked by _agent_preflight; TOML bare keys
+        flags += ['-c', 'mcp_servers.' + name + '.enabled=false']
+    return flags
+
+
+def _agent_codex_permissions():
+    """Use the supported filesystem boundary for this platform.
+
+    apply_patch validates existing content before checking write approval. The
+    documented named profile reaches that read through the filesystem sandbox;
+    legacy -s read-only would select a different profile and reopen the oracle.
+    Use a fresh name so deep config merging cannot inherit a user's narrower
+    filesystem grants. MCP and trusted lifecycle hooks retain their own scope.
+    Measured with official Linux Codex 0.155.1, 0.160.0 and 0.163.0.
+
+    Windows uses explicit MXC, whose supported policy accepts root deny without
+    elevated's root-read prerequisite. Unsupported hosts/policies must fail;
+    prefer_mxc would permit legacy fallback and is not used. The Windows minimum
+    is 0.163.0. Native Windows enforcement remains a separate acceptance test.
+    """
+    name = 'beyin_yakala_' + secrets.token_hex(16)
+    flags = ['-c', 'permissions.' + name + '.filesystem={":root"="deny"}',
+             '-c', 'default_permissions=' + json.dumps(name)]
+    if os.name == 'nt':
+        flags += ['-c', 'windows.sandbox="mxc"']
+    return flags
+
+
+def _agent_codex_home(vault):
+    cwd = Path(vault) if vault else Path.cwd()
+    home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex').expanduser()
+    return (cwd / home).resolve()
+
+
+def _agent_codex_system_dir():
+    """Use Codex's native system-config namespace; never trust an env alias."""
+    if os.name != 'nt':
+        return Path('/etc/codex')
+    import ctypes as C
+    import uuid
+    class GUID(C.Structure):
+        _fields_ = [('data', C.c_ubyte * 16)]
+    result = C.c_wchar_p()
+    try:
+        folder = GUID.from_buffer_copy(uuid.UUID('62ab5d82-fdc1-4dc3-a9dd-070d1d495d97').bytes_le)
+        shell = C.WinDLL('shell32', use_last_error=True)
+        ole = C.WinDLL('ole32')
+        shell.SHGetKnownFolderPath.argtypes = [C.POINTER(GUID), C.c_uint32, C.c_void_p,
+                                             C.POINTER(C.c_wchar_p)]
+        shell.SHGetKnownFolderPath.restype = C.c_long
+        ole.CoTaskMemFree.argtypes = [C.c_void_p]
+        ole.CoTaskMemFree.restype = None
+        try:
+            if shell.SHGetKnownFolderPath(C.byref(folder), 0, None, C.byref(result)) or not result.value:
+                raise ValueError('ProgramData unavailable')
+            directory = Path(result.value)
+            if not directory.is_absolute():
+                raise ValueError('ProgramData not absolute')
+            return directory / 'OpenAI' / 'Codex'
+        finally:
+            if result:
+                ole.CoTaskMemFree(C.cast(result, C.c_void_p))
+    except (OSError, AttributeError, ValueError) as exc:
+        raise ValueError('Codex Windows sistem config konumu dogrulanamadi; ajan baslatilmadi.') from exc
+
+
+def _agent_codex_config_files(vault):
+    """Include lower-priority layers too: merging must not hide a managed limit."""
+    cwd = Path(vault) if vault else Path.cwd()
+    home = _agent_codex_home(vault)
+    files = [(home / 'config.toml', False), (home / 'managed_config.toml', True),
+             (home / 'requirements.toml', True)]
+    system_dir = _agent_codex_system_dir()
+    files += [(system_dir / name, name != 'config.toml')
+              for name in ('config.toml', 'managed_config.toml', 'requirements.toml')]
+    files += [(parent / '.codex' / 'config.toml', False) for parent in (cwd, *cwd.parents)]
+    # A default user profile can load <name>.config.toml alongside config.toml.
+    # Check all such fragments, including inactive ones, without reimplementing
+    # Codex's profile selection and config merge rules.
+    for folder in dict.fromkeys(path.parent for path, _ in files):
+        try:
+            with os.scandir(folder) as entries:
+                for index, entry in enumerate(entries):
+                    if index >= 4096:
+                        raise ValueError('config directory size limit')
+                    if entry.name.endswith('.config.toml'):
+                        files.append((folder / entry.name, False))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            raise ValueError('Codex config konumlari okunamadi; '
+                             'guvenli kok reddi dogrulanamadi, ajan baslatilmadi.') from exc
+    return tuple(dict.fromkeys(files))
+
+
+def _agent_codex_profile_preflight(vault):
+    """Refuse constraints which can replace the random root-deny profile.
+
+    Codex 0.163.0 can silently select a managed default when a named profile is
+    outside allowed_permission_profiles. --strict-config does not prevent that.
+    Never try to infer that an administrator's alternative profile is safe.
+    """
+    import tomllib
+
+    def check(value, managed=False):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in ('allowed_permission_profiles', 'allowed_sandbox_modes', 'remote_sandbox_config') or (
+                        managed and key in ('default_permissions', 'sandbox_mode')):
+                    raise ValueError('Codex izin profili yonetici veya kullanici ayariyla kisitli (' + key +
+                                     '); guvenli kok reddi dogrulanamadi, ajan baslatilmadi. '
+                                     'Normal Codex oturumunda yapilandirmayi incele.')
+                check(item, managed)
+        elif isinstance(value, list):
+            for item in value:
+                check(item, managed)
+
+    def read(path):
+        try:
+            with path.open('rb') as stream:
+                data = stream.read(1024 * 1024 + 1)
+            if len(data) > 1024 * 1024:
+                raise ValueError('config size limit')
+            return data
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            raise ValueError('Codex izin yapilandirmasi okunamadi; guvenli kok reddi dogrulanamadi, '
+                             'ajan baslatilmadi. Config dosyalarini ve erisim izinlerini incele.') from exc
+
+    def check_toml(data, managed):
+        try:
+            value = tomllib.loads(data.decode('utf-8'))
+        except (UnicodeError, ValueError) as exc:
+            raise ValueError('Codex izin yapilandirmasi cozumlenemedi; '
+                             'ajan baslatilmadi. Config TOML dosyalarini incele.') from exc
+        check(value, managed)
+
+    for path, managed in _agent_codex_config_files(vault):
+        data = read(path)
+        if data is not None:
+            check_toml(data, managed)
+
+    # Cloud-managed requirements are another config layer. The local CLI probes
+    # can refresh this cache; preflight checks it again after those probes.
+    data = read(_agent_codex_home(vault) / 'cloud-config-bundle-cache.json')
+    if data is not None:
+        try:
+            bundle = json.loads(data)
+        except (UnicodeError, ValueError) as exc:
+            raise ValueError('Codex yonetilen bulut config onbellegi cozumlenemedi; ajan baslatilmadi.') from exc
+        # Do not depend on a particular cache schema to unwrap embedded TOML.
+        # A present managed bundle is refused even if its limits appear unrelated.
+        if bundle:
+            raise ValueError('Codex yonetilen bulut config onbellegi var; '
+                             'guvenli kok reddi dogrulanamadi, ajan baslatilmadi. '
+                             'Normal Codex oturumunda yonetici ayarlarini incele.')
+
+    if sys.platform == 'darwin':
+        _agent_codex_mdm_preflight()
+
+
+def _agent_codex_mdm_preflight():
+    # MDM can supply both legacy config and requirements outside CODEX_HOME.
+    # Refuse a present managed domain rather than guessing its effective policy
+    # from on-disk plist files (CFPreferences can also provide host/user layers).
+    import ctypes
+    try:
+        cf = ctypes.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
+        cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+        cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        cf.CFPreferencesCopyAppValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        cf.CFPreferencesCopyAppValue.restype = ctypes.c_void_p
+        cf.CFRelease.argtypes = [ctypes.c_void_p]
+        domain = cf.CFStringCreateWithCString(None, b'com.openai.codex', 0x08000100)
+        if not domain:
+            raise ValueError('MDM domain')
+        try:
+            for name in (b'config_toml', b'requirements_toml', b'config_toml_base64',
+                         b'requirements_toml_base64'):
+                key = cf.CFStringCreateWithCString(None, name, 0x08000100)
+                if not key:
+                    raise ValueError('MDM key')
+                try:
+                    value = cf.CFPreferencesCopyAppValue(key, domain)
+                finally:
+                    cf.CFRelease(key)
+                if value:
+                    cf.CFRelease(value)
+                    raise ValueError('MDM policy')
+        finally:
+            cf.CFRelease(domain)
+    except (OSError, AttributeError, ValueError) as exc:
+        raise ValueError('Codex yonetilen macOS izin yapilandirmasi var veya okunamadi; '
+                         'guvenli kok reddi dogrulanamadi, ajan baslatilmadi. '
+                         'Normal Codex oturumunda yonetici ayarlarini incele.') from exc
+
+
+def _agent_codex_features(prefix, vault, *, restricted=False):
+    """Validate the plain feature table before using any feature name in --disable.
+
+    No --json: Codex's feature list is a padded name/stage/bool table, including the
+    two-word stage `under development`. Removed flags can be accepted but do nothing.
+    """
+    flags = _agent_codex_flags() if restricted else []
+    rc, output, error = _run([*prefix, *flags, 'features', 'list'], 15,
+                             cwd=str(vault) if vault else None)
+    if rc or not output.strip() or len(output) > 128 * 1024:
+        raise ValueError('Codex ozellik listesi dogrulanamadi; codex features list ciktisini incele.')
+    features = {}
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        match = re.fullmatch(r'\s*([a-z][a-z0-9_.]*)\s+'
+                             r'(under development|experimental|stable|deprecated|removed)\s+'
+                             r'(true|false)\s*', line)
+        if not match or match[1] in features:
+            raise ValueError('Codex ozellik tablosu bilinmeyen veya yinelenen satir iceriyor.')
+        features[match[1]] = (match[2], match[3] == 'true')
+    missing = [name for name in CODEX_DISABLED if name not in features]
+    if missing:
+        raise ValueError('Codex guvenlik ozellikleri eksik: ' + ', '.join(missing) +
+                         '. Codex 0.155.1 veya sonrasi ve uyumlu ozellik tablosu gerekli.')
+    removed = [name for name in CODEX_DISABLED if features[name][0] == 'removed']
+    if removed:
+        raise ValueError('Codex guvenlik ozellikleri kaldirilmis: ' + ', '.join(removed) +
+                         '; bu CLI surumu icin Yakala uyumlulugunu incele.')
+    if restricted:
+        # 0.155.1/0.160 may force unified_exec on unless managed requirements prohibit it.
+        # Its handlers still require shell_tool, which must be off. Do not mistake an accepted
+        # --disable for effective enforcement, or reject this known, gated selector as a tool.
+        enabled = [name for name in CODEX_DISABLED if features[name][1] and not
+                   (name == 'unified_exec' and not features['shell_tool'][1])]
+        if enabled:
+            raise ValueError('Codex guvenlik ozellikleri kapatilamadi: ' + ', '.join(enabled))
+    return features
+
+
+def _agent_codex_inventory(prefix, vault, noun, mcp_off=()):
+    rc, output, error = _run([*prefix, *_agent_codex_flags(mcp_off), noun, 'list', '--json'], 15,
+                             cwd=str(vault) if vault else None)
+    try:
+        value = json.loads(output) if not rc else None
+        entries = value if noun == 'mcp' else value['installed']
+        if not isinstance(entries, list) or any(not isinstance(item, dict) or
+                                                not isinstance(item.get('enabled'), bool) for item in entries):
+            raise ValueError('Durumu bilinmeyen ' + noun)
+        return entries
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ValueError('Codex ' + noun + ' envanteri dogrulanamadi; normal oturumda yapilandirmayi incele.') from exc
+
+
 def _agent_preflight(client, prefix, vault=None):
     """Probe local CLI contracts without a model call; this is not an isolation proof.
 
@@ -8107,7 +8376,43 @@ def _agent_preflight(client, prefix, vault=None):
         if rc or not match or tuple(map(int, match.groups())) < (2, 1, 259):
             raise ValueError('Claude Code 2.1.259 veya sonrasi gerekli; yerel surum dogrulanamadi.')
         return ()
-    raise ValueError('Bu asamada yalniz Claude ajan destekleniyor.')
+    rc, output, error = _run([*prefix, '--help'], 15, cwd=str(vault) if vault else None)
+    required = ('--disable', '--ask-for-approval', '--strict-config')
+    if rc or any(flag not in output for flag in required):
+        raise ValueError('Ajan CLI gerekli guvenlik bayraklarini desteklemiyor: ' + client)
+    if client == 'codex':
+        _agent_codex_profile_preflight(vault)
+        rc, output, error = _run([*prefix, '--version'], 15, cwd=str(vault) if vault else None)
+        match = re.fullmatch(r'codex-cli (\d+)\.(\d+)\.(\d+)', output.strip())
+        minimum = CODEX_WINDOWS_MIN_VERSION if os.name == 'nt' else CODEX_MIN_VERSION
+        if rc or not match or tuple(map(int, match.groups())) < minimum:
+            raise ValueError('Codex ' + '.'.join(map(str, minimum)) +
+                             ' veya sonrasi gerekli; yerel surum dogrulanamadi.' +
+                             (' Windows Yakala ajani native MXC gerektirir.' if os.name == 'nt' else ''))
+        # First discover names without --disable, then verify their effective false state with
+        # exactly the run's flags. A renamed/removed/ignored flag never silently widens the tools.
+        _agent_codex_features(prefix, vault)
+        _agent_codex_features(prefix, vault, restricted=True)
+        rc, output, error = _run([*prefix, 'exec', '--help'], 15, cwd=str(vault) if vault else None)
+        if rc or any(flag not in output for flag in ('--ignore-rules', '--json', '--sandbox', '--skip-git-repo-check')):
+            raise ValueError('Codex exec guvenlik bayraklari dogrulanamadi.')
+        # Most installs have plugins and MCP servers on. The plugins feature is disabled for the
+        # run; a server left from the user's own config is switched off by name, then the
+        # inventory is read again with exactly the run's flags and must show nothing enabled.
+        if any(item['enabled'] for item in _agent_codex_inventory(prefix, vault, 'plugin')):
+            raise ValueError('Codex eklentileri bu calistirmada kapatilamadi; surumu guncelle veya eklentileri incele.')
+        mcp_off = []
+        for item in _agent_codex_inventory(prefix, vault, 'mcp'):
+            if item['enabled']:
+                name = item.get('name')
+                if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', name) or name == 'yakala':
+                    raise ValueError('Codex MCP sunucusu adi guvenle kapatilamiyor: ' + repr(name)[:80])
+                mcp_off.append(name)
+        if any(item['enabled'] for item in _agent_codex_inventory(prefix, vault, 'mcp', mcp_off)):
+            raise ValueError('Codex MCP sunuculari bu calistirmada kapatilamadi; normal oturumda incele.')
+        _agent_codex_profile_preflight(vault)
+        return tuple(mcp_off)
+    return ()
 
 
 def _agent_claude_tools(config):
@@ -8131,7 +8436,26 @@ def _agent_command(vault, state, job, config):
                 '--session-id', job['session_id'], '--name', 'Yakala-' + job['id'][:8],
                 '--output-format', 'stream-json', '--verbose', '--max-turns', '24',
                 '--max-budget-usd', str(config['max_budget_usd']), *config['extra_args']]
-    raise ValueError('Bu asamada yalniz Claude ajan destekleniyor.')
+    # No native writes, shell, apps, or existing MCP/plugin. Native reads use the
+    # root-deny profile on POSIX and Windows MXC; there is no read-only fallback.
+    # Only exec supports --ignore-rules; interactive runs retain the same disabled shell tools.
+    # General hosted search is also an outbound channel for private note contents.
+    # Network access and local writes both go through the bounded bridge.
+    settings = [('features.shell_tool', False), ('features.apps', False), ('features.multi_agent', False),
+                ('web_search', 'live' if _agent_open_network(config) else 'disabled'),
+                ('mcp_servers.yakala.command', helper[0]),
+                ('mcp_servers.yakala.enabled', True),
+                ('mcp_servers.yakala.args', helper[1:]), ('mcp_servers.yakala.required', True),
+                ('mcp_servers.yakala.tool_timeout_sec', 60)]
+    # Named permission profiles are beta: strict loading also checks top-level
+    # config keys, so a removed profile selector cannot be silently ignored.
+    command = [*prefix, '--strict-config', *_agent_codex_flags(job.get('codex_mcp_off') or ()),
+               *_agent_codex_permissions()]
+    for key, value in settings:
+        # JSON strings/arrays/booleans form a valid TOML value for these scalar-only settings.
+        command += ['-c', key + '=' + json.dumps(value, ensure_ascii=True)]
+    return [*command, 'exec', '-C', str(vault), '--ignore-rules', '--json',
+            '--skip-git-repo-check', '-o', str(folder / 'last-message.txt'), *config['extra_args'], '-']
 
 
 def _agent_prompt(vault, job):
@@ -9883,9 +10207,9 @@ def main(argv=None, vault=None, state=None):
     setup.add_argument('--tus', help='Kisayol, ornek: ctrl+alt+b (varsayilan) ya da cmd+"')
     setup.add_argument('--klasor', help='Kartlarin yazilacagi klasor, vault icinde (ornek: 000-Inbox/Yakala)')
     agent = command_parser('ajan', help='Arka plan ajanini goster veya sec')
-    agent.add_argument('client', nargs='?', choices=('claude', 'kapali'))
+    agent.add_argument('client', nargs='?', choices=('claude', 'codex', 'kapali'))
     agent.add_argument('--ayar', type=Path, help='Ileri kullanici JSON ayarlari')
-    agent.add_argument('--gorunum', choices=AGENT_VIEWS, help='gizli (arka plan) ya da pencere (canli izlenen Claude Code)')
+    agent.add_argument('--gorunum', choices=AGENT_VIEWS, help='gizli (arka plan)')
     agent.add_argument('--ag', choices=AGENT_NETWORK,
                        help='kisitli (varsayilan: yalniz yakalanan URL ve ondan donen linkler) ya da acik (web aramasi)')
     send = command_parser('ajan-gonder', help='Kayitli tek karti acik istekle ajana ver')
