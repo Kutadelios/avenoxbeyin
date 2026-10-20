@@ -8092,6 +8092,194 @@ def _agent_note_search(vault, query, state=None):
     return {'matches': matches, 'truncated': False, 'scanned': scanned}
 
 
+def _agent_public_addresses(url):
+    """Resolve once, reject a mixed public/private answer, then connect to numeric addresses only."""
+    _safe_source_url(url)
+    parsed = urlparse(url)
+    port = parsed.port or (443 if parsed.scheme.lower() == 'https' else 80)
+    if port not in (80, 443):
+        raise ValueError('Background requests are restricted to public ports 80 and 443.')
+    answers = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+    addresses = []
+    for family, kind, proto, _name, endpoint in answers:
+        address = ipaddress.ip_address(endpoint[0].split('%')[0])
+        if not address.is_global or address.is_multicast or '%' in endpoint[0]:
+            raise ValueError('A source resolves to a private or non-public address.')
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            raise ValueError('Unsupported source address family.')
+        pair = (family, str(address), port)
+        if pair not in addresses:
+            addresses.append(pair)
+    if not addresses:
+        raise ValueError('No public source address was found.')
+    return parsed, addresses[:4]
+
+
+def _agent_public_get(url, byte_limit=_AGENT_NOTE_BYTES, output=None):
+    """A bounded public GET: no proxy, cookies, auth, shell or second DNS lookup after validation.
+
+    Revalidate every redirect and preserve TLS hostname/certificate checking while pinning
+    the socket destination. Content-Encoding is refused so a compressed bomb cannot expand.
+    """
+    import hashlib
+    import http.client
+    import ssl
+    import time
+    from urllib.parse import quote, urljoin
+
+    class Pinned(http.client.HTTPConnection):
+        def __init__(self, parsed, address, timeout):
+            super().__init__(parsed.hostname, address[2], timeout=timeout)
+            self.address, self.tls = address, parsed.scheme.lower() == 'https'
+
+        def connect(self):
+            family, address, port = self.address
+            channel = socket.socket(family, socket.SOCK_STREAM)
+            try:
+                channel.settimeout(self.timeout)
+                channel.connect((address, port, 0, 0) if family == socket.AF_INET6 else (address, port))
+                self.sock = ssl.create_default_context().wrap_socket(channel, server_hostname=self.host) if self.tls else channel
+                self.transport = self.sock
+            except BaseException:
+                channel.close()
+                raise
+
+    if not isinstance(url, str) or len(url) > 8192:
+        raise ValueError('Source URL is missing or too long.')
+    for redirect in range(6):
+        parsed, addresses = _agent_public_addresses(url)
+        target = quote(parsed.path or '/', safe="/%:@!$&'()*+,;=-._~")
+        if parsed.query:
+            target += '?' + quote(parsed.query, safe="/%?:@!$&'()*+,;=-._~[]")
+        connection, response, failure = None, None, None
+        deadline = time.monotonic() + 10
+        for address in addresses:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            connection = Pinned(parsed, address, remaining)
+            try:
+                # HTTPConnection chooses the correct IPv6 Host brackets. No ambient headers are copied.
+                connection.request('GET', target, headers={'User-Agent': 'avenoxbeyin-yakala/1',
+                                   'Accept': '*/*', 'Accept-Encoding': 'identity', 'Connection': 'close'})
+                response = connection.getresponse()
+                break
+            except (OSError, http.client.HTTPException) as exc:
+                failure = exc
+                connection.close()
+                connection = None
+        if response is None:
+            raise OSError('Public source connection failed: ' + type(failure).__name__)
+        try:
+            if response.status in (301, 302, 303, 307, 308):
+                destination = response.getheader('Location')
+                if not destination or redirect == 5:
+                    raise ValueError('Source has a missing or excessive redirect.')
+                following = urljoin(url, destination)
+                if parsed.scheme.lower() == 'https' and urlparse(following).scheme.lower() != 'https':
+                    raise ValueError('HTTPS-to-HTTP redirects are not allowed.')
+                _safe_source_url(following)
+                url = following
+                continue
+            if not 200 <= response.status < 300:
+                raise ValueError('Source returned HTTP ' + str(response.status) + '; no login/cookies are used.')
+            if response.getheader('Content-Encoding', 'identity').strip().lower() not in ('', 'identity'):
+                raise ValueError('Compressed source bodies are not accepted by the background downloader.')
+            size = response.getheader('Content-Length')
+            if size and (not size.isdecimal() or int(size) > byte_limit):
+                raise ValueError('Source exceeds the background transfer limit.')
+            pieces, total, digest = [], 0, hashlib.sha256()
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('Public source transfer exceeded ten seconds.')
+                # HTTPConnection may relinquish self.sock when response.will_close is true;
+                # HTTPResponse's file object still holds this transport open until response.close().
+                connection.transport.settimeout(remaining)
+                chunk = response.read1(min(65536, byte_limit + 1 - total))
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > byte_limit:
+                    raise ValueError('Source exceeds the background transfer limit.')
+                digest.update(chunk)
+                if output is None:
+                    pieces.append(chunk)
+                else:
+                    output.write(chunk)
+            return {'url': url, 'content_type': response.getheader('Content-Type', '')[:512],
+                    'body': b''.join(pieces) if output is None else None,
+                    'bytes': total, 'sha256': digest.hexdigest()}
+        finally:
+            response.close()
+            connection.close()
+    raise ValueError('Source exceeded the redirect limit.')
+
+
+def _agent_fetch_source(url):
+    from html.parser import HTMLParser
+    from urllib.parse import urljoin
+    fetched = _agent_public_get(url)
+    mime = fetched['content_type'].split(';', 1)[0].strip().lower()
+    if mime and not (mime.startswith('text/') or mime in ('application/xhtml+xml', 'application/json', 'application/xml')):
+        raise ValueError('This source is not text; use download for a media file.')
+    charset = re.search(r'charset\s*=\s*[\"\']?([A-Za-z0-9._-]+)', fetched['content_type'], re.I)
+    try:
+        text = fetched['body'].decode(charset.group(1) if charset else 'utf-8', 'replace')
+    except LookupError:
+        text = fetched['body'].decode('utf-8', 'replace')
+    if '\0' in text:
+        raise ValueError('The source body is not plain text.')
+
+    class Plain(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.skip, self.in_title, self.title, self.parts, self.links = 0, False, [], [], []
+
+        def handle_starttag(self, tag, attrs):
+            if tag in ('script', 'style', 'noscript', 'svg', 'math'):
+                self.skip += 1
+            if tag == 'title':
+                self.in_title = True
+            if self.skip:
+                return
+            if tag in ('p', 'div', 'br', 'li', 'section', 'h1', 'h2', 'h3'):
+                self.parts.append('\n')
+            attributes = dict(attrs)
+            value = attributes.get('href') if tag == 'a' else attributes.get('src') if tag in ('audio', 'video', 'source') else None
+            if tag == 'meta' and attributes.get('property', '').startswith(('og:audio', 'og:video')):
+                value = attributes.get('content')
+            if value and len(self.links) < 30:
+                try:
+                    value = _safe_source_url(urljoin(fetched['url'], value))
+                except ValueError:
+                    return
+                if len(value) <= 8192 and value not in self.links:
+                    self.links.append(value)
+
+        def handle_endtag(self, tag):
+            if tag in ('script', 'style', 'noscript', 'svg', 'math') and self.skip:
+                self.skip -= 1
+            if tag == 'title':
+                self.in_title = False
+
+        def handle_data(self, data):
+            if self.in_title:
+                self.title.append(data)
+            elif not self.skip:
+                self.parts.append(data)
+
+    title, links = '', []
+    if mime in ('text/html', 'application/xhtml+xml') or text.lstrip().lower().startswith(('<!doctype html', '<html')):
+        parsed = Plain()
+        parsed.feed(text)
+        title = ' '.join(''.join(parsed.title).split())[:500]
+        text, links = re.sub(r'[ \t]+', ' ', ''.join(parsed.parts)).strip(), parsed.links
+    text = text.encode('utf-8')[:_AGENT_NOTE_BYTES].decode('utf-8', 'ignore')
+    return {'url': fetched['url'], 'title': title, 'text': text, 'links': links,
+            'content_type': fetched['content_type'], 'source_trust': 'untrusted'}
+
+
 def _agent_create_binary(path):
     """Create, never replace. This file remains private until the worker promotes it."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
@@ -8203,6 +8391,73 @@ def _agent_create_json(path, value):
     _agent_create_bytes(path, data)
 
 
+def _agent_media_valid(path, suffix):
+    with open(path, 'rb') as handle:
+        head = handle.read(32)
+        if suffix in _AGENT_TEXT_SUFFIXES:
+            import codecs
+            decoder = codecs.getincrementaldecoder('utf-8-sig')('strict')
+            handle.seek(0)
+            while True:
+                chunk = handle.read(65536)
+                if not chunk:
+                    decoder.decode(b'', final=True)
+                    return True
+                if b'\0' in chunk or any(byte < 32 and byte not in (9, 10, 13) for byte in chunk):
+                    return False
+                decoder.decode(chunk)
+        if head.startswith((b'MZ', b'\x7fELF', b'#!', b'PK\x03\x04')):
+            return False
+        checks = {
+            '.mp3': head.startswith(b'ID3') or (len(head) > 1 and head[0] == 0xff and head[1] & 0xe0 == 0xe0),
+            '.aac': head.startswith(b'ADIF') or (len(head) > 1 and head[0] == 0xff and head[1] & 0xf0 == 0xf0),
+            '.wav': head[:4] == b'RIFF' and head[8:12] == b'WAVE', '.flac': head.startswith(b'fLaC'),
+            '.m4a': head[4:8] == b'ftyp', '.mp4': head[4:8] == b'ftyp',
+            '.ogg': head.startswith(b'OggS'), '.oga': head.startswith(b'OggS'), '.opus': head.startswith(b'OggS'),
+            '.webm': head.startswith(b'\x1a\x45\xdf\xa3'), '.png': head.startswith(b'\x89PNG\r\n\x1a\n'),
+            '.jpg': head.startswith(b'\xff\xd8\xff'), '.jpeg': head.startswith(b'\xff\xd8\xff'),
+            '.webp': head[:4] == b'RIFF' and head[8:12] == b'WEBP',
+            '.gif': head.startswith((b'GIF87a', b'GIF89a')), '.pdf': head.startswith(b'%PDF-'),
+        }
+        return bool(checks.get(suffix))
+
+
+def _agent_download(vault, state, job, url, filename):
+    if (not isinstance(filename, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}', filename)
+            or '..' in filename or _windows_reserved_name(filename) or
+            Path(filename).suffix.lower() not in _AGENT_MEDIA_SUFFIXES):
+        raise ValueError('Use one ASCII media/text/PDF filename, at most 100 characters; executable types are unavailable.')
+    folder = _agent_job_folder(vault, state, job['id'])
+    staging = _agent_checked_path(folder, ['downloads'], create=True)
+    registry = _agent_checked_path(folder, ['download-manifests'], create=True)
+    if len(list(staging.iterdir())) >= 10:
+        raise ValueError('A job can stage at most ten downloads.')
+    path, identity = staging / filename, None
+    try:
+        with _agent_create_binary(path) as handle:
+            info = os.fstat(handle.fileno())
+            identity = (info.st_dev, info.st_ino)
+            fetched = _agent_public_get(url, byte_limit=_AGENT_MEDIA_BYTES, output=handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if not _agent_media_valid(path, Path(filename).suffix.lower()):
+            raise ValueError('The downloaded bytes do not match the permitted file type.')
+        result = {'filename': filename, 'staging_path': filename, 'sha256': fetched['sha256'],
+                  'bytes': fetched['bytes'], 'source_url': fetched['url']}
+        _agent_create_json(registry / (filename + '.json'), result)
+        return result
+    except BaseException:
+        # Only remove the partial file created here, never an existing/replaced user file.
+        if identity is not None:
+            try:
+                info = path.lstat()
+                if not _agent_reparse(path) and identity == (info.st_dev, info.st_ino):
+                    path.unlink()
+            except OSError:
+                pass
+        raise
+
+
 def _agent_write_note(vault, state, job, title, content):
     if not isinstance(title, str) or not title.strip() or len(title) > 160 or any(ord(char) < 32 for char in title):
         raise ValueError('Note title must be one line, between 1 and 160 characters.')
@@ -8281,16 +8536,89 @@ def _agent_complete(vault, state, job, status, summary, notes=(), downloads=()):
             'completion_verified': False, 'job_id': job['id']}
 
 
+def _agent_source_urls(vault, state, job):
+    """Exact source URLs known without using model-produced host/path/query text.
+
+    The captured URL and explicitly selected extras, frozen at enqueue time, are
+    the initial capabilities. Later URLs come only from the deterministic parser
+    of a fetched authorized page, never from tool arguments or live card edits.
+    This bounds overt outbound data; URL choice/timing remains a covert channel.
+    """
+    urls = []
+    if job.get('url'):
+        urls.append(_safe_source_url(job['url']))
+    urls.extend(_agent_extra_source_urls(job.get('extra_urls', []), job.get('url') or ''))
+    folder = _agent_job_folder(vault, state, job['id'])
+    try:
+        path = _agent_checked_path(folder, ['source-urls.json'])
+    except FileNotFoundError:
+        return urls
+    manifest = json.loads(_agent_read_text(path))
+    if (not isinstance(manifest, dict) or manifest.get('schema') != 1 or manifest.get('job_id') != job['id'] or
+            not isinstance(manifest.get('urls'), list) or len(manifest['urls']) > 64):
+        raise ValueError('Invalid source URL capabilities.')
+    for value in manifest['urls']:
+        if not isinstance(value, str) or len(value) > 8192:
+            raise ValueError('Invalid source URL capability.')
+        _safe_source_url(value)
+        if value not in urls:
+            if len(urls) >= 64:
+                raise ValueError('Too many source URL capabilities.')
+            urls.append(value)
+    return urls
+
+
+def _agent_record_source_urls(vault, state, job, fetched):
+    urls = _agent_source_urls(vault, state, job)
+    manifest = {'schema': 1, 'job_id': job['id'], 'urls': urls}
+    for value in [fetched['url'], *fetched.get('links', [])]:
+        if (not isinstance(value, str) or len(value) > 8192 or value in urls or len(urls) >= 64):
+            continue
+        _safe_source_url(value)
+        urls.append(value)
+        if len((json.dumps(manifest, ensure_ascii=False, indent=2) + '\n').encode('utf-8')) > _AGENT_NOTE_BYTES:
+            urls.pop()
+            break
+    folder = _agent_job_folder(vault, state, job['id'])
+    _agent_json(folder / 'source-urls.json', manifest)
+
+
 _AGENT_NETWORK_CALLS = 8  # fetch_source and download share one durable, per-job allowance
+
+
+def _agent_spend_network_call(vault, state, job):
+    """Reserve before I/O, under tools.lock; failures and bridge restarts do not refund it."""
+    folder = _agent_job_folder(vault, state, job['id'])
+    try:
+        path = _agent_checked_path(folder, ['network-budget.json'])
+    except FileNotFoundError:
+        used = 0
+    else:
+        budget = json.loads(_agent_read_text(path))
+        if (not isinstance(budget, dict) or budget.get('schema') != 1 or budget.get('job_id') != job['id'] or
+                type(budget.get('used')) is not int or not 0 <= budget['used'] <= _AGENT_NETWORK_CALLS):
+            raise ValueError('Ajan ag cagri sayaci gecersiz; ag erisimi kapatildi.')
+        used = budget['used']
+    if used >= _AGENT_NETWORK_CALLS:
+        raise ValueError('Bu isin %d ag cagri hakki doldu; complete ile onay iste.' % _AGENT_NETWORK_CALLS)
+    _agent_json(folder / 'network-budget.json', {'schema': 1, 'job_id': job['id'], 'used': used + 1})
 
 
 def _agent_tool_definitions(config=None):
     string = {'type': 'string'}
+    source_rule = ('Public HTTP(S) URLs are allowed. Never put private vault data into a URL.'
+                   if _agent_open_network(config or {}) else
+                   'Only exact captured/selected URLs or links returned by an authorized source; no model-created URLs.')
+    budget = ' Fetch and download share at most %d calls per job, including failures.' % _AGENT_NETWORK_CALLS
     specs = (
         ('read_note', 'Read a bounded vault Markdown/text note; hidden/secret files and links are refused.',
          {'path': string}, ['path'], True, False),
         ('search_notes', 'Search visible Markdown notes, at most 30 results and a bounded scan.',
          {'query': string}, ['query'], True, False),
+        ('fetch_source', 'Fetch bounded public source text. ' + source_rule + budget,
+         {'url': string}, ['url'], True, True),
+        ('download', 'Stage create-only media/text/PDF, at most 50 MiB, never execute. ' + source_rule + budget,
+         {'url': string, 'filename': string}, ['url', 'filename'], False, True),
         ('write_note', 'Create one new job-owned result note. Cannot edit, overwrite or delete an existing note.',
          {'title': string, 'content': string}, ['title', 'content'], False, False),
         ('complete', 'Submit final result: completed, approval_required or failed. Worker alone updates card/receipt.',
@@ -8337,6 +8665,10 @@ def _agent_dispatch_tool(vault, state, job_id, name, arguments):
             raise ValueError('Tool argument has the wrong type: ' + key)
     if name != 'complete' and (Path(_agent_job_dir(vault, state, job_id)) / 'result.json').exists():
         raise ValueError('This job has already completed; all new tool calls are disabled.')
+    if (name in ('fetch_source', 'download') and not _agent_open_network(job.get('config') or {}) and
+            arguments['url'] not in _agent_source_urls(vault, state, job)):
+        raise ValueError('This exact URL is not authorized. Use the captured URL or a returned source link; '
+                         'otherwise complete with approval_required. Do not encode vault text into URLs.')
     if name == 'read_note':
         path = _agent_safe_note(vault, arguments['path'], job, state=state)
         origin = _agent_note_origin(vault, path, job)
@@ -8344,6 +8676,15 @@ def _agent_dispatch_tool(vault, state, job_id, name, arguments):
                 'source_trust': 'untrusted' if origin == 'source' else 'vault-data'}
     if name == 'search_notes':
         return _agent_note_search(vault, arguments['query'], state=state)
+    if name == 'fetch_source':
+        _agent_spend_network_call(vault, state, job)
+        fetched = _agent_fetch_source(arguments['url'])
+        _agent_require_live_job(_agent_load_job(vault, state, job_id))
+        _agent_record_source_urls(vault, state, job, fetched)
+        return fetched
+    if name == 'download':
+        _agent_spend_network_call(vault, state, job)
+        return _agent_download(vault, state, job, **arguments)
     if name == 'write_note':
         return _agent_write_note(vault, state, job, **arguments)
     return _agent_complete(vault, state, job, **arguments)

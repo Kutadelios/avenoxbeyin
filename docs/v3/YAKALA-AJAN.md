@@ -22,3 +22,17 @@ sayılmaz. `complete` çağrısından sonra aynı MCP oturumu da yeni işlem yap
 
 Bu dosya bir kurulum önerisidir; altyapının test edilmesi bir Windows canlı
 ölçümü veya bütün ajan deneyiminin bu aşamada tamamlandığı iddiası değildir.
+
+## Sınırlı ağ araçları
+
+`fetch_source` ve `download` araçları iş oluşturulurken dondurulan kaynak URL'si
+ve o kaynaktan doğrulanarak çıkarılan bağlantılarla sınırlıdır. `ag=acik`
+yalnız açık kullanıcı tercihiyle başka genel İnternet URL'lerini açar.
+Özel/yerel IP'ler, DNS yeniden bağlama, güvensiz yönlendirme ve HTTPS'ten HTTP'ye
+düşürme kabul edilmez. Denetim araç listesinin yanında gerçek çağrı/yönlendirme
+yollarında da yapılır. Süresi dolan iş ağ çağrısından sonra çıktı yayımlayamaz.
+
+İş başına sekiz ağ çağrısı bütçesi kalıcıdır; köprünün yeniden başlatılması
+bütçeyi sıfırlamaz. İndirme 50 MiB ile sınırlıdır, tür/uzantı kontrolünden geçer
+ve yalnız staging alanına yazılır. Aynı adlı kullanıcı dosyasının üzerine yazılmaz.
+Bu aşama da kullanıcıya ajan çalıştırma arayüzü eklemez.
