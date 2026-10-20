@@ -360,8 +360,28 @@ notları okumak, sonuç yazmak ve `complete` ile somut engeli bildirmek mümkün
 py -3 beyin.py yakala ajan claude --ag acik
 ```
 
-**Last-Session.** Çalışan, sonuç kartını companion düzeninde başlığın altına ekler. Okuma ile
-yazma arasında dosya değişirse kart eklenmez; sonuç ve receipt korunur. Bu kontrol ile atomik
+**Aylık ajan günlüğü.** Çalışan, işin kartının bulunduğu Yakala klasöründe
+`Ajan/Gunluk-YYYY-MM.md` notuna kısa bir girdi ekler; `Last-Session.md` dosyasına yazmaz.
+Yakala'nın mevcut klasör seçimi kullanılır; iş sıraya alındıktan sonra ayar değişirse girdi
+o işin kartıyla aynı klasörde kalır. Dosya yoksa `visibility: internal` frontmatter ve
+`# Yakala ajan gunlugu - YYYY-MM` başlığıyla oluşturulur. En yeni girdi başlığın altındadır.
+Girdi tarih-saat, istemci, gerçek oturum kimliğinin ilk sekiz karakteri, durum ve kart/sonuç/receipt
+bağlantılarını taşır. Bağlantılar günlüğe göre göreli Markdown yollarıdır; özel karakterler URL
+kodlamasıyla korunur. Normal yollarla işaret dahil yaklaşık 300 karakterdir; uzun dosya
+yollarında bağlantılar kesilmediği için daha uzun olabilir.
+
+Günlük aramada bulunabilir; özet, kullanıcı isteği ve kaynak metni taşımaz. `private` kartlar
+gibi `internal` kartların sonuçları da özel istek, ek veya sonuç notlarından bilgi içerebilir.
+Güvenilir bir herkese açık özet ayrımı olmadığından hiçbir işin sonuç özeti bu günlüğe kopyalanmaz.
+Tam özet `visibility: private` sonuç notunda kalır. Bağlantı hedeflerinin görünürlük kuralları
+değişmez; günlükteki bağlantı özel notu aramaya veya hook bağlamına açmaz.
+
+Her iş `<!-- yakala-ajan:<iş-UUID> -->` işaretiyle yalnız bir kez eklenir. Günlük zamanı iş
+kaydına yazılmadan dosyaya dokunulmaz; ay değişimindeki tekrar deneme aynı aylık notu kullanır.
+Yazma `memory.lock` kilidi altında yapılır. Okuma ile
+yazma arasında dosya değişirse girdi eklenmez; sonuç ve receipt korunur. Yeni dosya mevcut
+hedefin üzerine yazmadan atomik yayımlanır; mevcut dosya atomik değiştirilir. Yazılan baytların
+tamamı geri okunarak doğrulanır. Bu kontrol ile atomik
 değiştirme arasındaki çok kısa aralıkta kilide katılmayan bir editörün yazısı kaybolabilir;
 taşınabilir bir karşılaştır-ve-değiştir yolu olmadığından bu risk bilerek kabul edilmiştir.
 
@@ -383,9 +403,9 @@ py -3 beyin.py yakala ajan claude --gorunum gizli
    ayrı belirtilir. Aynı URL'nin yeni isteği, karta daha önce eklenmiş eski isteklerle karıştırılmaz.
 3. İş gerçekten başladığında **Beyin ajanı başladı** bildirimi gelir. Kuyrukta bekleme, modelin
    çalışmaya başladığı anlamına gelmez. Bir makinedeki bu vault kuyruğu aynı anda **bir iş** çalıştırır.
-4. Doğrulanmış sonuç, receipt ve Last-Session kaydı tamamlanınca **Beyin ajanı bitirdi** görünür.
+4. Doğrulanmış sonuç, receipt ve aylık ajan günlüğü kaydı tamamlanınca **Beyin ajanı bitirdi** görünür.
    Bir engel varsa **Beyin ajanı onay bekliyor**, çalışma hatasında **Beyin ajanı tamamlayamadı**
-   görünür. Kartın `ajan_notu` alanı ve günlük nedenini söyler.
+   görünür. Kartın `ajan_notu` alanı gerekçeyi, aylık günlük durum ve bağlantıları gösterir.
 
 Yeni işleri kapatmak için:
 
@@ -450,7 +470,7 @@ codex resume OTURUM_UUID
 
 Sonuç notları kart klasörünün `Ajan/<iş-UUID>/` altına yeni dosyalar olarak yazılır. Kart, sonuç,
 kaynak ve varsa indirilen dosyanın yolu birlikte kaydedilir. `ajan_sonuc` ile `ajan_receipt`
-kapanış kayıtlarını gösterir. Last-Session'a bunların bağlantıları eklenir. Sonraki oturumda
+kapanış kayıtlarını gösterir. Aylık ajan günlüğüne bunların bağlantıları eklenir. Sonraki oturumda
 "o indirdiğin müzik" gibi bir isteği bu kaynak kayıtları üzerinden bulmak mümkündür; bunun için
 normal vault hafıza kurallarının ve hook'larının kurulmuş olması gerekir.
 
@@ -463,7 +483,7 @@ başka bir değer, bilinmeyen durum veya boş durum başarılı kapanış sayıl
 Kaynak dosyası geri okunarak olay kimliği
 kontrol edilir. Bu JSON şemasının ve yerel başarı durumunun upstream runtime ile kabul testinde
 eşleşmesi gerekir; yardım çıktısı tek başına veri şemasını kanıtlamaz. Sözleşme, receipt veya
-Last-Session doğrulanamazsa indirilmiş dosya ve notlar korunur, kart tamamlandı sayılmaz.
+ajan günlüğü doğrulanamazsa indirilmiş dosya ve notlar korunur, kart tamamlandı sayılmaz.
 
 ### Gelişmiş JSON ayarı
 
@@ -493,7 +513,7 @@ py -3 beyin.py yakala ajan claude --ayar yakala-ajan.json
 | `extra_args` | `[]`; yalnız `--model DEĞER` ve Claude için `--effort DEĞER`, her biri en fazla bir kez |
 | `executable` | `null`; PATH'ten bulunur. Özelleştirilecekse tek bir mutlak executable veya tanınan npm shim yolu |
 | `downloads_dir` | İlk kurulumda işletim sisteminin İndirilenler klasörü, bulunamazsa `~/Downloads`; mutlak yerel klasör |
-| `last_session_path` | `null`; yalnız vault'un ilk düzeyindeki companion kimliği bulunur. Belirsizse mevcut notun vault-göreli yolunu ver |
+| `last_session_path` | Eski ayarlarla uyumluluk için okunur ve yok sayılır; yeni ayarlara yazılmaz |
 | `schema`, `vault` | Modülün sürüm ve vault sahipliği alanları; başka vault'a taşımak için değiştirme |
 
 JSON en fazla 16 KiB olabilir; bilinmeyen anahtarlar, serbest komut şablonları ve izin bayrakları
@@ -502,11 +522,10 @@ alır; istek en fazla 16.000 karakterdir. Kullanıcı metni kabuk komutuna göm�
 dosyası çalıştırılmaz; yalnız bilinen Claude/Codex paket girişleri doğrudan Node ile açılır.
 Tanımsız shim için komut yorumlayıcıya geri düşülmez.
 
-Otomatik Last-Session bulma vault'un alt ağacını taramaz. İlk düzeyde en fazla 2048 girdi
-incelenir; gizli, arşiv veya bağlı klasörler aday değildir. Companion/Echo adlı klasörler,
-`Core.md` veya `Soul.md` içeren kimlik klasörlerinden önce gelir. Birden fazla kimlik,
-bulunamayan mevcut not veya tarama sınırı açık ayar ister; derindeki rastgele bir
-`Last-Session.md` seçilmez. Gerekirse `last_session_path` ile mevcut güvenli not belirtilir.
+Companion klasörü veya Last-Session araması yapılmaz. Eski `last_session_path` hedefi artık
+bulunmasa da ayar ve iş kaydı okunabilir. Yeni `job.json` kayıtlarında `last_session` yerine
+vault-göreli `journal` yolu ve tekrar koruması için `journal_time` bulunur. Eski `last_session`
+alanını taşıyan kayıtlar yüklenebilir; eski Last-Session kartları taşınmaz veya silinmez.
 
 ### Ajan neleri yapabilir?
 
@@ -528,7 +547,7 @@ asagidaki "Istege bagli: videodaki muzigi tanima" bolumunde aciklanir:
 | `music_info` | Yalniz bu kartin video sayfasindaki muzik meta verisini okur; kaynak iddiasi ses eslesmesi degildir |
 | `music_identify` | Host CLI'nin is basina ses izniyle kisa yerel ornek; ayri yukleme izni ve anahtarla en fazla bir AudD istegi |
 | `write_note` | Yalnız bu işin klasöründe en fazla 30 yeni sonuç notu oluşturur; mevcut notu değiştirmez |
-| `complete` | Doğrulanacak sonuç bildirir; kartı, receipt'i ve Last-Session'ı güvenilen çalışan günceller |
+| `complete` | Doğrulanacak sonuç bildirir; kartı, receipt'i ve aylık ajan günlüğünü güvenilen çalışan günceller |
 
 İndirme için dosya türü ve hash denetlenir; çalıştırılabilir dosya türleri verilmez. Başarılı
 dosya, İndirilenler'e iş kimliği eklenmiş yeni adla yazılır; var olan kullanıcı dosyasının üzerine
@@ -541,7 +560,7 @@ hard link hem özel yeniden adlandırmayı reddederse, disk dolarsa veya hedef �
 `.part` dosyası korunur ve kart inceleme bekler. Her ağ dosya sistemi için destek garantisi
 yoktur. Birden fazla dosyada önceki
 başarılar kaybolmaz: her yayın niyeti ve tamamlanan dosya ayrı kaydedilir, kısmi sonuç da
-receipt ve Last-Session kapanışına dahil edilir.
+receipt ve ajan günlüğü kapanışına dahil edilir.
 Bridge gizli/hassas yolları, sembolik bağları ve Windows junction'larını reddeder.
 Ajan kendisine verilen karti adi ne olursa olsun okur; diger hassas notlara erisim degismez.
 `remote_allowed: false`, hassas `sensitivity` veya engellenmiş `kaynak_guveni` metadata'sı olan
@@ -616,7 +635,7 @@ Yakala MCP köprüsü izinli notu ve `AGENTS.md`'yi okudu, private notu reddetti
 yazdı ve `complete` teslimini kabul etti. Normal hash güveni verilmiş sentetik `SessionStart`
 hook'u ilk isteğe hafıza bağlamı ekledi. Yerel sahte Responses API kullanıldı; gerçek hesap
 ve model hizmeti kullanılmadı. Bu, `complete` teslim kanıtıdır; canlı masaüstünde receipt,
-Last-Session ve bildirimin tamamlandığı ölçümü değildir. Testler mevcut kullanıcı
+ajan günlüğü ve bildirimin tamamlandığı ölçümü değildir. Testler mevcut kullanıcı
 config'inde `workspace-write` ile ayrıca seçilmiş config profilinde `read-only` bulunan
 durumları kapsar; yeni izin seçiminin bu legacy ayarlar altında da etkinliği ölçüldü.
 
@@ -629,7 +648,7 @@ kullanıcı 19.10.2026'da gerçek Windows 11 / Codex 0.155.1 üzerinde `dc2a1bc2
 profilinin `AGENTS.md` başlangıcını durdurduğunu, eski `69ac79c` salt okuma yolunun iki
 görünümde de tamamlandığını bildirdi. Bu dal Windows'a salt okuma seçicisini geri getirir;
 yazma ve diğer araç kısıtları korunur, `apply_patch` tahmin doğrulaması kapanmış sayılmaz.
-Düzeltilmiş dalın native Windows başlangıcı ve receipt/Last-Session zinciri henüz
+Düzeltilmiş dalın native Windows başlangıcı ve receipt/ajan günlüğü zinciri henüz
 ölçülmedi. POSIX root-deny native testleri Windows'ta gerekçeli olarak atlanır; bu atlama
 Windows başarısı değildir. Kaynak, seçenek değerlendirmesi ve tekrar komutları:
 [Codex dosya okuma sınırı incelemesi](CODEX-APPLY-PATCH.md).
@@ -699,7 +718,7 @@ korunur. Süreç veya bilgisayar beklenmedik şekilde kapanırsa kısmi etkiler 
 `ajan-devam` aynı işi kendiliğinden tekrar etmez, inceleme gerektirir.
 
 Yakala işlerinin kendi yazıları kilitlenir; normal başka bir ajan veya editör aynı kilidi
-kullanmıyorsa Last-Session'ı sonradan bütünüyle değiştirip eklenen satırı kaybedebilir. Bağımsız
+kullanmıyorsa aylık ajan günlüğünü sonradan bütünüyle değiştirip eklenen satırı kaybedebilir. Bağımsız
 sonuç notu ve receipt bağlantısı bu nedenle korunur. Ortak vault'u iki makinede açmak tek bir
 dağıtık kuyruk veya bütün ajanlar arasında ortak dosya kilidi sağlamaz.
 
@@ -737,7 +756,7 @@ Gerçek kullanıcı sırları yerine ayırt edilebilir zararsız test notları k
 3. Zararsız bir not araştırmasını Ctrl+Enter ile gönder. Popup'ı ve dinleyiciyi kapat; konsol
    penceresi açılmadan işin ilerlediğini, karttaki gerçek oturum kimliğini ve bildirimi doğrula.
 4. Bilinen herkese açık küçük bir dosyayı indir. Yeni hedef adı, hash, sonuç notu, receipt ve
-   Last-Session bağlantısı birlikte doğrulandıktan sonra `islendi` olmasını kontrol et.
+   ajan günlüğü bağlantıları birlikte doğrulandıktan sonra `islendi` olmasını kontrol et.
 5. Silme/giriş isteyen bir iş, özel IP URL'si, eksik CLI, ağ hatası ve kısa timeout dene.
    Kartların korunduğunu, gerekçenin yazıldığını ve başarı bildirimi verilmediğini doğrula.
 6. Art arda iki istek gönder; tek CLI çalıştığını kontrol et. Aynı kartta normal `isle`/`bitti`
@@ -754,7 +773,7 @@ Gerçek kullanıcı sırları yerine ayırt edilebilir zararsız test notları k
    executable seçildikten sonra Codex'e geç; yeni iş varsayılan Codex seçeneğiyle başlamalı.
 10. Windows Codex salt okuma uyumluluk yolunu hem gizli hem pencere kipinde doğrula:
     `AGENTS.md` ve normal hafıza başlangıcı, izinli MCP okuması, private reddi, sonuç,
-    receipt ve Last-Session zinciri çalışmalı. Sandbox türünü ve CLI sürümünü kaydet.
+    receipt ve ajan günlüğü zinciri çalışmalı. Sandbox türünü ve CLI sürümünü kaydet.
     Zararsız notlarla vault içinde/dışında Update/Move/Delete ve mevcut/yeni Add yazmaları
     reddedilmeli; hiçbir mevcut dosyanın hash'i değişmemeli. Doğru/yanlış bağlam hataları
     farklı olabilir: Windows `-s read-only` yolunu kapalı içerik tahmin sınırı olarak sunma.
@@ -775,8 +794,9 @@ Gerçek kullanıcı sırları yerine ayırt edilebilir zararsız test notları k
     ek deposu, private/hassas notlar açılmamalı. Kendi kart/ham metin/bağlı metin ekinin
     güven etiketi `untrusted` olmalı. Büyük/küçük harf yol takma adlarını da dene.
 15. Ajan kapalı normal yakalama vault köküne yeni kilit yazmamalı. Farklı `--state` seçimleri
-    aynı kartı eşzamanlı güncellerken kayıt kaybolmamalı. Derin arşivdeki Last-Session'lar
-    otomatik seçimi etkilememeli; birden fazla ilk düzey companion açık ayar istemeli.
+    aynı kartı eşzamanlı güncellerken kayıt kaybolmamalı. Birden fazla companion veya arşivde
+    Last-Session bulunması işi etkilememeli; Last-Session baytları değişmemeli. Aylık günlükte
+    tek girdi, tekrar çağrıda aynı baytlar ve `private` kartta özetsiz durum/bağlantılar beklenir.
 
 **Linux/macOS için ayrı Codex okuma sınırı ölçümü:**
 [isteğe bağlı gerçek CLI regresyonunu](CODEX-APPLY-PATCH.md) çalıştır. Root-deny altında
