@@ -30,6 +30,12 @@ KNOWLEDGE_REMINDER = (
     "concept, then sync); "
     "if no permanent note is required, state that in one sentence to proceed."
 )
+NO_LEARNING_CHALLENGE_REMINDER = (
+    "Receipt declared no learnings ('Öğrenilen: yok') but files were edited in this session. "
+    "In V3, lasting lessons must be distilled into knowledge/ or staged as candidates: "
+    'python3 beyin.py learn --session {session} --candidate "Lesson". If this edit was purely mechanical/routine '
+    "without new lessons, state that in one sentence to proceed."
+)
 HARNESS_SYNTHETIC_PROMPT_PREFIXES = (
     "<task-notification>",
     "Another Claude session sent a message:",
@@ -217,6 +223,38 @@ def _has_declared_learning(summary):
     return False
 
 
+_NO_LEARNING_EXPLAINED = re.compile(
+    r"(?:(?:kalici\s+)?(?:öğrenim|ogrenim|ders)(?:ler)?\s+)?"
+    r"(?:yok(?:tur)?|hi[çc]\s+yok|hi[çc]biri|bulunmuyor|bulunmadi|none|nothing|no|n/?a|-+)"
+    r"\s*\([^()]+\)")
+
+
+def _is_bare_no_learning(summary):
+    """True when receipt declares 'none'/'yok' without a parenthetical explanation.
+
+    An empty label is not an answer: "Öğrenilen:" often heads a list on the following lines,
+    and the challenge must not tell that agent it declared no learnings.
+    """
+    if not isinstance(summary, str):
+        return False
+    for line in summary.splitlines():
+        match = _LEARNING_LABEL.match(_tr_fold(line).strip())
+        if match:
+            content = match.group(1).strip().strip(".!*_` ").strip()
+            if content and _NO_LEARNING.fullmatch(content) and not _NO_LEARNING_EXPLAINED.fullmatch(content):
+                return True
+    return False
+
+
+def _has_staged_candidates(state, session, since):
+    """Candidates staged in this edit window; an older entry must not answer for a new session."""
+    try:
+        from beyin_v3_learning import has_candidates
+        return has_candidates(state, session, since=since)
+    except Exception:
+        return False
+
+
 def _has_knowledge_update(vault, receipt, since):
     """A knowledge ref is a citation, not evidence of a write in this edit window."""
     if not receipt:
@@ -313,16 +351,23 @@ def receipt_reminder(payload, state, harness, event, vault=None):
                 return {"decision": "block", "reason": RECEIPT_REMINDER.format(harness=harness, session=session)}
             return None
 
-        # Receipt exists! Check if receipt declared learning but knowledge/ was not updated.
-        if (not kdone.exists() and _has_declared_learning(receipt.get("summary", "")) and
-                marker.get("knowledge") is not True and not _has_knowledge_update(vault, receipt, since)):
-            folder.mkdir(parents=True, exist_ok=True)
-            try:
-                with kdone.open("x", encoding="utf-8"):
-                    pass
-            except FileExistsError:
-                return None
-            return {"decision": "block", "reason": KNOWLEDGE_REMINDER}
+        # Receipt exists! Check if receipt declared learning or explicitly claimed no learning.
+        # The knowledge tree walk and the ledger read run only when a reminder is still due.
+        if not kdone.exists():
+            summary = receipt.get("summary", "")
+            reason = (KNOWLEDGE_REMINDER if _has_declared_learning(summary)
+                      else NO_LEARNING_CHALLENGE_REMINDER.format(session=session)
+                      if _is_bare_no_learning(summary) else None)
+            if (reason and marker.get("knowledge") is not True and
+                    not _has_staged_candidates(state, session, since) and
+                    not _has_knowledge_update(vault, receipt, since)):
+                folder.mkdir(parents=True, exist_ok=True)
+                try:
+                    with kdone.open("x", encoding="utf-8"):
+                        pass
+                except FileExistsError:
+                    return None
+                return {"decision": "block", "reason": reason}
 
         edited.unlink(missing_ok=True)  # later edits open a new window
         return None

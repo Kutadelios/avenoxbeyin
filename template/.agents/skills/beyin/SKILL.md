@@ -103,10 +103,10 @@ Anlamlı çalışma bittiğinde, kullanıcı hafızaya yazılmamasını istemedi
 JSON alternatifi: `python3 beyin.py receipt --file RECEIPT_JSON --harness codex`. `--file` ile receipt alan bayraklarını birleştirme. Şema:
 
 ```json
-{"event_id":"bu-sonuca-ozel-kararli-id","summary":"Yapılan iş, doğrulama ve açık kalan adım.\nÖğrenilen: yok","refs":["notes/kaynak.md"]}
+{"event_id":"bu-sonuca-ozel-kararli-id","summary":"Yapılan iş, doğrulama ve açık kalan adım.\nÖğrenilen: yok (rutin kontrol)","refs":["notes/kaynak.md"]}
 ```
 
-summary içinde kalıcı öğrenimi ayrı bir satırda `Öğrenilen: <tek cümle>` olarak beyan et; öğrenim yoksa `Öğrenilen: yok` yaz. Öğrenim beyan ettiysen receipt'ten önce `knowledge/concepts/` altında notu oluştur ya da mevcut notu güncelle ve bu notu refs içine ekle. Stop kancası beyan edilen öğrenim için yazılmış bir knowledge notu görmezse oturumda bir kez hatırlatır; kalıcı not gerekmiyorsa bunu tek cümleyle söylemen yeterli.
+summary içinde kalıcı öğrenimi ayrı bir satırda `Öğrenilen: <tek cümle>` olarak beyan et. Receipt'ten önce `knowledge/concepts/` altında notu oluştur ya da mevcut notu güncelle ve bu notu refs içine ekle. Henüz damıtılmaya hazır olmayan öğrenimi `python3 beyin.py learn --session SESSION --candidate "Öğrenim" --source notes/kaynak.md --scope PROJE` ile yerel aday defterine kaydet; hook bir session değeri verdiyse aynen kullan. `learn --list` adayları listeler; `--scope` verilmezse aday global olur. Öğrenim yoksa gerekçeyi aynı satırda belirt: `Öğrenilen: yok (rutin kontrol)`. Dosya düzenlenmiş oturumda yalın `Öğrenilen: yok` bir kez sorgulanır. Bu düzenleme penceresinde kaydedilmiş aday veya yazılmış bir knowledge notu varsa sorgu geçer; kalıcı not gerekmiyorsa bunu tek cümleyle söylemen yeterli.
 
 Hook bağlamında `Receipt session=...` verilmişse `--session` ile (JSON modunda `session` alanına) bu değeri aynen ekle; değer yoksa session uydurma. Bu, sonucun doğru istemci oturumuna bağlanmasını sağlar.
 
