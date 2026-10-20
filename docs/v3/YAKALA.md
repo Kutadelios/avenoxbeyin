@@ -373,6 +373,13 @@ ile dinleyici kopyasını yenilemek gerekir. IPC pipe'ları hotkey thread'ini bl
 Dinleyici kapanışı önce STOP gönderir; yanıt vermeyen pencere ve okuyucuları sahip olunan
 Job Object üzerinden sonlandırılır. Başka bir vault'a ait state silinmez.
 
+Windows'ta geçici el sıkışma zaman aşımı veya popup'ın beklenmedik kapanması kısayolu bırakmaz.
+Önce eski süreç sonlandırılıp beklenir, ardından 0,5 saniye sonra yeni pencere ısıtılır.
+Sonucu bilinmeyen yakalama otomatik tekrarlanmaz; sonraki basış yeni yakalamadır.
+120 saniye içinde üçüncü geçici hatada dinleyici kapanır ve `yakala kur` ile yenilenmesi istenir.
+Protokol uyumsuzluğu veya eski sürecin sonlandırılamaması doğrudan kapanma nedenidir.
+Hata aşaması ve toparlanma kararı `yakala/dinleyici.log` içine yazılır.
+
 Popup kaynak monitörde açılır. Windows tarafında Tk yönetilen pencere kullanır; özel
 palet/canvas görünümü korunmak üzere yerel başlık/çerçeve stili kaldırılır. **Esc** yerel
 odakta hemen iptal eder. Kaynaklar okunurken ve popup açık olduğu sürece, odak nerede olursa
