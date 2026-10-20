@@ -7843,7 +7843,7 @@ def _agent_validate_settings(config, vault):
     if config.get('client') not in ('kapali', 'claude', 'codex'):
         raise ValueError('Ajan claude, codex veya kapali olmali.')
     if config.setdefault('gorunum', 'gizli') not in AGENT_VIEWS:  # jobs queued before the option
-        raise ValueError('Ajan gorunumu gizli veya pencere olmali.')
+        raise ValueError('Bu asamada ajan gorunumu gizli olmali.')
     if config.setdefault('ag', 'kisitli') not in AGENT_NETWORK:
         raise ValueError('Ajan ag ayari kisitli veya acik olmali.')
     for name, lower, upper in (('timeout_seconds', 30, 3600), ('max_queue', 1, 32)):
