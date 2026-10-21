@@ -9,7 +9,7 @@ Hata bildirimleri, dokümantasyon düzeltmeleri, testler, kod incelemeleri ve ye
 - [README](README.md) ve ilgili [V3 belgelerini](docs/v3/README.md) inceleyin; benzer [issue](https://github.com/avenoxai/avenoxbeyin/issues), [PR](https://github.com/avenoxai/avenoxbeyin/pulls) veya mevcut çözüm olup olmadığını kontrol edin.
 - Hata düzeltmesinde sorunun nasıl tekrarlandığını, özellik önerisinde hangi ihtiyacın karşılandığını açıklayın.
 - Yeni bağımlılık, büyük mimari değişiklik ve kapsamlı özellikler için **önce issue üzerinde görüş alışverişi yapın**. Aynı konuda koordinasyonsuz paralel PR'lardan kaçının.
-- **Tek PR, tek konu:** İlgisiz refactor veya biçimlendirme değişikliklerini aynı PR'a karıştırmayın. Küçük belge ve test düzeltmeleri için önceden issue açmak şart değildir.
+- **Tek PR, tek konu:** İlgisiz refactor veya biçimlendirme değişikliklerini aynı PR'a karıştırmayın. Küçük belge ve test düzeltmeleri için önceden issue açmak şart değildir. Büyük işi bağımlılıkları belirtilmiş, kendi başına doğrulanabilen küçük PR'lara bölün; birbirini bekleyen PR'ları ve çakışan paralel çalışmaları ilgili issue'da ilişkilendirin.
 
 ## 2. Projenin temel ilkeleri
 
@@ -33,6 +33,20 @@ Teknik sözleşmeler: [Runtime](docs/v3/RUNTIME.md) · [Markdown](docs/v3/MARKDO
 - Hata iddiasını sürüm/commit (`main@<sha>`), yeniden üretim adımları ve **gerçek çıktı** ile destekleyin. Statik analiz veya AI ajanı bulgusu tek başına doğrulama değildir.
 - Davranış düzeltmelerinde, düzeltme olmadan başarısız (`RED`), düzeltmeden sonra başarılı olan regresyon testi beklenir. Teknik olarak mümkün değilse nedenini ve alternatif doğrulamayı PR'da açıklayın; istisnanın kabulü maintainer değerlendirmesindedir.
 - Semantik testlerde [sabit fixture ve holdout beklentilerini](docs/v3/SEMANTIC-TEST-CONTRACT.md) yalnızca puanı yükseltmek için değiştirmeyin. Gerçek kullanıcı vault'u yerine sentetik veriler ve geçici dizinler kullanın.
+
+### Değişikliğin riskine göre inceleme
+
+Her katkıya aynı ağırlıkta süreç uygulanmaz:
+
+| Değişiklik | Beklenen hazırlık |
+| --- | --- |
+| **Doküman, test veya küçük, yalıtılmış düzeltme** | Dar kapsam ve ilgili doğrulama yeterlidir; sırf küçük bir düzeltme için RFC ya da kapsamlı mimari rapor gerekmez. |
+| **Davranış koruyan refactor** | Önce dış import/CLI/JSON, dosya biçimi ve test patch noktaları gibi korunacak sözleşmeleri belirleyin; aynı girdilerle önce/sonra karakterizasyon ve regresyon testleri çalıştırın. |
+| **Mimari, güvenlik, state, installer veya release değişikliği** | Kodlamadan önce issue üzerinde kısa bir RFC/ADR veya tasarım özetiyle seçenekleri, riskleri, kapsam dışını, bağımlılıkları, ilgili uzman/maintainer incelemesini ve uygulanabilen upgrade/rollback test planını tartışın. |
+
+**Geriye dönük uyumluluk:** Mevcut public API/CLI, kullanıcı verisi, yapılandırma, dosya yolu, hook ve paket sözleşmelerini mümkün olduğunca koruyun. Gerçekten uyumsuz bir değişiklik gerekiyorsa etkilenen kullanıcıları, geçiş/migration yolunu, uygun bir deprecation/uyumluluk katmanı ihtiyacını ve geri dönüş sınırlarını önceden açıklayın; iç refactor için gereksiz deprecation başlatmayın. Gerektiğinde önce uyumluluk katmanını, sonra iç taşıma işini ayrı PR'lara bölün.
+
+Bu yaklaşımın açık kaynak örnekleri: [Home Assistant'ın küçük ve tek konulu PR incelemesi](https://developers.home-assistant.io/docs/review-process/), [Django'nun uyumluluk ve deprecation politikası](https://docs.djangoproject.com/en/6.0/internals/release-process/), [pytest'in katkı ve test kontrolleri](https://docs.pytest.org/en/stable/contributing.html) ve [Kubernetes KEP tasarım/test/rollback başlıkları](https://github.com/kubernetes/enhancements/blob/master/keps/NNNN-kep-template/README.md). Bunlar **uyarlanacak pratik örnekleri**; projeye yeni zorunlu framework, test aracı veya Kubernetes ölçeğinde süreç getirme önerisi değildir.
 
 **Temel V3 kontrolleri** (repo kökünde):
 
@@ -88,6 +102,7 @@ Bu bölüm, katkıcıya ek zorunluluk koymak yerine PR'ların nasıl değerlendi
 - Katkıcı commit'leri yeniden yazılmaz (rebase/squash/force-push yapılmaz). Gerekli küçük maintainer düzeltmeleri ayrı commit olarak eklenir ve PR'da açıklanır. PR'lar **merge commit** ile alınır, yazarlık korunur.
 - Birden fazla PR aynı turda birleşik ağaçta denenir; çakışmalar çözülür, Python **3.11 ve 3.14** testleri ile `scripts/evaluate_v3.py` çalıştırılır. PR'lar sırayla merge edilir ve son `main` test edilen ağaçla karşılaştırılır.
 - CI Linux, macOS ve Windows'ta çalışır; ilk kez katkı verenlerin fork kaynaklı CI koşuları onaydan sonra başlar. PR'sı olmayan yeniden üretilebilir hatalar maintainer tarafından düzeltilebilir ve raporlayan `Reported-by` ile anılabilir. Tasarım ve öneri issue'larına durum notu yazılır. Ürün yönü, merge ve yayın kararları maintainer'a aittir.
+- Kritik modüller için alanı bilen reviewer'ların sürece katılması yararlıdır. Katkı hacmi gerektirirse `CODEOWNERS` veya branch rulesets gibi denetimler ayrıca değerlendirilebilir; bunların devreye alınması repo yöneticisinin kararıdır ve bu rehber tek başına yeni bir merge engeli oluşturmaz.
 
 ## 7. Gizlilik ve güvenlik
 
