@@ -46,8 +46,6 @@ Her katkıya aynı ağırlıkta süreç uygulanmaz:
 
 **Geriye dönük uyumluluk:** Mevcut public API/CLI, kullanıcı verisi, yapılandırma, dosya yolu, hook ve paket sözleşmelerini mümkün olduğunca koruyun. Gerçekten uyumsuz bir değişiklik gerekiyorsa etkilenen kullanıcıları, geçiş/migration yolunu, uygun bir deprecation/uyumluluk katmanı ihtiyacını ve geri dönüş sınırlarını önceden açıklayın; iç refactor için gereksiz deprecation başlatmayın. Gerektiğinde önce uyumluluk katmanını, sonra iç taşıma işini ayrı PR'lara bölün.
 
-Bu yaklaşımın açık kaynak örnekleri: [Home Assistant'ın küçük ve tek konulu PR incelemesi](https://developers.home-assistant.io/docs/review-process/), [Django'nun uyumluluk ve deprecation politikası](https://docs.djangoproject.com/en/6.0/internals/release-process/), [pytest'in katkı ve test kontrolleri](https://docs.pytest.org/en/stable/contributing.html) ve [Kubernetes KEP tasarım/test/rollback başlıkları](https://github.com/kubernetes/enhancements/blob/master/keps/NNNN-kep-template/README.md). Bunlar **uyarlanacak pratik örnekleri**; projeye yeni zorunlu framework, test aracı veya Kubernetes ölçeğinde süreç getirme önerisi değildir.
-
 **Temel V3 kontrolleri** (repo kökünde):
 
 ```bash
