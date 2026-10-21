@@ -68,3 +68,17 @@ Bu nedenle açık ağ seçiminde kaynak ve isteğin paylaşım uygunluğu değer
 
 Bu aşamada Ctrl+Enter, masaüstü bildirimleri, aylık ajan günlüğü ve görünür
 istemci penceresi yoktur. Durum `yakala ajan`, iş dosyaları ve yerel logdan izlenir.
+
+## Codex istemcisi
+
+`yakala ajan codex` aynı iş sözleşmesini kullanır. Başlatmadan önce kararlı CLI
+sürümü, özellik anahtarları, MCP envanteri ve yönetici politikası doğrulanır.
+Her iş rastgele adlandırılmış yalnız `:root=deny` dosya sistemi profiliyle açılır.
+Genel kabuk, view_image, apps, eklentiler ve alt ajanlar kapalıdır; başka MCP
+sunucuları devre dışı bırakılır. Profilin yönetici varsayılanına sessiz düşme
+ihtimali varsa iş başlatılmaz.
+
+Windows'ta en az 0.163.0 ve açık `windows.sandbox="mxc"` gerekir. Desteklenmeyen
+MXC yerine legacy/read-only kullanılmaz. Linux'ta gerçek resmi Codex ikilisi
+ölçülmüştür; native Windows ve macOS aynı sonuç varsayılamaz.
+[MXC kaynak incelemesi ve Windows kabul testi](CODEX-WINDOWS-MXC.md) ayrı belgededir.
