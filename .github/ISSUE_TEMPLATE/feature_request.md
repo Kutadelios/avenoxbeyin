@@ -19,4 +19,12 @@ Uygunsa çekirdeğe eklemek yerine isteğe bağlı çözüm olup olamayacağın�
 ## Sınırlar (isteğe bağlı)
 
 <!-- Gizlilik, local-first/çevrimdışı kullanım, bağımlılıklar, platform, kurulum,
-rollback veya bakım maliyeti gibi olası etkiler. Bilmiyorsanız boş bırakabilirsiniz. -->
+API/CLI ve veri uyumluluğu, rollback veya bakım maliyeti gibi olası etkiler.
+Bilmiyorsanız boş bırakabilirsiniz. -->
+
+## Büyük değişikliklerde tasarım yaklaşımı (isteğe bağlı)
+
+<!-- Mimari, güvenlik, state veya dağıtımı önemli ölçüde etkileyecek önerilerde:
+alternatiflerin artı/eksi yönleri, ilgili tasarım issue'su/RFC/ADR, aşamalı küçük PR planı,
+upgrade/rollback ve doğrulama yaklaşımını paylaşabilirsiniz.
+Bunlar küçük özellikler için şart değildir; tasarım kararı maintainer ile birlikte verilir. -->
