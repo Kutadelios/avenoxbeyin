@@ -8129,13 +8129,17 @@ def _agent_codex_permissions():
     Windows uses explicit MXC, whose supported policy accepts root deny without
     elevated's root-read prerequisite. Unsupported hosts/policies must fail;
     prefer_mxc would permit legacy fallback and is not used. The Windows minimum
-    is 0.163.0. Native Windows enforcement remains a separate acceptance test.
+    is 0.163.0. Measured natively on Windows 11 with official Codex 0.163.0:
+    stdio MCP servers start outside MXC, apply_patch reads are denied alike.
+    Codex reads the project AGENTS.md through the same profile there and MXC
+    denies it, which aborts startup. The bridge already serves that file, so
+    native project-doc loading is switched off instead of granting a path.
     """
     name = 'beyin_yakala_' + secrets.token_hex(16)
     flags = ['-c', 'permissions.' + name + '.filesystem={":root"="deny"}',
              '-c', 'default_permissions=' + json.dumps(name)]
     if os.name == 'nt':
-        flags += ['-c', 'windows.sandbox="mxc"']
+        flags += ['-c', 'windows.sandbox="mxc"', '-c', 'project_doc_max_bytes=0']
     return flags
 
 
@@ -10049,7 +10053,10 @@ def release_agent_card(vault, state, card_id):
 def default_state(vault):
     import hashlib
     if sys.platform == 'win32':
-        base = Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local')))
+        # Same result as beyin_v3.default_state, but the home fallback is only
+        # resolved when needed: Codex starts the stdio MCP helper with a reduced
+        # environment, and Windows Path.home() raises without USERPROFILE.
+        base = Path(os.environ['LOCALAPPDATA']) if 'LOCALAPPDATA' in os.environ else Path.home() / 'AppData/Local'
     elif sys.platform == 'darwin':
         base = Path.home() / 'Library/Application Support'
     else:

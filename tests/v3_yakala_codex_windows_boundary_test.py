@@ -16,6 +16,8 @@ from unittest.mock import Mock, patch
 from tests import v3_yakala_ajan_codex_review_test as review
 from tests.v3_yakala_ajan_test import AgentFiles, yakala
 
+DEFAULT_STATE = yakala.default_state  # AgentFiles replaces it per test
+
 
 class CodexWindowsBoundaryTest(AgentFiles):
     @contextlib.contextmanager
@@ -39,6 +41,16 @@ class CodexWindowsBoundaryTest(AgentFiles):
         self.assertRegex(selected, r'^beyin_yakala_[0-9a-f]{32}$')
         self.assertEqual(document['permissions'], {selected: {'filesystem': {':root': 'deny'}}})
         self.assertEqual(document['windows'], {'sandbox': 'mxc'})
+        # MXC denies the native AGENTS.md read under root deny; the bridge serves it.
+        self.assertEqual(document['project_doc_max_bytes'], 0)
+
+    def test_windows_state_default_does_not_need_a_home_directory(self):
+        # Codex starts the stdio MCP helper with a reduced environment.
+        local = Path(self.tmp.name) / 'Synthetic LocalAppData'
+        with self.windows(), patch.dict(yakala.os.environ, {'LOCALAPPDATA': str(local)}), \
+                patch.object(yakala.Path, 'home', side_effect=RuntimeError('Could not determine home directory.')):
+            state = DEFAULT_STATE(self.vault)
+        self.assertEqual(state.parent, local / 'beyin-v3')
 
     def test_each_windows_run_uses_a_fresh_profile(self):
         with self.windows():

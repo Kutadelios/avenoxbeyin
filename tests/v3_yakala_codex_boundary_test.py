@@ -198,7 +198,9 @@ class CodexNativeReadBoundaryTest(AgentFiles):
             {'hooks': [{'type': 'command', 'command': hook_command}]}]}}), encoding='utf-8')
         # Native MXC validates these host bootstrap variables; keep the values
         # from the host while CODEX_HOME, vault and state stay synthetic.
-        env = {key: os.environ[key] for key in ('PATH', 'SystemRoot', 'SystemDrive',
+        # Windows runs hooks through PowerShell, which without PATHEXT hands
+        # python.exe to ShellExecute and the hook output never reaches Codex.
+        env = {key: os.environ[key] for key in ('PATH', 'PATHEXT', 'SystemRoot', 'SystemDrive',
                                                'LOCALAPPDATA', 'WINDIR', 'TEMP', 'TMP')
                if key in os.environ}
         env.update(CODEX_HOME=str(config_dir), TERM='dumb', NO_PROXY='127.0.0.1,localhost')
@@ -216,12 +218,12 @@ class CodexNativeReadBoundaryTest(AgentFiles):
         invalid_argv = list(argv)
         invalid_argv[1:1] = ['-c', 'unknown_boundary_contract=true']
         invalid = subprocess.run(invalid_argv, input='Synthetic invalid configuration.', cwd=self.vault,
-                                 env=env, capture_output=True, text=True, timeout=15)
+                                 env=env, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15)
         self.assertNotEqual(invalid.returncode, 0, invalid.stdout)
         self.assertIn('unknown configuration field', invalid.stderr)
         self.assertFalse(requests, 'Invalid permission config reached the model endpoint')
         result = subprocess.run(argv, input=yakala._agent_prompt(self.vault, job), cwd=self.vault,
-                                env=env, capture_output=True, text=True, timeout=55)
+                                env=env, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=55)
         outputs = {}
         for request in requests:
             for item in request.get('input', []):
