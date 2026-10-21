@@ -39,5 +39,6 @@ Temizlenmiş hata çıktısını buraya ekleyin.
 
 ## Ek bilgi (isteğe bağlı)
 
-<!-- İlgili dosya/fonksiyon, normal çalışan karşı örnek, çözüm fikri veya bilinen sınır.
-Kök nedeni bulmanız ya da kod yazmanız gerekmez. -->
+<!-- Önceki bir sürümde çalışıyorsa karşı örneği, etkilenen kullanım akışını/platformu,
+ilgili issue/PR'ı ve varsa sorunun kullanıcı verisi veya güvenliğe etkisini belirtin.
+Kök nedeni bulmanız, RFC hazırlamanız, regresyon testi veya kod yazmanız gerekmez. -->
