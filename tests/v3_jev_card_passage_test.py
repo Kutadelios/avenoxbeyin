@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Tests for Jev auto_context card passage extraction (Issue #507)."""
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / 'template/.claude/scripts'
@@ -27,6 +29,9 @@ class JevCardPassageTest(unittest.TestCase):
         self.state.mkdir()
         self.store = MemoryStore(self.state, self.vault)
         self.addCleanup(lambda: getattr(self.store, 'close', lambda: None)())
+        self.env = patch.dict(os.environ, {'TYPESAFE_API_KEY': 'synthetic-key'})
+        self.env.start()
+        self.addCleanup(self.env.stop)
         self.calls = []
 
     def record(self, ident, text, **extra):
