@@ -991,6 +991,17 @@ class MemoryStore:
         return self._retrieve("", project=project, audience=audience, statuses=("active", "waiting", "inbox"),
                               limit=limit, budget_chars=budget_chars, snapshot=True, today=today)
 
+    def due_tasks_context(self, audience="internal", budget_chars=1500, limit=5, project=None, today=None):
+        """Bounded due task snapshot when ambient snapshot is skipped."""
+        with self._connect() as db:
+            rows = db.execute("SELECT payload FROM records WHERE payload LIKE '%\"due_at\"%' ORDER BY id")
+            records = [json.loads(row[0]) for row in rows]
+        eligible, stale_count = self._eligible(audience=audience, project=project, records=records)
+        today_iso = str(today)[:10] if today else date.today().isoformat()
+        due_records = [r for r in eligible if is_due_task(r, today_iso)]
+        due_records.sort(key=lambda r: (str(r.get("due_at", ""))[:10], r.get("id", "")))
+        return pack_context(due_records, limit, budget_chars, stale_count)
+
     def source_snapshot(self, source_names, audience="internal", budget_chars=3000, source_directory=None, text_transform=None):
         """Return a bounded, source-verified continuity set in requested order."""
         if (not isinstance(source_names, (list, tuple)) or

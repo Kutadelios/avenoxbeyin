@@ -1,18 +1,43 @@
-#!/usr/bin/env python3
-"""Local-first CLI for the shared V3 memory foundation."""
+"""Local, source-backed memory foundation. No model or network dependencies."""
 from __future__ import annotations
 
-import argparse
-import base64
+from collections import Counter
+from contextlib import contextmanager
+from datetime import date, datetime
+import functools
 import hashlib
-import importlib.util
 import json
+import math
 import os
-import re
 from pathlib import Path
-import subprocess
+import posixpath
+import re
+import sqlite3
+import stat
 import sys
-import time
+import unicodedata
+import urllib.parse
+
+
+# Every supported client. "manual" is accepted for receipts only.
+HARNESSES = ("codex", "claude", "antigravity", "hermes", "opencode", "omp", "kiro")
+
+# rejected_at grammar: a date, optionally with an RFC 3339-style time.
+REJECTED_AT = re.compile(r"\d{4}-\d{2}-\d{2}(?:[T ](?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?)?", re.ASCII)
+
+# Keep adjacent installed modules importable when this file is loaded by path.
+_MODULE_DIR = str(Path(__file__).resolve().parent)
+if _MODULE_DIR not in sys.path:
+    sys.path.insert(0, _MODULE_DIR)
+
+# Frontmatter keys other tools write instead of updated_at, in precedence order.
+RECENCY_ALIASES = ("updated", "modified", "last_modified", "date_modified")
+
+
+def _in_package_container(pinned: str) -> bool:
+    """True when a pinned path runs through an MSIX package container."""
+    parts = [part.lower() for part in pinned.replace("\\", "/").split("/") if part]
+    return "packages" in parts and "localcache" in parts[parts.index("packages") + 1:]
 
 
 def default_state(vault: Path) -> Path:
@@ -25,38 +50,6 @@ def default_state(vault: Path) -> Path:
         base = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
     key = hashlib.sha256(str(Path(vault).resolve()).encode()).hexdigest()[:16]
     return base / "beyin-v3" / key
-
-
-SOURCE_WRITE_COMMANDS = ("note-create", "note-edit", "task-create", "task-update")
-NOTE_JSON_COMMANDS = ("note-read", "note-edit")
-
-
-class NoteUsageError(ValueError):
-    pass
-
-
-def mark_session_edit(state: Path) -> None:
-    """Open the Stop reminder's edit window for the Claude Code session that ran this write (#212).
-
-    Bash is not a PostToolUse matcher, so a note or task written through `beyin.py` from the Bash
-    tool was invisible to the receipt reminder. Claude Code sets CLAUDE_CODE_SESSION_ID in Bash
-    subprocesses to the session_id its hooks receive, so the marker names that exact session;
-    other shells and harnesses do not set it and nothing is guessed. Never costs the write itself.
-    """
-    session = os.environ.get("CLAUDE_CODE_SESSION_ID")
-    if not session or os.environ.get("BEYIN_V3_NO_RECEIPT_REMINDER") == "1":
-        return
-    try:
-        folder = Path(state) / "receipt-reminders"
-        edited = folder / (hashlib.sha256(session.encode("utf-8")).hexdigest() + ".edited")
-        if edited.exists():
-            return  # the window opened by the first edit stays, as for PostToolUse
-        folder.mkdir(parents=True, exist_ok=True)
-        temporary = folder / (edited.name + "." + str(os.getpid()) + ".tmp")
-        temporary.write_text(json.dumps({"at": time.time()}), encoding="utf-8")
-        os.replace(temporary, edited)
-    except OSError:
-        pass
 
 
 def _is_absolute_cross_platform(raw: str) -> bool:
@@ -109,1703 +102,1460 @@ def resolve_state(vault: Path, pinned: Path) -> Path:
         if re.match(r"^[A-Za-z]:[/\\]", raw) or (sys.platform == "win32" and raw.startswith(("/", "\\"))):
             return expected
     return resolved
+# Privacy must work in the contracted standalone core/no-sync checkout too.
+# Hygiene imports this same predicate instead of making retrieval depend on it.
+SENSITIVE_WORDS = re.compile(
+    r'(?:kasa|sifre|parola|kimlik|kimlig|finans|finansal|musteri|vergi|fatura|maas|ozel|gizli|gizlilik)'
+    r'(?:ler|lar)?(?:i|im|in|imiz|leri|lari)?'
+    r'|(?:private|secret|password|credential)s?')
+_SENSITIVE_FOLD = str.maketrans({'ş': 's', 'ğ': 'g', 'ü': 'u', 'ö': 'o', 'ç': 'c', 'ı': 'i', 'â': 'a', 'î': 'i', 'û': 'u'})
 
+def sensitive_fold(name):
+    """NFC, Turkish-aware casefold and ASCII-fold a name: 'MÜŞTERİLER' and NFD 'Şifre' both fold."""
+    text = unicodedata.normalize('NFC', str(name)).replace('İ', 'i').replace('I', 'i').lower()
+    return unicodedata.normalize('NFC', text.replace('̇', '')).translate(_SENSITIVE_FOLD)
 
-def _in_package_container(pinned: str) -> bool:
-    """True when a pinned path runs through an MSIX package container.
 
-    Reads the string, not the local path flavour: a Windows pin is inspected the
-    same way when the tests run on POSIX.
-    """
-    parts = [part.lower() for part in pinned.replace("\\", "/").split("/") if part]
-    return "packages" in parts and "localcache" in parts[parts.index("packages") + 1:]
+def sensitive_excluded(name):
+    """True when a directory name carries a kasa-class word (any position, any case/normal form)."""
+    return any(SENSITIVE_WORDS.fullmatch(word) for word in re.findall(r'[^\W\d_]+', sensitive_fold(name)))
 
 
-def _sibling_state_roots(pinned: Path) -> list:
-    """Installed state roots for the same vault key on both sides of a package redirect.
+def sensitive_source(source):
+    """A vault-relative source inside a sensitive folder must not enter the memory index or context."""
+    return isinstance(source, str) and any(sensitive_excluded(part) for part in Path(source).parts[:-1])
 
-    Default roots end in beyin-v3/<vault key>. When %LOCALAPPDATA% is redirected,
-    an install run inside the package and one run outside it produce two such
-    roots for the same vault, each with its own database. Both are real and
-    populated, so neither looks broken on its own. An explicit --state root has
-    no key layout and is skipped. Returns an empty list on any lookup error.
-    """
-    parts = list(pinned.parts)
-    lowered = [part.lower() for part in parts]
-    if "beyin-v3" not in lowered or lowered.index("beyin-v3") + 2 != len(parts):
-        return []
-    index = lowered.index("beyin-v3")
-    base = parts[:index]
-    if "packages" in lowered[:index]:
-        base = parts[:lowered.index("packages")]
-    if not base:
-        return []
-    local, key = Path(*base), parts[index + 1]
-    candidates = [local / "beyin-v3" / key]
-    try:
-        packages = local / "Packages"
-        if packages.is_dir():
-            # Literal path per package, not a glob: a key is never read as a pattern.
-            candidates += [entry / "LocalCache" / "Local" / "beyin-v3" / key
-                           for entry in sorted(packages.iterdir())]
-    except OSError:
-        return []
-    found, identities = [], []
-    for candidate in candidates:
-        try:
-            if not (candidate / "v3-install.json").is_file():
-                continue
-            # Inside the package the plain spelling is redirected into the container, so
-            # both spellings reach one directory there. Count directories, not strings.
-            identity = os.path.normcase(str(candidate.resolve()))
-            if identity in identities or any(os.path.samefile(candidate, other) for other in found):
-                continue
-        except (OSError, ValueError, RuntimeError):
-            continue
-        found.append(str(candidate))
-        identities.append(identity)
-    return found
 
-
-def state_location(vault: Path, state: Path, windows=None) -> dict:
-    """Compare the pinned state root with the one this process actually reads.
-
-    Windows redirects %LOCALAPPDATA% for an MSIX-packaged client into
-    Packages/<id>/LocalCache/Local. A pin inside that container is one string and
-    two directories for processes in and out of the package, so each side can end
-    up holding half the memory. Information only: it writes nothing, makes no
-    model call and does not raise the doctor status. A pin that resolves elsewhere
-    is only warned about on Windows: a POSIX symlink resolves the same for every
-    process, so a relocated state behind one is not a split.
-    """
-    windows = sys.platform == "win32" if windows is None else windows
-    report = {"effective_state": str(state),
-              "installed_at_effective_state": (state / "v3-install.json").is_file(),
-              "pin_status": "absent", "pinned_state": None, "pinned_resolves_here_to": None,
-              "pinned_in_package_container": False, "pin_resolves_elsewhere": False,
-              "installed_at_pinned_state": None, "sibling_state_roots": [], "warnings": []}
-    config = vault / ".beyin-runtime.json"
-    pinned = None
-    if config.is_file():
-        try:
-            data = json.loads(config.read_text(encoding="utf-8"))
-            value = data.get("state") if isinstance(data, dict) else None
-        except (ValueError, OSError):
-            value = None
-        pinned = value if isinstance(value, str) and value.strip() else None
-        report["pin_status"] = "present" if pinned else "unreadable"
-    if pinned is None:
-        return report
-    try:
-        resolved = _resolve_state_path(pinned)
-    except (OSError, ValueError, RuntimeError):
-        report.update(pinned_state=pinned, installed_at_pinned_state=False)
-        report["warnings"].append(
-            "invalid_state_path: the pinned state root cannot be resolved on this machine; "
-            "the local default is used. Reinstall here to bind lifecycle commands.")
-        return report
-    if not Path(pinned).expanduser().is_absolute():
-        report["warnings"].append(
-            "pinned_state_not_absolute: the pinned state root is not an absolute path on this "
-            "machine. The installer pins an absolute path, so this one was written by another OS "
-            "through a synced vault or edited by hand (#249); the installed beyin.py reads this "
-            "machine's default state instead. Installation files are per machine and stay out of "
-            "the sync; see https://github.com/avenoxai/avenoxbeyin/blob/main/docs/v3/MULTI-MACHINE.md.")
-    elif resolve_state(vault, Path(pinned)) != resolved:
-        report['warnings'].append('foreign_default_state: the synced default state belongs to another user or OS; '
-                                  'this machine uses its local default. Reinstall here to bind lifecycle commands.')
-    same = os.path.normcase(str(resolved)) == os.path.normcase(pinned)
-    report.update({"pinned_state": pinned, "pinned_resolves_here_to": str(resolved),
-                   "pinned_in_package_container": _in_package_container(pinned),
-                   "pin_resolves_elsewhere": not same,
-                   "installed_at_pinned_state": (resolved / "v3-install.json").is_file()})
-    if report["pinned_in_package_container"]:
-        report["warnings"].append(
-            "pinned_in_package_container: the pinned state root runs through an MSIX package "
-            "container (Packages\\...\\LocalCache). That path carries the package "
-            "identity and goes away when the package is reset or reinstalled under another "
-            "identity. Moving the state to a plain local directory is the durable fix; "
-            "see https://github.com/avenoxai/avenoxbeyin/blob/main/docs/v3/UPDATE.md.")
-    if report["pin_resolves_elsewhere"] and windows:
-        report["warnings"].append(
-            "pin_resolves_elsewhere: this process resolves the pinned path to " + str(resolved) +
-            ". A process on the other side of an MSIX redirect reads the same string and may "
-            "reach a different directory; run doctor inside and outside the package and compare.")
-    if not report["installed_at_pinned_state"]:
-        report["warnings"].append(
-            "pinned_state_empty: no v3-install.json under the pinned state root as this process "
-            "reads it. Either the pin names a directory this process cannot see, or the state "
-            "was moved without reinstalling with the new --state.")
-    if os.path.normcase(str(resolved)) != os.path.normcase(str(state)):
-        report["warnings"].append(
-            "effective_state_differs: this run reads " + str(state) + " rather than the pinned "
-            "root. Pass the pinned --state, or use the installed beyin.py, which reads the pin.")
-    report["sibling_state_roots"] = _sibling_state_roots(resolved)
-    if len(report["sibling_state_roots"]) > 1:
-        report["warnings"].append(
-            "state_split: this vault has an installed state root on both sides of the package "
-            "redirect (" + ", ".join(report["sibling_state_roots"]) + "). Each one carries its own "
-            "database, so which half a session reads depends on whether it runs inside the "
-            "package. Keep one and move it out of the container; see https://github.com/avenoxai/avenoxbeyin/blob/main/docs/v3/UPDATE.md.")
-    return report
-
-
-def receipt_line_endings(vault: Path) -> dict:
-    """Report whether git can rewrite receipt line endings in this vault (#205).
-
-    Receipts are compared byte for byte. With core.autocrlf=true (the Git for Windows
-    default) a pulled receipt is checked out as CRLF unless the vault stops that for
-    receipts/ with `-text` or `eol=lf`; the index then reads a different summary and the
-    same receipt resubmitted from the other machine fails as an event id collision.
-    Read-only, information only; a vault that is not a git work tree reports not_applicable.
-    """
-    def git(*args):
-        done = subprocess.run(("git", "-C", str(vault)) + args, capture_output=True, text=True, timeout=10)
-        return done.returncode, done.stdout.strip()
-    try:
-        code, inside = git("rev-parse", "--is-inside-work-tree")
-        if code != 0 or inside != "true":
-            return {"status": "not_applicable", "reason": "vault is not a git work tree"}
-        _, autocrlf = git("config", "--type=bool", "--get", "core.autocrlf")
-        if autocrlf != "true":
-            return {"status": "ok", "autocrlf": autocrlf or "unset"}
-        _, attrs = git("check-attr", "text", "eol", "--", "receipts/x.md")
-        found = dict((line.split(": ")[1], line.split(": ")[2]) for line in attrs.splitlines() if line.count(": ") == 2)
-        if found.get("text") == "unset" or found.get("eol") == "lf":
-            return {"status": "ok", "autocrlf": "true", "receipts_attributes": found}
-        return {"status": "warning", "autocrlf": "true", "receipts_attributes": found,
-                "warning": "line_endings: core.autocrlf=true and receipts/ is not pinned, so a receipt synced "
-                           "from another machine can be checked out as CRLF, which changes its bytes and makes "
-                           "the same receipt fail as an event id collision. Add 'receipts/** -text' to the "
-                           "vault's .gitattributes and check the receipts out again; see https://github.com/avenoxai/avenoxbeyin/blob/main/docs/v3/MULTI-MACHINE.md."}
-    except Exception as exc:  # no git, a hung git or a broken config must never hide the rest of doctor
-        return {"status": "unavailable", "error": type(exc).__name__}
-
-
-def load_engine():
-    _ensure_scripts_path()
-    adjacent = Path(__file__).resolve().parent / "beyin_v3.py"
-    path = adjacent if adjacent != Path(__file__).resolve() and adjacent.exists() else Path(__file__).resolve().parents[1] / "template/.claude/scripts/beyin_v3.py"
-    spec = importlib.util.spec_from_file_location("beyin_v3_shared_engine", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Shared V3 engine could not be loaded")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _ensure_scripts_path():
-    """Put the runtime scripts directory first on sys.path without importing the sync engine.
-    Helpers that only need sibling modules (skills, preferences, the advisor client, compaction)
-    call this instead of load_sync(); the directory must stay first so `beyin_v3` resolves to the
-    runtime, never to this CLI file."""
-    adjacent = Path(__file__).resolve().parent
-    directory = str(adjacent if (adjacent / "beyin_v3_sync.py").exists() else Path(__file__).resolve().parents[1] / "template/.claude/scripts")
-    if sys.path[:1] != [directory]:
-        sys.path.insert(0, directory)
-
-
-def load_sync():
-    _ensure_scripts_path()
-    from beyin_v3_sync import SyncEngine
-    return SyncEngine
-
-
-# Mirror beyin_v3_jev_client.FEATURES and PROVIDERS and beyin_v3_laya.CHECKPOINTS; duplicated
-# so argument parsing never imports the optional client. tests/v3_jev_toggle_test.py pins them.
-JEV_FEATURES = ("context", "review", "answer", "auto_context")
-JEV_PROVIDERS = ("typesafe", "vercel", "laya")
-LAYA_MODELS = ("multilingual", "english")
-JEV_NOTICE = ("auto_context is on: every turn sends the prompt plus the title and first 600 characters of up to 8 "
-              "candidate internal/public notes to the provider. Private notes are never sent.")
-JEV_NOTICE_LAYA = ("auto_context is on: every turn sends the prompt plus the title and first 600 characters of up to 8 "
-                   "candidate internal/public notes to the local Laya server, one request per note. Private notes are never sent. "
-                   "Laya is shadow-only: its scores are only logged and never change the context.")
-JEV_WARNING = "TYPESAFE_API_KEY is not set; calls degrade to local results."
-LAYA_NOTICE = ("provider laya: calls go only to the local laya-serve at {base_url}; start it with LAYA_HOST=127.0.0.1. "
-               "Laya is shadow-only: scores are logged for measurement and never change results.")
-# Coded refusals that deserve a next step. ASCII Turkish, like the other human lines.
-ERROR_HINTS = {
-    "laya_shadow_only": ("Laya yalniz golge modda calisir: puanlari olcum icin kaydedilir, gordugun sonucu degistirmez. "
-                         "Laya icin: jev shadow --provider laya. Acik mod icin: jev on --provider typesafe."),
-}
-
-
-def jev_client():
-    _ensure_scripts_path()
-    import beyin_v3_jev_client as client
-    return client
-
-
-def jev_status(state: Path):
-    """Doctor path: with no config and no kill switch the optional client is not imported."""
-    if (not (state / "jev.json").exists() and not (state / "jev.disabled").exists()
-            and os.environ.get("BEYIN_JEV_DISABLE") is None):
-        return {"mode": "off", "configured": False}
-    return jev_client().status(state)
-
-
-def jev_context_mode(vault):
-    """The vault's context_mode for the Jev notice only. Jev status and its off switch never depend on a
-    valid preferences file: a malformed or newer file (a key this version does not know) gives no notice."""
-    try:
-        import beyin_v3_preferences as preferences
-        return preferences.read(vault).get("context_mode")
-    except (ValueError, OSError):
-        return None
-
-
-def jev_advice(result):
-    laya = result.get("provider") == "laya"
-    if result.get("automatic_model_calls"):
-        result["notice"] = JEV_NOTICE_LAYA if laya else JEV_NOTICE
-        if result.get("context_mode") and result.get("context_mode") != "turn":
-            result["context_mode_notice"] = (
-                f"Automatic context requires context_mode 'turn', but current mode is '{result['context_mode']}'. "
-                "Enable with: beyin.py preferences --context-mode turn"
-            )
-    if laya:
-        result["provider_notice"] = LAYA_NOTICE.format(base_url=result.get("laya", {}).get("base_url", "?"))
-    elif result.get("mode") != "off" and not result.get("key_present"):
-        result["warning"] = JEV_WARNING
-    return result
-
-
-HOOK_FILES = (".claude/settings.local.json", ".codex/hooks.json", ".agents/hooks.json",
-              ".kiro/hooks/beyin-v3.json")
-
-
-def _hook_arguments(command: str) -> list:
-    """Arguments of one installed hook command: POSIX shell text or the Windows EncodedCommand."""
-    import base64
-    import re
-    import shlex
-    match = re.search(r"-EncodedCommand\s+([A-Za-z0-9+/=]+)", command, re.I)
-    if match:
-        try:
-            script = base64.b64decode(match.group(1), validate=True).decode("utf-16le")
-        except (ValueError, UnicodeError):
-            return []
-        return [item.replace("''", "'") for item in re.findall(r"'((?:[^']|'')*)'", script)]
-    try:
-        return shlex.split(command)
-    except ValueError:
-        return []
-
-
-def hook_paths(vault: Path) -> dict:
-    """Read-only (#204): hook commands that still name another install location.
-
-    A vault moved to another account or machine together with its hook files keeps commands
-    such as C:\\Users\\<old>\\...\\beyin_v3_hook.py; every lifecycle hook then fails with a
-    generic error. Reads only managed hook files; never writes and never walks the vault."""
-    stale, checked = [], 0
-    try:
-        here = vault.resolve()
-    except OSError:
-        here = vault
-    for name in HOOK_FILES:
-        path = vault / name
-        if not path.is_file():
-            continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, UnicodeError):
-            stale.append({"file": name, "reason": "unreadable"})
-            continue
-        handlers = []
-        if name == ".kiro/hooks/beyin-v3.json":
-            for item in data.get("hooks", []) if isinstance(data.get("hooks"), list) else ():
-                if isinstance(item, dict) and isinstance(item.get("action"), dict):
-                    command = item["action"].get("command")
-                    if isinstance(command, str):
-                        handlers.append((item.get("trigger", ""), command))
-        else:
-            events = data.get("beyin-v3", {}) if name == ".agents/hooks.json" else data.get("hooks", {})
-            for event, groups in (events.items() if isinstance(events, dict) else ()):
-                for group in groups if isinstance(groups, list) else ():
-                    if not isinstance(group, dict):
-                        continue
-                    for handler in group.get("hooks", [group]) if "hooks" in group else [group]:
-                        if isinstance(handler, dict) and isinstance(handler.get("command"), str):
-                            handlers.append((event, handler["command"]))
-        for event, command in handlers:
-            arguments = _hook_arguments(command)
-            expected = "/beyin_v3_kiro.py" if name == ".kiro/hooks/beyin-v3.json" else "/beyin_v3_hook.py"
-            script = next((a for a in arguments if a.replace("\\", "/").endswith(expected)), None)
-            if script is None:
-                continue
-            checked += 1
-            reasons = []
-            if not Path(script).is_file():
-                reasons.append(("hook_script_missing", script))
-            if "--vault" in arguments[:-1]:
-                bound = arguments[arguments.index("--vault") + 1]
-                try:
-                    same = Path(bound).resolve() == here
-                except OSError:
-                    same = False
-                if not same:
-                    reasons.append(("other_vault", bound))
-            if arguments and Path(arguments[0]).is_absolute() and not Path(arguments[0]).exists():
-                reasons.append(("python_missing", arguments[0]))
-            for reason, value in reasons:
-                entry = {"file": name, "event": event, "reason": reason, "path": value}
-                if entry not in stale:
-                    stale.append(entry)
-    if not checked and not stale:
-        return {"status": "not_installed", "checked": 0}
-    result = {"status": "stale" if stale else "ok", "checked": checked}
-    if stale:
-        result["stale"] = stale[:20]
-        result["hint"] = ("Hook commands point to another install location (vault moved, or hook files synced "
-                          "from another machine). Run the installer again on this machine with this vault; if the "
-                          "vault moved from another account or folder, pass the old state folder (or a copy) with "
-                          "--state. Keep hook files out of sync: https://github.com/avenoxai/avenoxbeyin/blob/main/docs/v3/MULTI-MACHINE.md")
-    return result
-
-
-def _hook_commands(argv):
-    """Build POSIX and Windows command strings for hook invocations."""
-    import base64
-    import shlex
-    if any(any(c in str(value) for c in "\n\r\x00") for value in argv):
-        raise ValueError("Newlines or NUL in command paths are unsupported")
-    portable_argv = [str(value).replace("\\", "/") if os.name == "nt" else str(value) for value in argv]
-    posix = shlex.join(portable_argv)
-    script = "& " + " ".join("'" + str(value).replace("'", "''") + "'" for value in argv)
-    script += "; exit $LASTEXITCODE"
-    encoded = base64.b64encode(script.encode("utf-16le")).decode()
-    launcher = "powershell.exe"
-    if os.name == "nt":
-        windows_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
-        launcher_path = str(Path(windows_root) / "System32/WindowsPowerShell/v1.0/powershell.exe").replace("\\", "/")
-        launcher = subprocess.list2cmdline([launcher_path])
-    windows = launcher + " -NoProfile -NonInteractive -EncodedCommand " + encoded
-    return posix, windows
-
-
-def _local_hook_file(root, path):
-    root = root.resolve()
-    path.relative_to(root)
-    cursor = path
-    while cursor != root:
-        if cursor.is_symlink():
-            raise ValueError('hook configuration paths must not be symlinks')
-        cursor = cursor.parent
-    return path
-
-
-def _backup_hook_file(path, raw):
-    # Existing backups are user data too. Exclusive creation preserves all prior copies.
-    index = 0
-    while True:
-        backup = path.with_name(path.name + '.bak' + ('.' + str(index) if index else ''))
-        try:
-            with backup.open('xb') as out:
-                out.write(raw); out.flush(); os.fsync(out.fileno())
-            return backup
-        except FileExistsError:
-            index += 1
-
-
-def _write_hook_json(path, data):
-    import tempfile
-    fd, temporary = tempfile.mkstemp(prefix='.hook-reconcile-', dir=path.parent)
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as out:
-            json.dump(data, out, ensure_ascii=False, indent=2)
-            out.write('\n'); out.flush(); os.fsync(out.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-
-
-def hook_reconcile(vault: Path, state: Path, force: bool = False) -> dict:
-    """Explicitly reconcile hook commands pointing to another install location (#205).
-
-    Creates a .bak backup of each modified hook file before changing it.
-    Replaces stale Python and vault paths with current local interpreter and vault paths.
-    Never runs automatically or silently.
-    """
-    vault = vault.resolve()
-    state = state.resolve()
-    hook_script = vault / ".claude/scripts/beyin_v3_hook.py"
-    kiro_script = vault / ".claude/scripts/beyin_v3_kiro.py"
-    _local_hook_file(vault, hook_script)
-    if not hook_script.is_file():
-        raise RuntimeError(f"Hook script not found at {hook_script}. Reinstall or repair the vault first.")
-    if (vault / ".kiro/hooks/beyin-v3.json").is_file():
-        _local_hook_file(vault, kiro_script)
-        if not kiro_script.is_file():
-            raise RuntimeError(f"Kiro hook adapter not found at {kiro_script}. Reinstall or repair the vault first.")
-
-    for name in HOOK_FILES:
-        _local_hook_file(vault, vault / name)
-    _local_hook_file(state, state / "v3-install.json")
-    paths_report = hook_paths(vault)
-    if paths_report.get("status") == "not_installed":
-        return {
-            "status": "not_installed",
-            "checked": 0,
-            "reconciled_count": 0,
-            "files": [],
-            "message": "No installed hooks found to reconcile.",
-        }
-
-    expected_state = str(state.resolve())
-    runtime_stale = False
-    runtime_path = vault / ".beyin-runtime.json"
-    if runtime_path.is_file():
-        _local_hook_file(vault, runtime_path)
-        try:
-            rdata = json.loads(runtime_path.read_text(encoding="utf-8"))
-            if isinstance(rdata, dict) and rdata.get("state") != expected_state:
-                runtime_stale = True
-        except (OSError, ValueError):
-            pass
-
-    launchers_stale = False
-    planned_launchers = {}
-    launcher_baselines = {}
-    try:
-        manifest = json.loads((state / "v3-install.json").read_text(encoding="utf-8"))
-        launcher_baselines = {name: base64.b64decode(info.get("installed_content") or "")
-                              for name, info in manifest.get("files", {}).items() if isinstance(info, dict)}
-    except (OSError, ValueError):
-        pass
-    launcher_script = vault / ".claude/scripts/beyin_v3_launchers.py"
-    if not launcher_script.is_file():
-        launcher_script = Path(__file__).resolve().parent / "beyin_v3_launchers.py"
-        if not launcher_script.is_file():
-            launcher_script = Path(__file__).resolve().parents[1] / "template/.claude/scripts/beyin_v3_launchers.py"
-    if launcher_script.is_file():
-        try:
-            import importlib.util
-            spec = importlib.util.spec_from_file_location("beyin_reconcile_launchers", launcher_script)
-            lmod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(lmod)
-            planned_launchers = lmod.plan_launchers(vault, state)
-            for lname, lbytes in planned_launchers.items():
-                lpath = vault / lname
-                if lpath.is_file():
-                    _local_hook_file(vault, lpath)
-                    original = lpath.read_bytes()
-                    baseline = launcher_baselines.get(lname)
-                    if baseline is not None and original.replace(b"\r\n", b"\n") == baseline.replace(b"\r\n", b"\n") and original != lbytes:
-                        launchers_stale = True
-        except Exception:
-            pass
-
-    if paths_report.get("status") != "stale" and not force and not runtime_stale and not launchers_stale:
-        return {
-            "status": "ok",
-            "checked": paths_report.get("checked", 0),
-            "reconciled_count": 0,
-            "files": [],
-            "message": "Hook paths are already valid; no reconciliation needed.",
-        }
-
-    stale_files = {item["file"] for item in paths_report.get("stale", [])} if not force else set(HOOK_FILES)
-    reconciled_files = []
-    total_reconciled = 0
-    all_new_commands = []
-    reconciled_originals = {}
-
-    for name in HOOK_FILES:
-        path = vault / name
-        if not path.is_file():
-            continue
-        if name not in stale_files and not force:
-            continue
-
-        try:
-            original_bytes = path.read_bytes()
-            data = json.loads(original_bytes.decode("utf-8"))
-            if not isinstance(data, dict):
-                continue
-        except (OSError, ValueError, UnicodeError):
-            continue
-
-        file_reconciled = 0
-        changes = []
-
-        if name == ".kiro/hooks/beyin-v3.json":
-            for item in data.get("hooks", []) if isinstance(data.get("hooks"), list) else ():
-                if not isinstance(item, dict) or not isinstance(item.get("action"), dict):
-                    continue
-                event = item.get("trigger")
-                old_cmd = item["action"].get("command")
-                if event not in ("SessionStart", "UserPromptSubmit", "PostToolUse", "Stop") or not isinstance(old_cmd, str):
-                    continue
-                args = _hook_arguments(old_cmd)
-                if not any(a.replace("\\", "/").endswith("/beyin_v3_kiro.py") for a in args):
-                    continue
-                posix, windows = _hook_commands([sys.executable, kiro_script, "--vault", vault, "--state", state,
-                                                  "--event", event])
-                all_new_commands.extend([posix, windows])
-                target_cmd = windows if os.name == "nt" else posix
-                if old_cmd != target_cmd or force:
-                    changes.append({"event": event, "old_command": old_cmd, "new_command": target_cmd,
-                                    "old_summary": " ".join(args[:2]),
-                                    "new_summary": f"{sys.executable} {kiro_script}"})
-                    item["action"]["command"] = target_cmd
-                    item["timeout"] = 25 if os.name == "nt" else 10
-                    file_reconciled += 1
-        elif name == ".agents/hooks.json":
-            managed = data.get("beyin-v3")
-            if isinstance(managed, dict):
-                for event in ("PreInvocation", "Stop"):
-                    if event in managed and isinstance(managed[event], list):
-                        posix, windows = _hook_commands([sys.executable, hook_script, "--vault", vault, "--state", state,
-                                                         "--harness", "antigravity", "--event", event])
-                        all_new_commands.extend([posix, windows])
-                        target_cmd = windows if os.name == "nt" else posix
-                        timeout = 20 if os.name == "nt" else 5
-                        for handler in managed[event]:
-                            if isinstance(handler, dict):
-                                old_cmd = handler.get("command", "")
-                                if not isinstance(old_cmd, str):
-                                    continue
-                                args = _hook_arguments(old_cmd)
-                                if not any(a.replace("\\", "/").endswith("/beyin_v3_hook.py") for a in args):
-                                    continue
-                                if old_cmd != target_cmd or force:
-                                    old_args = _hook_arguments(old_cmd)
-                                    changes.append({
-                                        "event": event,
-                                        "old_command": old_cmd,
-                                        "new_command": target_cmd,
-                                        "old_summary": " ".join(old_args[:2]) if len(old_args) >= 2 else old_cmd[:60],
-                                        "new_summary": f"{sys.executable} {hook_script}",
-                                    })
-                                    handler["command"] = target_cmd
-                                    handler["timeout"] = timeout
-                                    file_reconciled += 1
-        else:
-            harness = "claude" if "claude" in name else "codex"
-            hooks_map = data.get("hooks", {})
-            if isinstance(hooks_map, dict):
-                posix, windows = _hook_commands([sys.executable, hook_script, "--vault", vault, "--state", state,
-                                                 "--harness", harness])
-                all_new_commands.extend([posix, windows])
-                target_cmd = windows if os.name == "nt" else posix
-
-                for event, groups in hooks_map.items():
-                    if not isinstance(groups, list):
-                        continue
-                    timeout = 3 if event == "SessionEnd" else (20 if os.name == "nt" else 5)
-                    for group in groups:
-                        if not isinstance(group, dict):
-                            continue
-                        handlers = group.get("hooks", [group]) if "hooks" in group else [group]
-                        for handler in handlers:
-                            if not isinstance(handler, dict):
-                                continue
-                            old_cmd = handler.get("command", "")
-                            if not isinstance(old_cmd, str):
-                                continue
-                            args = _hook_arguments(old_cmd)
-                            script = next((a for a in args if a.replace("\\", "/").endswith("/beyin_v3_hook.py")), None)
-                            if script is None:
-                                continue
-                            needs_update = (old_cmd != target_cmd or force or
-                                            (harness == "codex" and handler.get("commandWindows") != windows))
-                            if needs_update:
-                                changes.append({
-                                    "event": event,
-                                    "old_command": old_cmd,
-                                    "new_command": target_cmd,
-                                    "old_summary": " ".join(args[:2]) if len(args) >= 2 else old_cmd[:60],
-                                    "new_summary": f"{sys.executable} {hook_script}",
-                                })
-                                handler["command"] = target_cmd
-                                handler["timeout"] = timeout
-                                if harness == "codex":
-                                    handler["commandWindows"] = windows
-                                file_reconciled += 1
-
-        if file_reconciled > 0:
-            if path.read_bytes() != original_bytes:
-                raise RuntimeError("Hook configuration changed during reconciliation; preserved")
-            backup_path = _backup_hook_file(path, original_bytes)
-            _local_hook_file(vault, path)
-            if path.read_bytes() != original_bytes:
-                raise RuntimeError("Hook configuration changed after backup; preserved")
-            reconciled_originals[name] = original_bytes
-            _write_hook_json(path, data)
-            reconciled_files.append({
-                "file": name,
-                "backup": str(backup_path.relative_to(vault).as_posix()),
-                "reconciled": file_reconciled,
-                "changes": changes,
-            })
-            total_reconciled += file_reconciled
-
-    if runtime_path.is_file() and (runtime_stale or force):
-        try:
-            original_bytes = runtime_path.read_bytes()
-            rdata = json.loads(original_bytes.decode("utf-8"))
-            old_state = rdata.get("state", "")
-            if old_state != expected_state or force:
-                rdata["state"] = expected_state
-                target_bytes = (json.dumps(rdata, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-                if runtime_path.read_bytes() != original_bytes:
-                    raise RuntimeError("Runtime configuration changed during reconciliation; preserved")
-                backup_path = _backup_hook_file(runtime_path, original_bytes)
-                _local_hook_file(vault, runtime_path)
-                if runtime_path.read_bytes() != original_bytes:
-                    raise RuntimeError("Runtime configuration changed after backup; preserved")
-                runtime_path.write_bytes(target_bytes)
-                reconciled_originals[".beyin-runtime.json"] = original_bytes
-                reconciled_files.append({
-                    "file": ".beyin-runtime.json",
-                    "backup": str(backup_path.relative_to(vault).as_posix()),
-                    "reconciled": 1,
-                    "changes": [{
-                        "event": "runtime_state",
-                        "old_command": str(old_state),
-                        "new_command": expected_state,
-                        "old_summary": str(old_state),
-                        "new_summary": expected_state,
-                    }],
-                })
-                total_reconciled += 1
-        except (OSError, ValueError, UnicodeError):
-            pass
-
-    for lname, expected_bytes in planned_launchers.items():
-        lpath = vault / lname
-        if not lpath.is_file():
-            continue
-        try:
-            original_bytes = lpath.read_bytes()
-            baseline = launcher_baselines.get(lname)
-            if baseline is None or original_bytes.replace(b"\r\n", b"\n") != baseline.replace(b"\r\n", b"\n"):
-                continue  # A user-edited launcher remains user-owned, including with --force.
-            if original_bytes != expected_bytes or force:
-                if lpath.read_bytes() != original_bytes:
-                    raise RuntimeError("Launcher changed during reconciliation; preserved")
-                backup_path = _backup_hook_file(lpath, original_bytes)
-                _local_hook_file(vault, lpath)
-                if lpath.read_bytes() != original_bytes:
-                    raise RuntimeError("Launcher changed after backup; preserved")
-                lpath.write_bytes(expected_bytes)
-                reconciled_originals[lname] = original_bytes
-                reconciled_files.append({
-                    "file": lname,
-                    "backup": str(backup_path.relative_to(vault).as_posix()),
-                    "reconciled": 1,
-                    "changes": [{
-                        "event": "launcher",
-                        "old_command": "",
-                        "new_command": "",
-                        "old_summary": lname,
-                        "new_summary": lname,
-                    }],
-                })
-                total_reconciled += 1
-        except OSError:
-            pass
-
-    manifest_path = state / "v3-install.json"
-    if manifest_path.is_file() and (all_new_commands or reconciled_files):
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            cmds = set(manifest.get("commands", []))
-            cmds.update(all_new_commands)
-            manifest["commands"] = sorted(cmds)
-            files = manifest.get("files", {})
-            for rec in reconciled_files:
-                name = rec["file"]
-                if name in files and isinstance(files[name], dict):
-                    file_path = vault / name
-                    baseline = base64.b64decode(files[name].get("installed_content") or "")
-                    original = reconciled_originals.get(name, b"")
-                    # Never adopt user edits as installer-owned content.
-                    adopt = False
-                    if baseline.replace(b"\r\n", b"\n") == original.replace(b"\r\n", b"\n"):
-                        adopt = True
-                    elif name == ".beyin-runtime.json":
-                        try:
-                            orig_json = json.loads(original.decode("utf-8"))
-                            base_json = json.loads(baseline.decode("utf-8"))
-                            if isinstance(orig_json, dict) and isinstance(base_json, dict) and dict(orig_json, state=None) == dict(base_json, state=None):
-                                adopt = True
-                        except Exception:
-                            pass
-                    if file_path.is_file() and adopt:
-                        file_bytes = file_path.read_bytes()
-                        files[name]["installed_hash"] = hashlib.sha256(file_bytes).hexdigest()
-                        files[name]["installed_content"] = base64.b64encode(file_bytes).decode("ascii")
-            _write_hook_json(manifest_path, manifest)
-        except (OSError, ValueError, UnicodeError):
-            pass
-
-    return {
-        "status": "reconciled" if total_reconciled > 0 else "noop",
-        "checked": paths_report.get("checked", 0),
-        "reconciled_count": total_reconciled,
-        "files": reconciled_files,
-    }
-
-
-def read_json(filename: str):
-    if filename == "-":
-        if hasattr(sys.stdin, "reconfigure"):
-            try:
-                sys.stdin.reconfigure(encoding="utf-8-sig")
-            except Exception:
-                pass
-        raw = sys.stdin.read()
-        return json.loads(raw.lstrip("\ufeff").strip() or "{}")
-    with Path(filename).open(encoding="utf-8-sig") as stream:
-        return json.load(stream)
-
-
-def load_skills():
-    _ensure_scripts_path()
-    import beyin_v3_skills
-    return beyin_v3_skills
-
-
-# Hours and minutes are bounded here so every supported Python accepts the same strings
-# (datetime.fromisoformat alone also takes 20260924, 2026-W39-4, a zone-less time or, on newer
-# versions, 24:00).
-RECAP_BOUND = (r"\d{4}-\d{2}-\d{2}"
-               r"(T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2}))?")
-
-
-def recap_bound(value: str):
-    """argparse type of recap --since/--until: a local calendar day or an exact instant.
-
-    YYYY-MM-DD returns a date; the projection compares it with each receipt's local day, the
-    day daily/v3 is named by. A full ISO 8601 timestamp must end in Z or a UTC offset and
-    returns that instant in UTC. A zone-less time is refused instead of guessed.
-    """
-    import re
-    from datetime import date, datetime, timezone
-    try:
-        match = re.fullmatch(RECAP_BOUND, value, re.ASCII)
-        if not match:
-            raise ValueError(value)
-        if match.group(1) is None:
-            return date.fromisoformat(value)
-        stamp = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
-        stamp.astimezone()  # from/through report its local day; Windows cannot place every instant
-        return stamp
-    except (ValueError, OverflowError, OSError):
-        raise argparse.ArgumentTypeError(
-            "invalid date format: %r (use YYYY-MM-DD or an ISO 8601 timestamp with Z or a UTC offset, "
-            "such as 2026-09-24T18:30:00+03:00)" % value) from None
-
-
-def recap_bounds_inverted(since, until):
-    """True when --since lies after --until. Two instants compare directly; with a bare date
-    on either side both are compared as local calendar days, the unit a bare date selects."""
-    from datetime import datetime
-    if isinstance(since, datetime) and isinstance(until, datetime):
-        return since > until
-    first, last = (bound.astimezone().date() if isinstance(bound, datetime) else bound for bound in (since, until))
-    return first > last
-
-
-class ArgumentParsingError(Exception):
+class RevisionConflict(ValueError):
     pass
 
 
-def parser(note_namespace=None, is_json=False):
-    class ResultParser(argparse.ArgumentParser):
-        def error(self, message):
-            # argparse assigns the root command before parsing the subparser.
-            # The shared namespace also covers unknown options reported by root.
-            if getattr(note_namespace, 'command', None) in NOTE_JSON_COMMANDS:
-                raise NoteUsageError(message)
-            if is_json:
-                raise ArgumentParsingError(message)
-            super().error(message)
-
-    root = ResultParser(description=__doc__)
-    root.add_argument("--vault", required=True, type=Path, help="Existing vault directory")
-    root.add_argument("--state", type=Path, help="Local state directory outside the vault")
-    root.add_argument("--json", action="store_true", help="Format output as JSON")
-    sub = root.add_subparsers(dest="command", required=True)
-    sub.add_parser("init", help="Initialize local state; installs no hooks or services")
-    sync_parser = sub.add_parser("sync", help="Reconcile Markdown sources into local state")
-    sync_parser.add_argument("--full", action="store_true",
-                             help="Read every source instead of trusting unchanged file signatures")
-    sync_parser.add_argument("--recover-views", action="store_true",
-                             help="Archive conflicting receipt views and regenerate from immutable receipts")
-    sub.add_parser("recover-views", help="Archive conflicting receipt views and regenerate from immutable receipts")
-    sub.add_parser("skill-sync", help="Reconcile project-local shared skills")
-    sub.add_parser("doctor", help="Read local hook health and pending metadata counts")
-    scheduled = sub.add_parser("scheduled-check", help="Sync then doctor for an OS scheduler you set up; no model call, no service")
-    scheduled.add_argument("--notify", action="store_true",
-                           help="Opt-in OS notification when the result changes; issue kinds and counts only")
-    hook_rec = sub.add_parser("hook-reconcile", help="Reconcile stale hook paths with backup")
-    hook_rec.add_argument("--force", action="store_true", help="Reconcile hook paths even if not reported stale")
-    recap = sub.add_parser("recap", help="Read recent source-linked outcomes without a model call")
-    recap.add_argument("--days", type=int, help="Calendar days in UTC, including today (1..366, default 7); "
-                                                "not allowed with --since/--until")
-    recap.add_argument("--limit", type=int, default=20, help="Maximum recent receipts to return (1..100)")
-    recap.add_argument("--since", type=recap_bound, metavar="DATE",
-                       help="Explicit range start: YYYY-MM-DD (local calendar day, as daily/v3 is named) or an "
-                            "ISO 8601 timestamp with Z or a UTC offset")
-    recap.add_argument("--until", type=recap_bound, metavar="DATE",
-                       help="Explicit range end, inclusive: YYYY-MM-DD covers that whole local day; without "
-                            "--since there is no lower bound")
-    recap.set_defaults(usage_error=recap.error)  # cross-flag checks in main() report with recap's own usage
-    triage = sub.add_parser("triage", help="Vault digestion report: inbox items, stale tasks, and weekly knowledge summary")
-    triage.add_argument("--stale-days", type=int, default=14, help="Days of inactivity before an open task is considered stale (default: 14)")
-    triage.add_argument("--digest-days", type=int, default=7, help="Days to look back for knowledge notes and outcomes (default: 7)")
-    audit_parser = sub.add_parser("audit", help="Advisory memory auditor: detect near-duplicates, staleness, and contradictions")
-    audit_parser.add_argument("target", nargs="?", default=None, help="Specific markdown note to audit against vault memory (optional)")
-    audit_parser.add_argument("--threshold", type=float, default=0.60, help="Lexical overlap threshold 0.0..1.0 (default: 0.60)")
-    audit_parser.add_argument("--min-shared", type=int, default=5, help="Minimum shared topical terms (default: 5)")
-    audit_parser.add_argument("--limit", type=int, default=20, help="Maximum findings to return (default: 20)")
-    settings = sub.add_parser("preferences", help="Control automatic local checks and injected context")
-    settings.add_argument("--profile", choices=("normal", "economical", "manual"))
-    settings.add_argument("--auto-sync", choices=("on", "off"))
-    settings.add_argument("--interval-minutes", type=int)
-    settings.add_argument("--context-mode", choices=("turn", "session", "off"))
-    settings.add_argument("--context-chars", type=int)
-    settings.add_argument("--companion-context-chars", type=int,
-                          help="Opening context budget (SessionStart, continuity questions), 1000..24000; 0 uses --context-chars")
-    settings.add_argument("--secret-filter", choices=("on", "off"))
-    settings.add_argument("--daily-layout", choices=("flat", "v3"),
-                          help="Vault-wide daily receipt view layout (default v3); applied by the next sync")
-    settings.add_argument("--update-notifications", choices=("on", "off"))
-    settings.add_argument("--last-session-chars", type=int, help="Hygiene limit for Last-Session.md; 0 turns it off")
-    settings.add_argument("--threads-chars", type=int, help="Hygiene limit for Threads.md; 0 turns it off")
-    settings.add_argument("--exclude-component", action="append", default=[], metavar="COMPONENT",
-                          help="Disable/exclude a managed component or skill (repeatable)")
-    settings.add_argument("--include-component", action="append", default=[], metavar="COMPONENT",
-                          help="Re-enable a previously excluded component (repeatable)")
-    settings.add_argument("--project-context", choices=("on", "off"),
-                          help="Inject scoped project receipt and due tasks at SessionStart")
-    settings.add_argument("--word-cap-warning", choices=("on", "off"),
-                          help="Opt-in PostToolUse split signal for a long note (Claude and Codex only)")
-    settings.add_argument("--max-words", type=int, help="Word cap for --word-cap-warning (10..100000, default 500)")
-    settings.add_argument("--folder-questions", choices=("on", "off"),
-                          help="Opt-in SessionStart question for a long-quiet top-level folder")
-    settings.add_argument("--promotion", choices=("on", "off"),
-                          help="Opt-in touch log for the doctor's hot/cold folder report")
-    settings.add_argument("--inbox-report", choices=("on", "off"),
-                          help="Opt-in doctor report of notes waiting in top-level inbox folders")
-    settings.add_argument("--inbox-max-items", type=int, help="Inbox report threshold in notes (1..100000, default 10)")
-    settings.add_argument("--inbox-max-days", type=int, help="Inbox report threshold in days (1..3650, default 7)")
-    settings.add_argument("--inbox-folder", action="append",
-                          help="Top-level inbox folder name for the report (repeat for several; replaces the "
-                               "generic name detection; an empty value returns to it)")
-    settings.add_argument("--index-exclude-dir", action="append", default=[], metavar="NAME",
-                          help="Keep directories with this bare name out of the index, at any depth (repeatable); applied by the next sync")
-    settings.add_argument("--index-include-dir", action="append", default=[], metavar="NAME",
-                          help="Remove a name from the index exclusion list (repeatable)")
-    settings.add_argument("--parallel-sessions", choices=("on", "off"),
-                          help="Opt-in one-line notice when another session is open on this vault")
-    settings.add_argument("--context-dedupe", choices=("on", "off"),
-                          help="Prevent re-injecting already delivered records within the same session (#363)")
-    settings.add_argument("--hermes-attended-platform", action="append", default=[], metavar="PLATFORM",
-                          help="Treat platform as attended/interactive in Hermes (e.g. slack); repeatable")
-    settings.add_argument("--hermes-unattended-platform", action="append", default=[], metavar="PLATFORM",
-                          help="Treat platform as unattended in Hermes (e.g. custom bot); repeatable")
-    settings.add_argument("--hermes-reset-platforms", action="store_true",
-                          help="Reset Hermes platform overrides to defaults")
-    compact = sub.add_parser("companion-compact", help="Move older Last-Session/Threads entries verbatim into a private archive; deletes nothing")
-    compact.add_argument("--dry-run", action="store_true", help="Report what would move without writing")
-    skill = sub.add_parser("skill-import", help="Import one explicitly chosen skill directory")
-    skill.add_argument("--source", type=Path, required=True)
-    skill.add_argument("--name")
-    ingest = sub.add_parser("ingest", help="Ingest one JSON record or a JSON list")
-    ingest.add_argument("--file", default="-", help="JSON input path, or - for stdin")
-    note = sub.add_parser("note-create", help="Create a semantic Markdown source without overwriting")
-    note.add_argument("--file", default="-", help="JSON {source, text, metadata}")
-    note_read = sub.add_parser("note-read", help="Read a human Markdown source and its byte SHA-256")
-    note_read.add_argument("source")
-    note_edit = sub.add_parser("note-edit", help="Edit a human Markdown source with an expected SHA-256")
-    note_edit.add_argument("--file", default="-", help="JSON {source, expected_sha256, edits} or new content; - for stdin")
-    task = sub.add_parser("task-create", help="Create and verify an explicit new task")
-    task.add_argument("--file", default="-", help="JSON {source: tasks/name.md, text, metadata: {id,status,owner}}")
-    context = sub.add_parser("context", help="Retrieve source-backed shared context")
-    context.add_argument("query", nargs="?", help="Query; alternatively use --file")
-    context.add_argument("--file", help="JSON retrieval arguments, or - for stdin")
-    context.add_argument("--harness", choices=("codex", "claude", "antigravity", "hermes", "opencode", "omp", "kiro"), default="codex")
-    context.add_argument("--project")
-    context.add_argument("--audience", choices=("internal", "public"), default="internal")
-    context.add_argument("--status", action="append", dest="statuses")
-    context.add_argument("--limit", type=int, default=5)
-    context.add_argument("--budget-chars", type=int, default=8000)
-    context.add_argument("--no-sync", action="store_true", help="Read an existing index without writing to the vault or runtime")
-    context.add_argument("--jev", action="store_true", help="Explicit optional remote advisor; requires state/jev.json and --project")
-    review = sub.add_parser("jev-review", help="Advisory source review; never saves or approves a candidate")
-    review.add_argument("--file", required=True, help="JSON proposal (maximum 24,000 characters)")
-    review.add_argument("--project", required=True)
-    memory = sub.add_parser("jev-memory", help="Optional typed memory triage; never writes or approves")
-    memory.add_argument("--file", required=True, help="Source-backed JSON proposal, optional prior_record_ids (max 4)")
-    memory.add_argument("--project", required=True)
-    jev = sub.add_parser("jev", help="Read or set the optional remote advisor; never accepts a key")
-    jev.add_argument("mode", choices=("status", "off", "shadow", "on"))
-    jev.add_argument("--enable", action="append", choices=JEV_FEATURES, default=[])
-    jev.add_argument("--disable", action="append", choices=JEV_FEATURES, default=[])
-    jev.add_argument("--provider", choices=JEV_PROVIDERS, help="typesafe (default) or laya, a local laya-serve (shadow only)")
-    jev.add_argument("--base-url", dest="base_url", help="laya only: loopback URL, default http://127.0.0.1:8765")
-    jev.add_argument("--model", choices=LAYA_MODELS, help="laya only: pinned checkpoint, default multilingual")
-    jev.add_argument("--check", action="store_true", help="with status: one GET /health to the local Laya server")
-    answer = sub.add_parser("jev-answer", help="Advisory answer claim verification against exact source quotes")
-    answer.add_argument("--file", required=True, help="JSON list of claims (maximum 32,000 characters)")
-    answer.add_argument("--project", required=True)
-    receipt = sub.add_parser("receipt", help="Submit an idempotent source-linked receipt")
-    receipt.add_argument("--file", help="JSON input path, or - for stdin (default without receipt flags)")
-    receipt.add_argument("--harness", choices=("codex", "claude", "antigravity", "hermes", "opencode", "omp", "kiro"), default="codex")
-    receipt.add_argument("--event-id", help="Required receipt event identifier in flag mode")
-    receipt.add_argument("--summary", help="Receipt summary text, preserving literal newlines")
-    receipt.add_argument("--summary-file", type=Path, metavar="PATH", help="Read the receipt summary from a UTF-8 file")
-    receipt.add_argument("--ref", action="append", help="Vault-relative source path; repeat for multiple refs")
-    receipt.add_argument("--link", action="append",
-                         help="External result as an http(s) URL (pull request, published page); repeatable, never a vault source")
-    receipt.add_argument("--session", help="Optional session identifier")
-    update = sub.add_parser("task-update", help="Update task with expected revision")
-    update.add_argument("--file", default="-", help="JSON {id, expected_revision, changes}")
-    history = sub.add_parser("history", help="Read ordered revision snapshots for a record")
-    history.add_argument("record_id")
-    pscope = sub.add_parser("project-scope", help="Manage folder project scopes in .beyin-projects.json")
-    pscope.add_argument("action", choices=["list", "add", "remove", "prune"], nargs="?", default="list",
-                        help="Action to perform: list, add, remove, prune")
-    pscope.add_argument("--folder", help="Vault-relative folder path")
-    pscope.add_argument("--project", help="Project identifier for the folder")
-    pscope.add_argument("--shared-unscoped", choices=["on", "off"],
-                        help="Toggle whether unassigned notes are visible in project scope")
-    ingest_server = sub.add_parser("ingest-server", help="Local-first HTTP ingest server for mobile captures")
-    ingest_server.add_argument("--host", default="127.0.0.1", help="Host interface to bind (default 127.0.0.1)")
-    ingest_server.add_argument("--port", type=int, default=8484, help="Port to listen on (default 8484)")
-    ingest_server.add_argument("--token", help="Optional Bearer token for authentication")
-    bridge = sub.add_parser("bridge", help="Manage global lifecycle bridge configuration")
-    bridge.add_argument("--harness", choices=("claude", "codex", "antigravity"), required=True)
-    bridge.add_argument("--project-root", type=Path, action="append", help="Project root to bridge (repeatable)")
-    bridge.add_argument("--install", action="store_true", help="Install global bridge hooks")
-    bridge.add_argument("--uninstall", action="store_true", help="Uninstall global bridge hooks")
-    bridge.add_argument("--print-config", action="store_true", help="Print global hook JSON without installing")
-    bridge.add_argument("--event", choices=("SessionStart", "Stop", "PreCompact", "SessionEnd"), action="append")
-    bridge.add_argument("--context-chars", type=int, default=1500)
-    learn = sub.add_parser("learn", help="Stage or inspect learning candidates before distillation (RFC #368)")
-    learn.add_argument("--candidate", help="Candidate learning content text")
-    learn.add_argument("--source", default="", help="Source file or note path linking to this learning")
-    learn.add_argument("--scope", default=None, help="Scope of the learning: global or project name")
-    learn.add_argument("--session", default="", help="Session ID associated with candidate")
-    learn.add_argument("--list", action="store_true", help="List active candidate learnings")
-    return root
+class ReceiptConflict(ValueError):
+    pass
 
 
-def main(argv=None, return_result=False):
-    if hasattr(sys.stdin, "reconfigure"):
-        sys.stdin.reconfigure(encoding="utf-8-sig")
-    args_list = list(sys.argv[1:] if argv is None else argv)
-    args = argparse.Namespace()
-    argument_parser = parser(note_namespace=args, is_json="--json" in args_list)
+MAX_RECEIPT_LINKS = 20
+
+
+def _plain_link(value):
+    """An http(s) URL a receipt may name as an external result: no spaces, controls or credentials."""
+    if not 0 < len(value) <= 2048 or re.search(r"[\s\x00-\x1f\x7f]", value):
+        return False
     try:
-        args = argument_parser.parse_args(args_list, namespace=args)
-        receipt_flags = args.command == "receipt" and any(
-            getattr(args, name) is not None for name in ("event_id", "summary", "summary_file", "ref", "link", "session"))
-        if receipt_flags:
-            for stream in (sys.stdout, sys.stderr):
-                if hasattr(stream, "reconfigure"):
-                    stream.reconfigure(encoding="utf-8")
-            if args.file is not None:
-                argument_parser.error("--file cannot be combined with receipt flags")
-            if args.event_id is None:
-                argument_parser.error("--event-id is required in flag mode")
-            if args.summary is not None and args.summary_file is not None:
-                argument_parser.error("use exactly one of --summary and --summary-file")
-            if args.summary is None and args.summary_file is None:
-                argument_parser.error("--summary or --summary-file is required in flag mode")
-            if not args.ref:
-                argument_parser.error("--ref is required in flag mode (at least one)")
-        if args.command == "recap":
-            # Usage errors, raised before any state is opened or synced.
-            if args.days is not None and (args.since is not None or args.until is not None):
-                args.usage_error("argument --days: not allowed with argument --since/--until")
-            if args.since is not None and args.until is not None and recap_bounds_inverted(args.since, args.until):
-                args.usage_error("argument --since: must not be after --until")
-    except ArgumentParsingError as exc:
-        error = {"error": "SystemExit", "message": str(exc)}
-        if return_result:
-            return error, 2
-        print(json.dumps(error, ensure_ascii=True), file=sys.stderr)
-        return 2
-    except NoteUsageError as exc:
-        result = {'status': 'usage_error', 'error': type(exc).__name__, 'message': str(exc)}
-        if return_result:
-            return result, 64
-        print(json.dumps(result, ensure_ascii=True))
-        return 64
+        parts = urllib.parse.urlsplit(value)
+        return parts.scheme in ("http", "https") and bool(parts.hostname) and parts.username is None and parts.password is None
+    except ValueError:
+        return False
+
+
+def _json(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _rejected_inference(record):
+    """A rejected personal inference is history, not current context.
+
+    Old sources may use status=rejected; status is still the task lifecycle field.
+    """
+    return (record.get("kind") in ("inference", "preference") and
+            (record.get("validity") == "rejected" or record.get("status") == "rejected"))
+
+
+# A note whose own status says it was replaced is history, like a note another trusted note
+# supersedes. Every read route drops these unless the caller asks for statuses explicitly.
+# Any other status (current, verified, aktif, waiting, a custom word) stays deliverable: an
+# allow-list of `active` alone silently hid most real vaults' notes from per-turn context.
+RETIRED_STATUSES = frozenset(("superseded", "retired", "archived", "archive", "deprecated", "obsolete",
+                              "replaced", "arsiv", "arsivlendi", "eski", "emekli", "gecersiz"))
+_STATUS_FOLD = str.maketrans("ŞşĞğÜüÇçÖöİIı", "SsGgUuCcOoiii")
+
+
+def _status_word(record):
+    """First word of the status, case and Turkish-letter folded; missing status means active.
+
+    A task without a status is not active: task_create always writes one.
+    """
+    value = record.get("status")
+    if not isinstance(value, str) or not value.strip():
+        return "" if record.get("kind") == "task" else "active"
+    word = re.match(r"[^\W_]+", unicodedata.normalize("NFC", value.strip()).translate(_STATUS_FOLD).casefold())
+    return word.group(0) if word else ""
+
+
+def _status_allowed(record, allowed):
+    """allowed: None for the default read gate, else a set of folded status words."""
+    word = _status_word(record)
+    return word not in RETIRED_STATUSES if allowed is None else word in allowed
+
+
+def _allowed_statuses(statuses):
+    if statuses is None:
+        return None
+    if isinstance(statuses, str):
+        statuses = [statuses]
+    return {_status_word({"status": value}) for value in statuses}
+
+
+CLOSED_TASK_STATUSES = frozenset((
+    "done", "cancelled", "canceled", "kapandi", "completed",
+    "tamamlandi", "iptal", "closed", "bitti", "cozuldu", "resolved"
+))
+
+
+def _is_task(record):
+    return record.get("kind") == "task" or str(record.get("source", "")).startswith("tasks/")
+
+
+def _is_closed_task(record):
+    return _is_task(record) and _status_word(record) in CLOSED_TASK_STATUSES
+
+
+def is_due_task(record, today=None):
+    if not _is_task(record):
+        return False
+    if _status_word(record) not in ("active", "waiting", "inbox"):
+        return False
+    raw_due = record.get("due_at")
+    if not raw_due:
+        return False
     try:
-        vault = args.vault.expanduser().resolve()
-        if not vault.is_dir():
-            raise ValueError("--vault must be an existing directory")
-        state = (args.state.expanduser() if args.state else default_state(vault)).resolve()
-        if state == vault or vault in state.parents:
-            raise ValueError("--state must be outside the vault")
-        read_only_context = args.command == "context" and args.no_sync
-        if read_only_context:
-            # The source CLI can run without the installed entry point, which
-            # already disables bytecode. Importing the engine must not write.
-            sys.dont_write_bytecode = True
-        if read_only_context and args.jev:
-            raise ValueError("context --no-sync cannot be combined with --jev")
-        # The advisor switch reads and writes one small file; it needs no index or sync engine.
-        engine = load_engine() if args.command not in ("jev", "project-scope", "ingest-server", "bridge") else None
-        store = engine.MemoryStore(state, vault, read_only=read_only_context) if engine else None
-        sync = load_sync()(vault, state) if args.command in ("sync", "recover-views", "recap", "receipt", "task-update", "note-create", "note-read", "note-edit", "task-create", "context", "jev-review", "jev-answer", "jev-memory", "history") and not read_only_context else None
-        if args.command == "bridge":
-            if sum([bool(args.print_config), bool(args.install), bool(args.uninstall)]) > 1:
-                argument_parser.error("--print-config, --install, and --uninstall are mutually exclusive")
-            _ensure_scripts_path()
-            import beyin_v3_bridge as bridge_mod
-            events = list(dict.fromkeys(args.event or bridge_mod.EVENTS))
-            if args.harness == "antigravity":
-                events = [e for e in events if e in bridge_mod.ANTIGRAVITY.values()]
-                if not events:
-                    argument_parser.error("Antigravity offers only SessionStart and Stop")
-            if args.uninstall:
-                result = bridge_mod.uninstall_bridge(args.harness)
-            elif args.install:
-                if not args.project_root:
-                    argument_parser.error("--project-root is required with --install")
-                roots = [p.expanduser().resolve() for p in args.project_root]
-                result = bridge_mod.install_bridge(vault, state, args.harness, roots, events, args.context_chars)
-            elif args.print_config:
-                if not args.project_root:
-                    argument_parser.error("--project-root is required with --print-config")
-                roots = [p.expanduser().resolve() for p in args.project_root]
-                bridge_args = ["--vault", str(vault), "--state", str(state), "--harness", args.harness,
-                               "--context-chars", str(args.context_chars), "--print-config"]
-                for r in roots: bridge_args.extend(["--project-root", str(r)])
-                code = bridge_mod.main(bridge_args)
-                if return_result:
-                    return None, code
-                return code
+        due = date.fromisoformat(str(raw_due)[:10]).isoformat()
+    except (ValueError, TypeError):
+        return False
+    target_today = str(today)[:10] if today else date.today().isoformat()
+    return due <= target_today
+
+
+def _supersedes_key(value):
+    """Normalize a human-readable supersedes reference without substring matching."""
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    if value.startswith("[[") and value.endswith("]]"):
+        # [[path#heading|alias]] and [[path^block]] name the note before the anchor.
+        value = re.split(r"[|#^]", value[2:-2], maxsplit=1)[0].strip()
+    return value.replace("\\", "/").strip("/")
+
+
+def _trusted_record(record):
+    return (record.get("trust") != "untrusted" and record.get("trusted") is not False
+            and record.get("status") != "untrusted" and record.get("kind") != "untrusted"
+            and not _rejected_inference(record))
+
+
+def resolve_supersedes(records):
+    """Resolve trusted supersedes references to record ids and report links that do nothing.
+
+    A value is an explicit id, else a vault path (with or without .md) or [[link]] by its whole
+    value, else its last segment when exactly one note has that file name. Never a substring.
+    A reference that resolves to the note itself retires nothing and is reported (#206).
+    Untrusted notes neither retire nor are counted as targets.
+    """
+    trusted = [record for record in records if isinstance(record, dict) and _trusted_record(record)]
+    by_id = {record.get("id"): record for record in trusted if isinstance(record.get("id"), str)}
+    by_path, by_name = {}, {}
+    for record in trusted:
+        source = str(record.get("source", "")).replace("\\", "/").strip("/")
+        if not source:
+            continue
+        path_key = source[:-3] if source.casefold().endswith(".md") else source
+        by_path.setdefault(path_key.casefold(), []).append(record)
+        by_name.setdefault(path_key.rsplit("/", 1)[-1].casefold(), []).append(record)
+    retired, dead = set(), []
+    for record in trusted:
+        values = record.get("supersedes", [])
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, list):
+            continue
+        for raw in values:
+            key = _supersedes_key(raw)
+            folded = key[:-3] if key.casefold().endswith(".md") else key
+            target, reason = by_id.get(key), None
+            if target is None and folded:
+                matches = by_path.get(folded.casefold(), [])
+                if not matches:
+                    matches = by_name.get(folded.rsplit("/", 1)[-1].casefold(), [])
+                if len(matches) == 1:
+                    target = matches[0]
+                elif matches:
+                    reason = "ambiguous supersedes reference"
+            if target is None:
+                reason = reason or "unresolved supersedes reference"
+            elif target is record or target.get("id") == record.get("id"):
+                target, reason = None, "supersedes reference points to the note itself"
+            if target is None:
+                dead.append({"id": record.get("id"), "source": record.get("source", ""), "value": raw, "reason": reason})
             else:
-                argument_parser.error("specify one of --install, --uninstall, or --print-config")
-            if return_result:
-                return result, 0
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-            return 0
-        elif args.command == "ingest-server":
-            _ensure_scripts_path()
-            import beyin_v3_ingest_server
-            beyin_v3_ingest_server.run_server(vault, host=args.host, port=args.port, token=args.token)
-            return 0
-        elif args.command == "init":
-            result = {"initialized": True, "state": str(state), "network": False,
-                      "hooks_installed": False, "optional_provider": None}
-        elif args.command == "preferences":
-            _ensure_scripts_path()
-            import beyin_v3_preferences as preferences
-            daily_layout = preferences.read_daily_layout(vault)  # validate before saving any setting
-            import beyin_v3_companion as companion
-            limits = {name: value for name, value in (('Last-Session.md', args.last_session_chars),
-                                                      ('Threads.md', args.threads_chars)) if value is not None}
-            import beyin_v3_hygiene as hygiene
-            hygiene_changes = {key: getattr(args, key) == 'on' for key in ('word_cap_warning', 'folder_questions', 'promotion')
-                               if getattr(args, key) is not None}
-            if args.max_words is not None:
-                hygiene_changes['max_words'] = args.max_words
-            inbox_changes = {key: value for key, value in (
-                ('enabled', None if args.inbox_report is None else args.inbox_report == 'on'),
-                ('max_items', args.inbox_max_items), ('max_days', args.inbox_max_days),
-                ('folders', None if args.inbox_folder is None else [name for name in args.inbox_folder if name]))
-                if value is not None}
-            if inbox_changes:  # validated before anything is saved
-                current_inbox, inbox_valid = hygiene.read_inbox_settings(state)
-                if not inbox_valid:
-                    raise ValueError('inbox-report.json in the runtime state is invalid; fix or remove it first')
-                hygiene.check_inbox_settings(dict(current_inbox, **inbox_changes))
-            import beyin_v3_index as index_settings
-            index_changes = bool(args.index_exclude_dir or args.index_include_dir)
-            if index_changes:  # validated before anything is saved
-                index_settings.plan(state, vault, args.index_exclude_dir, args.index_include_dir)
-            if hygiene_changes:  # validated before anything is saved, like the companion limits
-                current_hygiene, hygiene_valid = hygiene.read_settings(state)
-                if not hygiene_valid:
-                    raise ValueError('hygiene.json in the runtime state is invalid; fix or remove it first')
-                hygiene.check_settings(dict(current_hygiene, **hygiene_changes))
-            if args.companion_context_chars is not None:  # validated before anything is saved
-                current_context, context_valid = companion.read_context(state)
-                if not context_valid:
-                    raise ValueError(companion.CONTEXT_FILE + ' in the runtime state is invalid; fix or remove it first')
-                companion.check_context(dict(current_context, context_chars=args.companion_context_chars))
-            if limits:  # validate before anything is saved, so a bad value changes nothing
-                current_limits, limits_valid = companion.read_limits(state)
-                if not limits_valid:
-                    raise ValueError('companion-limits.json in the runtime state is invalid; fix or remove it first')
-                companion.check_limits(dict(current_limits, **limits))
-            changes = {key: getattr(args, key) for key in ('interval_minutes', 'context_mode', 'context_chars') if getattr(args, key) is not None}
-            if args.auto_sync is not None:
-                changes['auto_sync'] = args.auto_sync == 'on'
-            if args.secret_filter is not None:
-                changes['secret_filter'] = args.secret_filter == 'on'
-            import beyin_v3_exclusions as exclusions
-            exclusion_notice = None
-            if args.exclude_component or args.include_component:
-                exclude_args = [name.replace('\\', '/') for name in args.exclude_component]
-                include_args = [name.replace('\\', '/') for name in args.include_component]
-                exclusions.validate_exclusions(exclude_args + include_args)
-                current_excluded = set(exclusions.read_exclusions(vault))
-                current_excluded.update(exclude_args)
-                current_excluded.difference_update(include_args)
-                result_excluded = exclusions.save_exclusions(vault, current_excluded)
-                exclusion_notice = 'Haric tutma tercihleri kaydedildi; bir sonraki kurulum ya da guncellemede uygulanir.'
-            else:
-                # A hand-edited typo must not block unrelated preference changes.
-                try:
-                    result_excluded = exclusions.read_exclusions(vault)
-                except ValueError as exc:
-                    result_excluded, exclusion_notice = [], 'Haric tutma dosyasi gecersiz: ' + str(exc)
-            settings = preferences.save(vault, changes, args.profile) if changes or args.profile else preferences.read(vault)
-            result = {'status': 'saved' if changes or args.profile or (args.exclude_component or args.include_component) else 'current',
-                      'preferences': settings, 'excluded_components': result_excluded,
-                      'model_calls': False, 'timer_installed': False}
-            result['daily_layout'] = daily_layout
-            if args.daily_layout is not None:
-                result['daily_layout'] = preferences.save_daily_layout(vault, args.daily_layout)
-                result['status'] = 'saved'
-            if exclusion_notice:
-                result['exclusion_notice'] = exclusion_notice
-            # Machine-local like update notifications: rollback-safe, outside the vault schema.
-            result['companion_limits'] = companion.save_limits(state, limits) if limits else companion.read_limits(state)[0]
-            if limits:
-                result['status'] = 'saved'
-            # Machine-local like the limits (#140): a larger opening budget must survive a rollback.
-            if args.companion_context_chars is not None:
-                result['companion_context'] = companion.save_context(state, args.companion_context_chars)
-                result['status'] = 'saved'
-            else:
-                result['companion_context'], context_valid = companion.read_context(state)
-                if not context_valid:
-                    result['companion_context_notice'] = companion.CONTEXT_FILE + ' gecersiz; oturum basi baglami context_chars ile sinirli.'
-            widest = max(result['companion_context']['context_chars'], settings['context_chars'])
-            if companion.client_budget('claude', widest) < widest:  # #175: say so instead of silently using less
-                result['client_context_notice'] = (f"Claude Code ve Codex oturumlarinda otomatik baglam {companion.client_budget('claude', widest)} "
-                                                   'karakterde tutulur: Claude Code 10.000 karakteri, Codex yaklasik 10.000 bayti '
-                                                   'asan hook baglamini dosyaya tasiyip modele yalniz bir onizleme gosterir.')
-            import beyin_v3_releases as releases
-            result['update_notifications'] = releases.preferences(state, None if args.update_notifications is None else args.update_notifications == 'on')
-            if args.update_notifications is not None:
-                result['status'] = 'saved'
-            from beyin_v3_bridge import read_project_context, save_project_context
-            if args.project_context is not None:
-                save_project_context(state, args.project_context == 'on')
-                result['status'] = 'saved'
-            result['project_context'] = 'on' if read_project_context(state) else 'off'
-            # Machine-local and rollback-safe like companion limits: never a .beyin-preferences.json key.
-            if hygiene_changes:
-                result['hygiene'] = hygiene.save_settings(state, hygiene_changes)
-                result['status'] = 'saved'
-            else:
-                result['hygiene'], hygiene_valid = hygiene.read_settings(state)
-                if not hygiene_valid:
-                    result['hygiene_notice'] = 'hygiene.json gecersiz; tum hijyen sinyalleri kapali sayiliyor.'
-            if inbox_changes:
-                result['inbox_report'] = hygiene.save_inbox_settings(state, inbox_changes)
-                result['status'] = 'saved'
-            else:
-                result['inbox_report'], inbox_valid = hygiene.read_inbox_settings(state)
-                if not inbox_valid:
-                    result['inbox_report_notice'] = 'inbox-report.json gecersiz; gelen kutusu raporu kapali sayiliyor.'
-            # Machine-local index setting (state/index.json); a release before it ignores the file.
-            if index_changes:
-                result['index_exclusions'] = {'excluded_dirs': index_settings.save(
-                    state, vault, args.index_exclude_dir, args.index_include_dir)}
-                result['index_exclusions_notice'] = 'Klasor haric tutma listesi kaydedildi; bir sonraki sync ile uygulanir.'
-                result['status'] = 'saved'
-            else:
-                excluded_names, index_error, index_present = index_settings.read(state, vault)
-                if index_present:  # a vault that never set this keeps its exact output
-                    result['index_exclusions'] = {'excluded_dirs': excluded_names}
-                if index_error is not None:
-                    result['index_exclusions']['error'] = index_error
-                    result['index_exclusions_notice'] = ('index.json gecersiz; klasor haric tutma listesi uygulanmiyor, '
-                                                         'her sey indeksleniyor.')
-            # Machine-local (#170): an older release would reject a new .beyin-preferences.json key.
-            import beyin_v3_parallel as parallel
-            if args.parallel_sessions is not None:
-                parallel.save_settings(state, args.parallel_sessions == 'on')
-                result['status'] = 'saved'
-            parallel_on, parallel_valid = parallel.read_settings(state)
-            result['parallel_sessions'] = 'on' if parallel_on else 'off'
-            if not parallel_valid:
-                result['parallel_sessions_notice'] = 'parallel-sessions.json gecersiz; paralel oturum bildirimi kapali sayiliyor.'
-            # Machine-local context deduplication (#363)
-            import beyin_v3_dedupe as dedupe
-            if args.context_dedupe is not None:
-                dedupe.save_settings(state, args.context_dedupe == 'on')
-                result['status'] = 'saved'
-            dedupe_on, dedupe_valid = dedupe.read_settings(state)
-            result['context_dedupe'] = 'on' if dedupe_on else 'off'
-            if not dedupe_valid:
-                result['context_dedupe_notice'] = 'context-dedupe.json gecersiz; oturum ici tekrar onleme kapali sayiliyor.'
-            # Machine-local Hermes platform settings (state/hermes-platforms.json, #350)
-            try:
-                import beyin_v3_hermes as hermes_settings
-                if args.hermes_attended_platform or args.hermes_unattended_platform or args.hermes_reset_platforms:
-                    result['hermes_platforms'] = hermes_settings.save_platforms(
-                        state,
-                        attended=args.hermes_attended_platform,
-                        unattended=args.hermes_unattended_platform,
-                        reset=args.hermes_reset_platforms
-                    )
-                    result['status'] = 'saved'
-                else:
-                    h_conf, h_valid = hermes_settings.read_platforms(state, vault)
-                    effective = sorted(hermes_settings.resolve_unattended_platforms(vault, state))
-                    result['hermes_platforms'] = {**h_conf, 'effective_unattended': effective}
-                    if not h_valid:
-                        result['hermes_platforms_notice'] = 'hermes-platforms.json gecersiz; varsayilan platformlar kullaniliyor.'
-            except ImportError:
-                if args.hermes_attended_platform or args.hermes_unattended_platform or args.hermes_reset_platforms:
-                    raise ValueError("Hermes platform settings module is unavailable; reinstall the vault")
-        elif args.command == "jev":
-            laya = {key: value for key, value in (("base_url", args.base_url), ("model", args.model)) if value is not None}
-            if args.mode == "status":
-                if args.enable or args.disable or args.provider or laya:
-                    raise ValueError("jev status reads only; use jev off/shadow/on with --enable/--disable/--provider")
-                result = jev_client().status(state)
-                if args.check:
-                    result["server"] = jev_client().probe(state)
-                result["context_mode"] = jev_context_mode(vault)
-                result = jev_advice(result)
-            else:
-                if args.check:
-                    raise ValueError("--check works only with jev status")
-                result = jev_client().set_mode(state, args.mode, enable=args.enable, disable=args.disable,
-                                                provider=args.provider, laya=laya or None)
-                result["context_mode"] = jev_context_mode(vault)
-                result = jev_advice(result)
-                result["changed"] = True
-        elif args.command == "hook-reconcile":
-            result = hook_reconcile(vault, state, force=getattr(args, 'force', False))
-        elif args.command == "doctor":
-            _ensure_scripts_path()
-            from beyin_v3_hook_done import summary as hook_done_summary
-            done = hook_done_summary(state, ('codex', 'claude', 'antigravity', 'hermes', 'opencode', 'omp', 'kiro'))
-            result = {"pending_events": len(list((state / "hook-queue").glob("*.json"))),
-                      **done}
-            for filename in ("hook-health.json", "hook-error.json", "receipt-gaps.json"):
-                path = state / filename
-                result[filename] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
-            result['legacy_external_schedules'] = 'not_inspected; review custom OS/compiler schedules before migration'
-            try:  # information only: the last scheduled-check run, if the user set one up (#267)
-                _ensure_scripts_path()
-                import beyin_v3_scheduled as scheduled
-                result['scheduled_check'] = scheduled.doctor(state)
-            except Exception as exc:
-                result['scheduled_check'] = {'status': 'unavailable', 'error': type(exc).__name__}
-            try:  # information only: a stale-path report must never hide the rest of doctor
-                result['hook_paths'] = hook_paths(vault)
-            except Exception as exc:
-                result['hook_paths'] = {'status': 'unavailable', 'error': type(exc).__name__}
-            # Information only; a split or container-bound state root never raises the status.
-            try:
-                result['state_location'] = state_location(vault, state)
-            except Exception as exc:  # a location report must never hide the rest of doctor
-                result['state_location'] = {'status': 'unavailable', 'error': type(exc).__name__, 'warnings': []}
-            manifest = state / 'v3-install.json'
-            manifest_data = json.loads(manifest.read_text(encoding='utf-8')) if manifest.exists() else {}
-            result['kept_legacy_runners'] = manifest_data.get('kept_legacy', [])
-            result['excluded_components'] = manifest_data.get('excluded_components', [])
-            load_sync()
-            import beyin_v3_exclusions as exclusions
-            try:
-                configured_excluded = exclusions.read_exclusions(vault)
-            except ValueError as exc:
-                # doctor reports the broken file instead of failing; update/install stay strict.
-                configured_excluded = result['excluded_components']
-                result['exclusions_error'] = str(exc)
-            if set(configured_excluded) != set(result['excluded_components']):
-                result['pending_exclusions'] = sorted(set(configured_excluded) ^ set(result['excluded_components']))
-                result['exclusions_pending'] = True
-            import beyin_v3_preferences as preferences
-            result['preferences'] = preferences.read(vault)
-            import beyin_v3_releases as releases
-            result['updates'] = releases.status(vault, state)
-            from beyin_v3_secrets import health as secret_filter_health
-            result['secret_filter'] = secret_filter_health(state)
-            result['secrets_redacted'] = result['secret_filter']['total']
-            try:
-                import beyin_v3_companion as companion
-                result['companion_hygiene'] = companion.hygiene(vault, state)
-            except Exception as exc:  # a size report must never hide the rest of doctor
-                result['companion_hygiene'] = {'status': 'unavailable', 'error': type(exc).__name__}
-            # Information only (#374): how much of Kurallar.md the Claude Code opening shows whole.
-            # The hook's own render on a read-only store; never raises the doctor status.
-            try:
-                import beyin_v3_companion as companion
-                prefs = result['preferences']
-                if prefs['context_mode'] == 'off':
-                    result['companion_rules_opening'] = {'status': 'context_off'}
-                else:
-                    from beyin_v3_hook import receipt_context
-                    budget = companion.client_budget('claude', companion.opening_budget(state, prefs['context_chars']))
-                    rules = companion.rules_opening(engine.MemoryStore(state, vault, read_only=True), budget,
-                                                    receipt_context(vault, state))
-                    result['companion_rules_opening'] = dict(
-                        rules or {}, status='clipped' if rules and rules['clipped'] else 'ok' if rules else 'no_rules',
-                        budget=budget, harness='claude')
-            except Exception as exc:  # never hides the rest of doctor
-                result['companion_rules_opening'] = {'status': 'unavailable', 'error': type(exc).__name__}
-            try:
-                import beyin_v3_references as references
-                result['instruction_references'] = references.check(vault)
-            except Exception as exc:  # information only; never hides the rest of doctor
-                result['instruction_references'] = {'status': 'unavailable', 'error': type(exc).__name__}
-            result['jev'] = jev_status(state)
-            if result['jev'].get('automatic_model_calls') and result['preferences'].get('context_mode') != 'turn':
-                result['jev']['context_mode'] = result['preferences'].get('context_mode')
-                result['jev'] = jev_advice(result['jev'])
-            result['automatic_model_calls'] = result['jev'].get('automatic_model_calls', False)
-            health = result['hook-health.json'] or {}
-            gaps_info = result['receipt-gaps.json']
-            result['potential_missing_receipts'] = gaps_info.get('potential_missing_receipts') if gaps_info is not None else None
-            if gaps_info is not None:
-                from beyin_v3_projections import receipt_coverage
-                with store._connect() as db:
-                    result['receipt_coverage'] = receipt_coverage(db, now=time.time())
-            else:
-                result['receipt_coverage'] = None
-            from beyin_v3_projections import knowledge_freshness, check_instruction_conflicts
-            try:  # a recency report must never hide the rest of doctor, conflicts included
-                with store._connect() as db:
-                    result['knowledge_freshness'] = knowledge_freshness(vault, db, now=time.time())
-            except Exception as exc:
-                result['knowledge_freshness'] = {'status': 'unavailable', 'error': type(exc).__name__}
-            result['instruction_conflicts'] = check_instruction_conflicts(vault)
-            result['skill_conflicts'] = health.get('sync', {}).get('skill_conflicts', [])
-            # Entries beside the skills that this vault never owned. Information only.
-            result['skill_unmanaged'] = health.get('sync', {}).get('skill_unmanaged', [])
-            from beyin_v3_projections import is_receipt_view_conflict
-            view_sync = health.get('sync', {})
-            result['receipt_view_conflicts'] = [c for c in view_sync.get('conflicts', []) + view_sync.get('warnings', [])
-                                                if is_receipt_view_conflict(c)]
-            try:
-                result['task_completion'] = load_sync().reader(store).completion_health()
-            except Exception as exc:
-                result['task_completion'] = {
-                    'strict_issue_count': 0, 'strict_issues': [], 'legacy_done_count': 0,
-                    'legacy_done': [], 'truncated': False,
-                    'error': (type(exc).__name__ + ': ' + str(exc))[:240],
-                }
-            # A rejection on a plain note leaves the claim in current context; sync stays healthy.
-            # Notes that link to a rejected inference are listed for review only and never raise
-            # the doctor status: citing a rejected claim can be legitimate (explaining why it fell).
-            try:
-                result['validity'] = load_sync().reader(store).validity_health()
-            except Exception as exc:
-                result['validity'] = {'ignored_rejection_count': 0, 'ignored_rejections': [], 'truncated': False,
-                                      'rejected_dependent_count': 0, 'rejected_dependents': [],
-                                      'ambiguous_rejected_link_count': 0, 'ambiguous_rejected_links': [],
-                                      'error': (type(exc).__name__ + ': ' + str(exc))[:240]}
-            # Information only: a supersedes link that retires nothing keeps the old note in
-            # context, as before #206; it never raises the doctor status.
-            try:
-                result['supersedes'] = load_sync().reader(store).supersedes_health()
-            except Exception as exc:
-                result['supersedes'] = {'status': 'unavailable', 'error': type(exc).__name__}
-            # Information only: a note's own review_at date has come; never raises the doctor status.
-            try:
-                result['review'] = load_sync().reader(store).review_health()
-            except Exception as exc:
-                result['review'] = {'status': 'unavailable', 'error': type(exc).__name__}
-            # Read-only information: each scan fails alone and never hides the rest of doctor.
-            # The word cap and promotion reports follow the user's opt-in (state/hygiene.json):
-            # a default install gets no new doctor lines and no whole-vault read.
-            for key in ('boundary', 'closed_tasks', 'word_cap', 'promotion', 'inbox'):
-                try:
-                    import beyin_v3_hygiene as hygiene
-                    opted, _ = hygiene.read_settings(state)
-                    if key == 'word_cap':
-                        result[key] = (hygiene.cap_scan(vault, cap=opted['max_words'], state=state)
-                                       if opted['word_cap_warning'] else {'enabled': False})
-                    elif key == 'promotion':
-                        result[key] = hygiene.promotion(vault, state) if opted['promotion'] else {'enabled': False}
-                    elif key == 'inbox':
-                        inbox, _ = hygiene.read_inbox_settings(state)
-                        result[key] = (hygiene.inbox_report(vault, state, inbox['max_items'], inbox['max_days'],
-                                                            folders=inbox['folders'])
-                                       if inbox['enabled'] else {'enabled': False})
-                    else:
-                        result[key] = getattr(hygiene, key)(vault)
-                except Exception as exc:
-                    result[key] = {'status': 'unavailable', 'error': type(exc).__name__}
-            try:  # read-only report of the opt-in parallel-session notice (#170)
-                import beyin_v3_parallel as parallel
-                result['parallel_sessions'] = parallel.doctor(state, vault=vault)
-            except Exception as exc:
-                result['parallel_sessions'] = {'status': 'unavailable', 'error': type(exc).__name__}
-            try:  # read-only report of context deduplication (#363)
-                import beyin_v3_dedupe as dedupe
-                result['context_dedupe'] = dedupe.doctor(state)
-            except Exception as exc:
-                result['context_dedupe'] = {'status': 'unavailable', 'error': type(exc).__name__}
-            # Information only: the user's index exclusions, an index.json that is not applied, and
-            # indexed trees that look vendored. Reads the index and one small file; no vault walk.
-            try:
-                import beyin_v3_index as index_settings
-                try:
-                    with store._connect() as db:
-                        rows = db.execute('SELECT m.source, r.payload FROM markdown_sources m LEFT JOIN records r ON r.id = m.id').fetchall()
-                        indexed_sources = [row[0] for row in rows]
-                        indexed_records = [json.loads(row[1]) if row[1] else {'source': row[0]} for row in rows]
-                except Exception:  # no sync has created the table yet
-                    indexed_sources = []
-                    indexed_records = []
-                result['index_exclusions'] = index_settings.doctor(state, vault, indexed_sources, records=indexed_records)
-                result['index_exclusions']['always_excluded'] = sorted(sys.modules['beyin_v3_sync'].EXCLUDED_DIRS)
-            except Exception as exc:  # never hides the rest of doctor
-                result['index_exclusions'] = {'status': 'unavailable', 'error': type(exc).__name__}
-            result['receipt_line_endings'] = receipt_line_endings(vault)  # information only: the status below is untouched
-            try:
-                _ensure_scripts_path()
-                import beyin_v3_projects as projects
-                result['project_scopes'] = projects.check_project_scopes(vault)
-            except Exception as exc:
-                result['project_scopes'] = {'status': 'unavailable', 'error': type(exc).__name__}
-            result['status'] = ('needs_attention' if health.get('sync', {}).get('status') in ('conflict', 'degraded') or result['hook_paths'].get('status') == 'stale' or result['skill_conflicts'] or result.get('instruction_conflicts') or result['hook-error.json'] or result['task_completion']['strict_issue_count'] or result['task_completion'].get('error') or result['validity']['ignored_rejection_count'] or result['validity'].get('error') or result.get('project_scopes', {}).get('status') in ('error', 'warning') else 'pending' if result['pending_events'] else 'observed_metadata' if result['acknowledged_events'] else 'never_seen')
-            # Information only: a leftover global OMP hook copy predates the vault-owned plan
-            # (OMP.md says the installer never updates or removes it). After an engine update the
-            # copy can be older than the installed vault hook, so a session outside the vault can
-            # keep running an outdated adapter without any health signal. Report a digest mismatch;
-            # never mutate or delete the user file. Symlinks (user-linked to the vault hook) are
-            # always fresh by construction and reported as absent.
-            try:
-                adjacent_scripts = Path(__file__).resolve().parent
-                template_scripts = adjacent_scripts if (adjacent_scripts / 'beyin_v3_omp.py').exists() else Path(__file__).resolve().parents[1] / 'template/.claude/scripts'
-                omp_planner = template_scripts / 'beyin_v3_omp.py'
-                if omp_planner.exists():
-                    spec = importlib.util.spec_from_file_location('beyin_doctor_omp', omp_planner)
-                    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-                    generated = next(iter(module.plan_plugin(vault, state).values()))
-                    global_copy = Path.home() / '.omp/agent/hooks/pre/beyin-v3.ts'
-                    if global_copy.exists() and not global_copy.is_symlink():
-                        current_digest = hashlib.sha256(global_copy.read_bytes()).hexdigest()
-                        generated_digest = hashlib.sha256(generated).hexdigest()
-                        if current_digest != generated_digest:
-                            result['omp_global_hook'] = {
-                                'path': str(global_copy),
-                                'stale': True,
-                                'note': 'global copy differs from the installed vault hook; it is not updated by install/rollback, and OMP.md advises against keeping one',
-                            }
-                        else:
-                            result['omp_global_hook'] = {'path': str(global_copy), 'stale': False}
-            except Exception as exc:  # a stale-copy report must never hide the rest of doctor
-                result['omp_global_hook'] = {'status': 'unavailable', 'error': type(exc).__name__}
-        elif args.command == "scheduled-check":
-            _ensure_scripts_path()
-            import beyin_v3_scheduled as scheduled
-            result, code = scheduled.run(vault, state, Path(__file__).resolve(), notify=args.notify)
-            if return_result:
-                return result, code
-            print(json.dumps(result, ensure_ascii=True, indent=2))
-            return code
-        elif args.command == "skill-sync":
-            result = load_skills().sync_skills(vault, state)
-        elif args.command == "skill-import":
-            result = load_skills().import_skill(vault, state, args.source, name=args.name)
-        elif args.command == "project-scope":
-            _ensure_scripts_path()
-            import beyin_v3_projects as projects
-            result = projects.manage(vault, args.action, folder=args.folder, project=args.project,
-                                     shared_unscoped=args.shared_unscoped)
-        elif args.command == "companion-compact":
-            _ensure_scripts_path()
-            import beyin_v3_compact
-            result = beyin_v3_compact.compact(vault, state, dry_run=args.dry_run)
-            if any(entry['status'] == 'compacted' for entry in result['files'].values()):
-                # Index the shorter sources and the private archive before anyone reads them.
-                result['sync'] = {'status': load_sync()(vault, state).sync().get('status')}
-        elif args.command in ("sync", "recover-views"):
-            recover = getattr(args, "recover_views", False) or args.command == "recover-views"
-            result = sync.sync(full=getattr(args, "full", False), recover_views=recover)
-        elif args.command == "recap":
-            days = 7 if args.days is None else args.days
-            if not 1 <= days <= 366 or not 1 <= args.limit <= 100:
-                raise ValueError('recap days must be 1..366 and limit must be 1..100')
-            refreshed = sync.sync()
-            from beyin_v3_projections import is_receipt_view_conflict
-            source_conflicts = [c for c in refreshed.get('conflicts', []) if not is_receipt_view_conflict(c)]
-            if source_conflicts:
-                raise RuntimeError('Recap blocked: source sync conflict. Run sync to inspect sources.')
-            from beyin_v3_projections import recent_receipts
-            with store._connect() as db:
-                # Without the range flags this is exactly the call recap made before they existed.
-                bounds = {name: bound for name, bound in (('since', args.since), ('until', args.until)) if bound is not None}
-                result = recent_receipts(db, days=days, limit=args.limit, vault=vault, **bounds)
-            view_conflicts = [c for c in refreshed.get('conflicts', []) if is_receipt_view_conflict(c)]
-            if view_conflicts:
-                result['view_conflicts'] = view_conflicts
-            if refreshed.get('status') == 'degraded':
-                warnings = refreshed.get('warnings', [])
-                result['partial'] = True
-                result['source_sync'] = {'status': 'degraded', 'warnings': warnings[:20],
-                                         'warning_count': len(warnings), 'truncated': len(warnings) > 20}
-        elif args.command == "triage":
-            _ensure_scripts_path()
-            import beyin_v3_triage as triage_module
-            result = triage_module.triage(vault, state=state, stale_days=args.stale_days, digest_days=args.digest_days)
-        elif args.command == "audit":
-            _ensure_scripts_path()
-            import beyin_v3_audit as audit_module
-            result = audit_module.audit_memory(
-                vault,
-                state=state,
-                target_file=args.target,
-                threshold=args.threshold,
-                min_shared=args.min_shared,
-                limit=args.limit,
-            )
-        elif args.command == "ingest":
-            payload = read_json(args.file)
-            result = [store.ingest(record) for record in payload] if isinstance(payload, list) else store.ingest(payload)
-        elif args.command == "note-read":
-            result = sync.note_read(args.source)
-        elif args.command == "note-edit":
-            result = sync.note_edit(read_json(args.file))
-        elif args.command == "note-create":
-            payload = read_json(args.file)
-            result = sync.note_create(payload['source'], payload['text'], payload.get('metadata'))
-        elif args.command == "task-create":
-            payload = read_json(args.file)
-            result = sync.task_create(payload['source'], payload['text'], payload['metadata'])
-        elif args.command == "context":
-            params = {"query": args.query, "project": args.project, "audience": args.audience,
-                      "statuses": args.statuses, "limit": args.limit, "budget_chars": args.budget_chars}
-            if args.file:
-                supplied = read_json(args.file)
-                if not isinstance(supplied, dict) or set(supplied) - set(params):
-                    raise ValueError("Context JSON contains unsupported fields")
-                params.update(supplied)
-            if not isinstance(params["query"], str) or not params["query"].strip():
-                raise ValueError("context requires a nonempty query")
-            if read_only_context:
-                result = store.context_for(args.harness, **params)
-                result['source_sync'] = {'status': 'skipped', 'reason': 'explicit_no_sync'}
-            else:
-                refreshed = sync.sync()
-                from beyin_v3_projections import is_receipt_view_conflict
-                source_conflicts = [c for c in refreshed.get('conflicts', []) if not is_receipt_view_conflict(c)]
-                if source_conflicts:
-                    raise RuntimeError('Context blocked: source sync '+str(refreshed.get('status', 'failed'))+'. Run sync with the same vault/state to inspect and reconcile source issues, then retry context.')
-                # Harness selection deliberately does not change retrieval semantics.
-                if args.jev:
-                    from beyin_v3_jev import advise_context
-                    result = advise_context(sync.store, **params)
-                else:
-                    result = sync.store.context_for(args.harness, **params)
-                view_conflicts = [c for c in refreshed.get('conflicts', []) if is_receipt_view_conflict(c)]
-                if view_conflicts:
-                    result['view_conflicts'] = view_conflicts
-                if refreshed.get('status') == 'degraded':
-                    warnings = refreshed.get('warnings', [])
-                    result['partial'] = True
-                    result['source_sync'] = {
-                        'status': 'degraded',
-                        'warning_count': len(warnings),
-                        'warnings': warnings[:20],
-                        'truncated': len(warnings) > 20,
-                    }
-        elif args.command in ("jev-review", "jev-answer", "jev-memory"):
-            from beyin_v3_jev import review_candidate, verify_answer
-            max_chars = 32000 if args.command == "jev-answer" else 24000
-            # Bounded read also applies to stdin; never echo raw proposal errors.
-            if args.file == "-":
-                raw = sys.stdin.read(max_chars + 1)
-            else:
-                with Path(args.file).open(encoding="utf-8") as handle:
-                    raw = handle.read(max_chars + 1)
-            if len(raw) > max_chars:
-                raise ValueError("proposal_too_large")
-            refreshed = sync.sync()
-            if refreshed.get('status') != 'succeeded':
-                raise ValueError("proposal_source_sync_incomplete")
-            handler = verify_answer if args.command == "jev-answer" else review_candidate
-            if args.command == "jev-memory":
-                from beyin_v3_memory_assessment import assess_memory
-                handler = assess_memory
-            result = handler(sync.store, json.loads(raw), project=args.project)
-        elif args.command == "receipt":
-            if receipt_flags:
-                summary = args.summary
-                if args.summary_file is not None:
-                    # Preserve CRLF as well as LF, matching the JSON input text. utf-8-sig drops
-                    # the BOM that Windows PowerShell 5.1 writes with -Encoding UTF8.
-                    with args.summary_file.open(encoding="utf-8-sig", newline="") as stream:
-                        summary = stream.read()
-                payload = {"event_id": args.event_id, "summary": summary, "refs": args.ref}
-                if args.session is not None:
-                    payload["session"] = args.session
-                if args.link:
-                    payload["links"] = args.link
-            else:
-                payload = read_json(args.file if args.file is not None else "-")
-            result = sync.receipt(payload["event_id"], payload["summary"],
-                                          payload["refs"], args.harness, session=payload.get('session'),
-                                          links=payload.get('links'))
-        elif args.command == "history":
-            # History is source-verified, so refresh first like context: an edit
-            # made just before this command must not hide the audit trail.
-            refreshed = sync.sync()
-            if refreshed.get('status') == 'conflict':
-                raise RuntimeError('History blocked: source sync conflict. Run sync with the same vault/state to inspect and reconcile source issues, then retry history.')
-            result = sync.store.history(args.record_id)
-            if refreshed.get('status') == 'degraded':
-                # The public stdout contract remains a JSON list.
-                warnings = refreshed.get('warnings', [])
-                print(json.dumps({'source_sync': {'status': 'degraded', 'warnings': warnings[:20],
-                                                  'warning_count': len(warnings), 'truncated': len(warnings) > 20}},
-                                 ensure_ascii=True), file=sys.stderr)
-        elif args.command == "learn":
-            _ensure_scripts_path()
-            from beyin_v3_learning import stage_candidate, list_candidates
-            sess = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BEYIN_V3_SESSION_ID") or "cli"
-            if args.candidate:
-                result = stage_candidate(state, sess, args.candidate, source=args.source, scope=args.scope or "global")
-            elif args.list:
-                result = {"candidates": list_candidates(state, session=args.session or None, scope=args.scope)}
-            else:
-                raise ValueError("either --candidate or --list is required")
+                retired.add(target["id"])
+    return retired, dead
+
+
+_WIKI_LINK = re.compile(r"\[\[([^\[\]\n]+)\]\]")
+# A destination is <angle bracketed> (may hold spaces) or a bare path; an optional "title" may follow.
+_MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]\n]*\]\(\s*(?:<([^<>\n]+)>|([^()<>\s]+))(?:\s+\"[^\"]*\")?\s*\)")
+
+
+def _link_fold(value):
+    """Compare link targets and sources as NFC, case-folded, without .md: a macOS/iCloud
+    file name can be stored decomposed (NFD) while the link a person typed is composed."""
+    value = unicodedata.normalize("NFC", value)
+    return (value[:-3] if value.casefold().endswith(".md") else value).casefold()
+
+
+def _link_keys(record):
+    """Vault-relative link targets in a record's text: [[wikilinks]] by name, Markdown links by path.
+
+    A Markdown link is resolved against the note's folder; URLs and in-page anchors are skipped.
+    """
+    text = record.get("text") if isinstance(record.get("text"), str) else ""
+    keys = []
+    for match in _WIKI_LINK.finditer(text):
+        keys.append((match.group(0), _supersedes_key(match.group(0))))
+    folder = posixpath.dirname(str(record.get("source", "")).replace("\\", "/"))
+    for match in _MARKDOWN_LINK.finditer(text):
+        target = urllib.parse.unquote((match.group(1) or match.group(2)).split("#", 1)[0]).strip()
+        if not target or re.match(r"[A-Za-z][A-Za-z0-9+.-]*:", target):
+            continue
+        path = posixpath.normpath(target.lstrip("/") if target.startswith("/") else posixpath.join(folder, target))
+        if path.startswith("../") or path == "..":
+            continue
+        keys.append((match.group(0), path))
+    return keys
+
+
+def rejected_dependents(records):
+    """Current notes that link to a rejected inference or preference, for a person to review.
+
+    Rejecting an inference keeps it out of context, but a note that cites it as support still
+    delivers the claim it rests on (MARKDOWN.md asks for those to be corrected separately).
+    Links resolve like supersedes: a whole vault path (with or without .md), else a file name that
+    exactly one note has; an ambiguous name that could be a rejected note is listed apart.
+    Only the listing is produced: whether the citation still holds is the reader's call. A note
+    that is itself rejected or retired (by status or by another note's supersedes), or that
+    supersedes the rejected note, is not listed.
+    """
+    records = [record for record in records if isinstance(record, dict)]
+    if not any(_rejected_inference(record) for record in records):
+        return [], []
+    superseded = resolve_supersedes(records)[0]
+    by_id, by_path, by_name = {}, {}, {}
+    for record in records:
+        if isinstance(record.get("id"), str):
+            by_id[record["id"]] = record
+        source = str(record.get("source", "")).replace("\\", "/").strip("/")
+        if not source:
+            continue
+        path_key = _link_fold(source)
+        by_path.setdefault(path_key, []).append(record)
+        by_name.setdefault(path_key.rsplit("/", 1)[-1], []).append(record)
+
+    def matches_for(key):
+        folded = _link_fold(key)
+        if not folded:
+            return []
+        return by_path.get(folded) or by_name.get(folded.rsplit("/", 1)[-1], [])
+
+    dependents, ambiguous = {}, {}
+    for record in records:
+        if (_rejected_inference(record) or _status_word(record) in RETIRED_STATUSES or
+                record.get("id") in superseded):
+            continue
+        replaces = record.get("supersedes", [])
+        replaces = [replaces] if isinstance(replaces, str) else replaces if isinstance(replaces, list) else []
+        replaced = set()
+        for value in replaces:
+            key = _supersedes_key(value)
+            found = [by_id[key]] if key in by_id else matches_for(key)
+            if len(found) == 1:
+                replaced.add(id(found[0]))
+        for raw, key in _link_keys(record):
+            matches = matches_for(key)
+            rejected = [match for match in matches if _rejected_inference(match) and match is not record]
+            if not rejected:
+                continue
+            if len(matches) > 1:
+                ambiguous.setdefault((record.get("source", ""), raw), {
+                    "id": record.get("id"), "source": record.get("source", ""), "link": raw,
+                    "candidates": sorted(match.get("source", "") for match in matches)})
+                continue
+            target = rejected[0]
+            if id(target) in replaced:
+                continue
+            dependents.setdefault((record.get("source", ""), target.get("source", "")), {
+                "id": record.get("id"), "source": record.get("source", ""), "link": raw,
+                "rejected_id": target.get("id"), "rejected_source": target.get("source", "")})
+    return ([dependents[key] for key in sorted(dependents)], [ambiguous[key] for key in sorted(ambiguous)])
+
+
+# Opt-in project scope for vaults organized by folder. Without this file an explicit
+# project matches only a record's own project field, so a vault that never writes that
+# field has an empty scope for every explicit-project command.
+PROJECT_SCOPES_FILE = ".beyin-projects.json"
+
+
+def _scope_path(value):
+    if not isinstance(value, str):
+        raise ValueError("project scope folder must be a string")
+    folder = unicodedata.normalize("NFC", value.replace("\\", "/")).strip().strip("/")
+    parts = folder.split("/")
+    if not folder or value.strip().startswith(("/", "\\")) or re.match(r"[A-Za-z]:", folder) or ".." in parts or "." in parts:
+        raise ValueError("project scope folder must be vault-relative")
+    return folder
+
+
+def _scope_key(value):
+    return unicodedata.normalize("NFC", value.replace("\\", "/")).casefold()
+
+
+def _scope_folder_exists(vault_root, folder):
+    """Every configured folder must name a real vault folder under the matching rule.
+
+    A mistyped or renamed folder would otherwise match nothing, and with shared_unscoped
+    its notes would silently join every other project's scope.
+    """
+    current = Path(vault_root)
+    for part in folder.split("/"):
+        key = _scope_key(part)
+        try:
+            with os.scandir(current) as entries:
+                match = next((entry.name for entry in entries if entry.is_dir() and _scope_key(entry.name) == key), None)
+        except OSError:
+            return False
+        if match is None:
+            return False
+        current = current / match
+    return True
+
+
+def read_project_scopes(vault_root):
+    """None when the vault has no scope file: every gate keeps its exact-field behavior.
+
+    folders maps a vault-relative folder to a project; a record's own non-empty project
+    field wins. shared_unscoped lets a project query also see records no folder or field
+    assigns to any project. Another project's records never enter a project's scope.
+    Missing folders are skipped with a warning so unrelated projects remain fully functional (#317).
+    """
+    path = Path(vault_root) / PROJECT_SCOPES_FILE
+    if path.is_symlink():
+        raise ValueError("project scopes must be a regular vault-local file")
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        raise ValueError("invalid project scopes file; expected JSON") from exc
+    if not isinstance(data, dict) or set(data) - {"folders", "shared_unscoped"}:
+        raise ValueError("project scopes accept only folders and shared_unscoped")
+    folders = data.get("folders", {})
+    shared = data.get("shared_unscoped", False)
+    if not isinstance(folders, dict) or not isinstance(shared, bool):
+        raise ValueError("folders must be an object and shared_unscoped a boolean")
+    mapped = {}
+    for folder, project in folders.items():
+        if not isinstance(project, str) or not project.strip():
+            raise ValueError("project scope names must be non-empty strings")
+        folder = _scope_path(folder)
+        if not _scope_folder_exists(vault_root, folder):
+            print(f"Warning: project scope folder not found in the vault: {folder}", file=sys.stderr)
+            # Keep the boundary for stale indexed rows used by explicit --no-sync.
+            # Dropping it would expose the other project's notes as shared_unscoped.
+        key = _scope_key(folder)
+        if mapped.get(key, project) != project:
+            raise ValueError("project scope folder is assigned twice: " + folder)
+        mapped[key] = project
+    # Longest folder first, so a nested folder can belong to a different project.
+    return {"folders": sorted(mapped.items(), key=lambda item: -len(item[0])), "shared_unscoped": shared}
+
+
+def record_scope(record, scopes):
+    """The project a record belongs to under the scope file, or None when unscoped."""
+    project = record.get("project")
+    if isinstance(project, str) and project.strip():
+        return project
+    source = _scope_key(str(record.get("source", "")))
+    for folder, name in scopes["folders"]:
+        if source.startswith(folder + "/"):
+            return name
+    return None
+
+
+# Turkish is agglutinative, so exact token intersection loses "fark" against "farki" and
+# "not" against "notlar". Every token is replaced by ONE canonical stem, with the same
+# function on the query and the document side. Replacement, not expansion: the score stays
+# "how many query words matched", which STRICT_MIN_SHARED and the idf weight depend on.
+# Input reaches the stemmer already ASCII folded, so the table is written folded too.
+_VOWELS = frozenset("aeiou")
+_VOICELESS = frozenset("cfhkpst")
+# (suffix, minimum stem length, what the character before the suffix must be). Longest
+# first, peeled to a fixpoint: a fixed pass count breaks query/document symmetry, because
+# "kutuphanesi" needs one more pass than "kutuphane" to reach the same stem.
+# The n-buffered forms carry a stem floor of 5 because their n only ever follows a
+# possessive vowel, so "cobanin" reads as coban+in while "arabanin" reads as araba+n+in.
+_SUFFIXES = (
+    # Verb endings (#430) peel only after l or n, which cover passive/reflexive forms:
+    # kurulmali, kurulmasin, kurulur, kurulmus and kuruldu all reach "kurul". This is a
+    # conservative spelling heuristic, not a voice classifier. Other stems stay alone:
+    # imperative prompts (goster, calistir) would match every note that uses the verb.
+    ("masin", 4, "ln"), ("mesin", 4, "ln"), ("mali", 5, "ln"), ("meli", 5, "ln"),
+    ("iyor", 4, "ln"), ("uyor", 4, "ln"),
+    ("acak", 4, "ln"), ("ecek", 4, "ln"), ("acag", 4, "ln"), ("eceg", 4, "ln"),
+    ("imiz", 4, "consonant"), ("umuz", 4, "consonant"), ("iniz", 4, "consonant"), ("unuz", 4, "consonant"),
+    ("nden", 5, "vowel"), ("ndan", 5, "vowel"),
+    ("ten", 4, "voiceless"), ("tan", 4, "voiceless"), ("den", 4, "voiced"), ("dan", 4, "voiced"),
+    ("nin", 5, "vowel"), ("nun", 5, "vowel"), ("nde", 5, "vowel"), ("nda", 5, "vowel"),
+    ("miz", 4, "vowel"), ("muz", 4, "vowel"), ("niz", 4, "vowel"), ("nuz", 4, "vowel"),
+    ("yla", 4, "vowel"), ("yle", 4, "vowel"),
+    ("ler", 3, "any"), ("lar", 3, "any"),
+    ("mak", 4, "ln"), ("mek", 4, "ln"), ("mis", 4, "ln"), ("mus", 4, "ln"),
+    ("te", 4, "voiceless"), ("ta", 4, "voiceless"), ("de", 4, "voiced"), ("da", 4, "voiced"),
+    ("si", 4, "vowel"), ("su", 4, "vowel"), ("ya", 4, "vowel"), ("ye", 4, "vowel"),
+    ("yi", 4, "vowel"), ("yu", 4, "vowel"),
+    ("in", 4, "consonant"), ("un", 4, "consonant"), ("im", 4, "consonant"), ("um", 4, "consonant"),
+    ("le", 4, "consonant"), ("la", 4, "consonant"),
+    # Past tense needs i or u before the l or n as well: "buildi" and "backendi" are a
+    # loanword plus a possessive, not a passive verb.
+    ("di", 5, "passive"), ("du", 5, "passive"), ("ma", 4, "ln"), ("me", 4, "ln"),
+    # The aorist floor is 5: kurul+ur, but not the nouns sinir or kenar.
+    ("ir", 5, "ln"), ("ur", 5, "ln"), ("ar", 5, "ln"), ("er", 5, "ln"),
+    ("i", 4, "consonant"), ("u", 4, "consonant"), ("e", 4, "consonant"), ("a", 4, "consonant"),
+)
+# Keep the larger suffix table off the hot path without changing rule precedence.
+_SUFFIXES_BY_LAST = {
+    last: tuple(rule for rule in _SUFFIXES if rule[0][-1] == last)
+    for last in {suffix[-1] for suffix, _, _ in _SUFFIXES}
+}
+
+
+# Vowel loss (#430): a few roots drop their last vowel before a vowel suffix, so peeling
+# "metni" stops at "metn" while "metin" stays whole. The peeled short form is mapped back
+# to the root, on both sides. Forms that are often another word stay out: devre and
+# devreye (circuit, activation) for devir, resmi (official) for resim, karne for karin,
+# English burn for burun, the name Emre for emir, and al-in (take) for alin.
+_VOWEL_LOSS = {
+    "sehr": "sehir", "fikr": "fikir", "beyn": "beyin", "metn": "metin", "kism": "kisim",
+    "hukm": "hukum", "nehr": "nehir", "zihn": "zihin", "vakt": "vakit", "nesl": "nesil",
+    "seyr": "seyir", "haps": "hapis", "keyf": "keyif", "kayb": "kayip", "kayd": "kayit",
+    "nakd": "nakit", "cism": "cisim", "zulm": "zulum", "kahr": "kahir", "sekl": "sekil",
+    "gonl": "gonul", "gogs": "gogus",
+    # A three-letter loss stops above the stem floor, so each surviving form is listed.
+    "ismi": "isim", "ismin": "isim", "isme": "isim", "akli": "akil", "aklin": "akil",
+    "akla": "akil", "agzi": "agiz", "agzin": "agiz", "agza": "agiz", "oglu": "ogul",
+    "oglun": "ogul", "omru": "omur", "omrun": "omur",
+}
+
+
+def _attaches(stem, gate):
+    previous = stem[-1]
+    if gate == "vowel":
+        return previous in _VOWELS
+    if gate == "consonant":
+        return previous not in _VOWELS
+    if gate == "voiceless":
+        return previous in _VOICELESS
+    if gate == "voiced":
+        return previous not in _VOICELESS
+    if gate == "ln":
+        return previous in "ln"
+    if gate == "passive":
+        return previous in "ln" and stem[-2] in "iu"
+    return True
+
+
+def _harmonizes(stem, suffix):
+    """Weak vowel harmony: only an unambiguous last vowel (a/e) can decide."""
+    tone = next((c for c in suffix if c in _VOWELS), "")
+    if tone not in ("a", "e"):
+        return True
+    for character in reversed(stem):
+        if character in _VOWELS:
+            return character not in ("a", "e") or character == tone
+    return True
+
+
+@functools.lru_cache(maxsize=16384)
+def _stem(word):
+    # Words under 5 characters are already stems; peeling them merges unrelated roots.
+    while len(word) >= 5:
+        # Claude ends in the spelling of a Turkish locative suffix. Preserve the
+        # name after peeling a real suffix, without scanning past folded vowels
+        # (tarihte, hakime and kabulde need the existing weak harmony rule).
+        if word == "claude":
+            break
+        for suffix, floor, gate in _SUFFIXES_BY_LAST.get(word[-1], ()):
+            if not word.endswith(suffix):
+                continue
+            stem = word[:-len(suffix)]
+            if len(stem) < floor or not _attaches(stem, gate) or not _harmonizes(stem, suffix):
+                continue
+            word = stem
+            break
         else:
-            payload = read_json(args.file)
-            result = sync.update_task(payload["id"], payload["expected_revision"], payload["changes"])
-        if (args.command in SOURCE_WRITE_COMMANDS
-                and (args.command != "note-edit" or result.get('status') == 'written')
-                and os.environ.get("CLAUDE_CODE_SESSION_ID")):
-            mark_session_edit(state)
-        if return_result:
-            return result, 0
-        print(json.dumps(result, ensure_ascii=True, indent=2))
+            break
+    word = _VOWEL_LOSS.get(word, word)
+    # Consonant softening: kitap/kitabi and ornek/ornegi (soft g is already folded to g).
+    # A b or g after a vowel goes back to p or k on every stem, peeled or not, so both
+    # sides agree. d is left alone: past tense stems like "dened" would land on "denet".
+    if len(word) >= 4 and word[-1] in "bg" and word[-2] in _VOWELS:
+        word = word[:-1] + ("p" if word[-1] == "b" else "k")
+    return word
+
+
+def _token_counts(text):
+    """Stem -> occurrence count; the keys are exactly _tokens(text)."""
+    text = unicodedata.normalize("NFKD", str(text).casefold())
+    text = "".join(c for c in text if not unicodedata.combining(c)).replace("ı", "i")
+    return Counter(_stem(word) for word in re.findall(r"[a-z0-9]+", text))
+
+
+def _tokens(text):
+    return set(_token_counts(text))
+
+
+# Stopwords are matched against stems, so Turkish content words had to leave the list:
+# "notlar", "kararlari", "projede", "nedenleri" and "durumu" all stem onto entries that
+# used to be here, which emptied the query instead of widening it.
+STOPWORDS = _tokens("the a an is are was were what which who when where how why of to in on at for from with and or does did do has have latest current please tell about my our this that it its project projects status decision decisions show find get ve veya bir bu su o ne kim nasil hangi nedir neydi mi mu icin ile bana benim bizim olarak olan oldu en son guncel soyle getir bul yok say ignore disregard no")
+
+
+def _strict_terms(terms):
+    """Filter out non-topical terms in strict mode (#358).
+
+    Drops single-character tokens and numeric-only tokens shorter than 3 digits
+    (e.g. '1', '2', '42'). Preserves years ('2026'), 3+ digit numbers ('200'),
+    and alphanumeric identifiers ('722b4dd').
+    """
+    return {t for t in terms if len(t) >= 2 and not (t.isdigit() and len(t) < 3)}
+
+
+def _name_candidates(record):
+    """Candidate names for title-salience matching (#354): title, stem, stripped stem, aliases."""
+    candidates = []
+    title = str(record.get("title", "")).strip()
+    if title:
+        candidates.append(title[:160])
+    source = str(record.get("source", "")).strip()
+    if source:
+        stem = Path(source).stem.replace("-", " ").replace("_", " ").strip()
+        if stem:
+            candidates.append(stem[:160])
+            stripped = re.sub(r"^[0-9]+[ \t\-_]+", "", stem).strip()
+            if stripped and stripped != stem:
+                candidates.append(stripped[:160])
+    aliases = record.get("aliases", [])
+    if isinstance(aliases, list):
+        for a in aliases[:32]:
+            if isinstance(a, str) and a.strip():
+                candidates.append(a.strip()[:160])
+    return candidates
+
+
+NAME_GENERIC_TERMS = _tokens("durum proje projeler not notlar karar kararlar arsiv sablon genel ozet guncel")
+
+
+def _name_match_score(record, terms):
+    """Salience signal when query terms contain all meaningful words of a note's name (#354).
+
+    Returns the number of matching name terms (higher = more specific title match),
+    or 0 if no candidate name is fully covered by the query terms.
+    """
+    if not terms:
         return 0
-    except Exception as exc:
-        # No traceback or raw input dump: callers retain their local source files.
-        error = {"error": type(exc).__name__, "message": str(exc)}
-        code = 1
-        if isinstance(exc, ArgumentParsingError):
-            error["error"] = "SystemExit"
-            code = 2
-        if args.command in NOTE_JSON_COMMANDS:
-            from beyin_v3_notes import NoteConflict, NotePartialWrite
-            code = 2 if isinstance(exc, NoteConflict) else 1
-            error['status'] = 'conflict' if code == 2 else 'error'
-            if isinstance(exc, NotePartialWrite):
-                error.update(exc.details)
-        if isinstance(exc, ValueError) and str(exc) in ERROR_HINTS:
-            error["hint"] = ERROR_HINTS[str(exc)]
-        if return_result:
-            return error, code
-        print(json.dumps(error, ensure_ascii=True),
-              file=sys.stdout if args.command in NOTE_JSON_COMMANDS else sys.stderr)
-        return code
+    best_score = 0
+    for cand in _name_candidates(record):
+        cand_tokens = _tokens(cand) - STOPWORDS
+        meaningful = {t for t in cand_tokens if len(t) >= 2}
+        if meaningful and meaningful - NAME_GENERIC_TERMS and meaningful.issubset(terms):
+            if len(meaningful) > best_score:
+                best_score = len(meaningful)
+    return best_score
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def _path_redirected(path):
+    """Symlinks and Windows reparse points require a fresh realpath check."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        # Let the original resolver/type check decide missing or inaccessible paths.
+        return True
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_reparse_tag", 0))
+
+
+class MemoryStore:
+    def __init__(self, state_dir, vault_root, read_only=False, busy_timeout=10):
+        self.read_only = bool(read_only)
+        # Seconds a connection waits for another process's write lock. A hook reading
+        # while the sync worker commits passes its remaining budget instead of the default.
+        self.busy_timeout = float(busy_timeout)
+        self.vault_root = Path(vault_root).expanduser().resolve()
+        if not self.vault_root.is_dir():
+            raise ValueError("vault_root must be an existing directory")
+        self.state_dir = Path(state_dir).expanduser().resolve()
+        if self.state_dir.is_relative_to(self.vault_root):
+            raise ValueError("runtime must be outside vault")
+        self.database = self.state_dir / "memory.sqlite3"
+        if self.database.is_symlink():
+            raise ValueError("database must not be a symlink")
+        if self.read_only:
+            if not self.state_dir.is_dir() or not self.database.is_file():
+                raise ValueError("read-only runtime is not initialized")
+            try:
+                with self._connect() as db:
+                    binding = db.execute("SELECT value FROM metadata WHERE key='vault_root'").fetchone()
+            except sqlite3.Error as exc:
+                raise ValueError("read-only runtime is not initialized") from exc
+            if not binding:
+                raise ValueError("read-only runtime is not bound to a vault")
+            if binding[0] != str(self.vault_root):
+                raise ValueError("runtime belongs to another vault")
+            return
+        self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.state_dir.chmod(0o700)
+        with self._connect() as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS events(
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    record_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    record TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS events_record_sequence ON events(record_id,sequence);
+            """)
+            root = str(self.vault_root)
+            binding = db.execute("SELECT value FROM metadata WHERE key='vault_root'").fetchone()
+            if binding and binding[0] != root:
+                raise ValueError("runtime belongs to another vault")
+            if not binding and db.execute("SELECT COUNT(*) FROM records").fetchone()[0]:
+                raise ValueError("unbound existing runtime requires explicit migration")
+            db.execute("INSERT OR IGNORE INTO metadata VALUES ('vault_root',?)", (root,))
+        self.database.chmod(0o600)
+
+    @contextmanager
+    def _connect(self):
+        if self.read_only:
+            db = sqlite3.connect(self.database.resolve().as_uri() + "?mode=ro", uri=True, timeout=self.busy_timeout)
+            db.execute("PRAGMA query_only=ON")
+        else:
+            db = sqlite3.connect(self.database, timeout=self.busy_timeout)
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
+
+    def _require_writable(self):
+        if self.read_only:
+            raise ValueError("read-only runtime does not permit writes")
+
+    def close(self):
+        """Connections are scoped to each operation; provided for callers."""
+
+    def context_for(self, harness, query, **kwargs):
+        if kwargs.get("strict") is True and self.STRICT_PASSAGES:
+            try:
+                if _MODULE_DIR not in sys.path:
+                    sys.path.insert(0, _MODULE_DIR)
+                from beyin_v3_passage import context_for as passage_context
+                return passage_context(self, harness, query, **kwargs)
+            except Exception:
+                pass  # a real failure or a still-building index keeps the note-level path
+        return shared_context(self, harness, query, **kwargs)
+
+    def _source(self, value, *, _resolved=None):
+        if not isinstance(value, str) or not value or Path(value).is_absolute():
+            raise ValueError("source must be an existing vault-relative file")
+        if ".." in Path(value).parts:
+            raise ValueError("source traversal rejected")
+        path = self.vault_root / value
+        target = _resolved if path.is_relative_to(self.vault_root) else None
+        if target is not None:
+            # A file or directory can become a symlink after the scan's first read.
+            # Reuse the realpath only while its vault-relative components stay real;
+            # otherwise resolve again, preserving _source's inside/outside decision.
+            cursor, boundary = str(path), str(self.vault_root.parent)
+            while cursor != boundary:
+                if _path_redirected(cursor):
+                    target = None
+                    break
+                cursor = os.path.dirname(cursor)
+        if target is None:
+            target = path.resolve()
+        if not target.is_relative_to(self.vault_root) or not target.is_file():
+            raise ValueError("source missing or outside vault")
+        return Path(value).as_posix()
+
+    def _validate(self, record, *, _resolved_source=None):
+        if not isinstance(record, dict):
+            raise ValueError("record must be an object")
+        record = json.loads(_json(record))
+        if not isinstance(record.get("id"), str) or not record["id"].strip():
+            raise ValueError("record id required")
+        if not isinstance(record.get("text"), str):
+            raise ValueError("record text required")
+        # Sync shares its checked realpath; still recheck existence/type and reread
+        # the source here so edits during the scan cannot validate stale bytes.
+        record["source"] = self._source(record.get("source"), _resolved=_resolved_source)
+        record["source_sha256"] = hashlib.sha256((self.vault_root / record["source"]).read_bytes()).hexdigest()
+        current = record.get("updated_at")
+        if current is None or (isinstance(current, str) and not current.strip()):
+            # Obsidian templates date notes as updated/modified, so without these the
+            # recency tie-break is empty for every note. Non-ISO text would sort as ancient,
+            # and file mtime is not a date: synced vaults rewrite it.
+            for alias in RECENCY_ALIASES:
+                value = record.get(alias)
+                if isinstance(value, str):
+                    v = value.strip()
+                    # YYYY/MM/DD, or day-first DD.MM.YYYY / DD-MM-YYYY / DD/MM/YYYY as Turkish
+                    # templates write it. A converted value must be a real date: month-first text such
+                    # as 12/31/2026 stays unset instead of becoming 2026-31-12.
+                    m = re.match(r"^(\d{4})/(\d{2})/(\d{2})(.*)$", v)
+                    parts = (m[1], m[2], m[3], m[4]) if m else None
+                    if parts is None:
+                        m = re.match(r"^(\d{2})([-/.])(\d{2})\2(\d{4})(.*)$", v)
+                        parts = (m[4], m[3], m[1], m[5]) if m else None
+                    if parts is not None:
+                        try:
+                            datetime(int(parts[0]), int(parts[1]), int(parts[2]))
+                        except ValueError:
+                            continue
+                        v = f"{parts[0]}-{parts[1]}-{parts[2]}{parts[3]}"
+                    if re.match(r"^\d{4}-\d{2}-\d{2}", v):
+                        record["updated_at"] = v
+                        break
+        for field in ("project", "kind", "status", "updated_at"):
+            if field in record and not isinstance(record[field], str):
+                raise ValueError(field + " must be a string")
+        if record.get("kind") in ("inference", "preference"):
+            if record.get("validity", "current") not in ("current", "rejected"):
+                raise ValueError("inference validity must be current or rejected")
+            for field in ("rejected_reason", "rejected_at"):
+                if field in record and not isinstance(record[field], str):
+                    raise ValueError(field + " must be a string")
+            if record.get("validity") == "rejected":
+                if not isinstance(record.get("rejected_reason"), str) or not record["rejected_reason"].strip():
+                    raise ValueError("rejected_reason required for rejected validity")
+                # A date or an RFC 3339-style timestamp. The explicit grammar keeps acceptance
+                # identical across Python versions (3.14 fromisoformat also takes T24:00).
+                rejected_at = record.get("rejected_at")
+                if not isinstance(rejected_at, str) or not REJECTED_AT.fullmatch(rejected_at):
+                    raise ValueError("rejected_at must be an ISO date or timestamp for rejected validity")
+                try:
+                    datetime.fromisoformat(rejected_at)
+                except ValueError as exc:
+                    raise ValueError("rejected_at must be an ISO date or timestamp for rejected validity") from exc
+        record.setdefault("facts", {})
+        if not isinstance(record["facts"], dict):
+            raise ValueError("facts must be an object")
+        record.setdefault("revision", 1)
+        if type(record["revision"]) is not int or record["revision"] < 1:
+            raise ValueError("positive revision required")
+        record.setdefault("visibility", "internal")
+        if record["visibility"] not in ("public", "internal", "private"):
+            raise ValueError("invalid visibility")
+        supersedes = record.get("supersedes", [])
+        if isinstance(supersedes, str):
+            supersedes = [supersedes]
+        if not isinstance(supersedes, list) or not all(isinstance(v, str) for v in supersedes):
+            raise ValueError("supersedes must contain record ids")
+        if record["id"] in supersedes:
+            raise ValueError("record cannot supersede itself")
+        record["supersedes"] = supersedes
+        return record
+
+    def ingest(self, record):
+        self._require_writable()
+        record = self._validate(record)
+        payload = _json(record)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            old = db.execute("SELECT payload FROM records WHERE id=?", (record["id"],)).fetchone()
+            if old:
+                if old[0] != payload:
+                    raise RevisionConflict("existing id; use update_task with expected revision")
+            else:
+                db.execute("INSERT INTO records VALUES (?,?)", (record["id"], payload))
+                db.execute("INSERT INTO events(event_type,record_id,revision,record) VALUES ('ingest',?,?,?)", (record["id"], record["revision"], payload))
+        return record
+
+    def update_task(self, id, expected_revision, changes):
+        self._require_writable()
+        if not isinstance(changes, dict) or {"id", "revision"} & changes.keys():
+            raise ValueError("id and revision cannot be changed")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT payload FROM records WHERE id=?", (id,)).fetchone()
+            if not row:
+                raise KeyError(id)
+            record = json.loads(row[0])
+            if type(expected_revision) is not int or record["revision"] != expected_revision:
+                raise RevisionConflict("revision conflict; reread source")
+            record.update(changes)
+            record["revision"] = expected_revision + 1
+            record = self._validate(record)
+            db.execute("UPDATE records SET payload=? WHERE id=?", (_json(record), id))
+            db.execute("INSERT INTO events(event_type,record_id,revision,record) VALUES ('update',?,?,?)", (id, record["revision"], _json(record)))
+        return record
+
+    def history(self, record_id, audience="internal"):
+        """Source-verified immutable snapshots, ordered by global event sequence.
+
+        Databases created before events were added have no invented prehistory.
+        A verified current source authorizes historical revisions of that record;
+        each event still has to pass the requested visibility boundary. A record
+        that synchronization deleted (source removed or no longer valid) keeps its
+        audit trail: the snapshot stored in its final delete event sets the
+        boundary instead, because there is no current source left to verify.
+        """
+        if audience not in ("public", "internal", "private"):
+            raise ValueError("invalid audience")
+        allowed = {"public"} if audience == "public" else {"public", "internal"} if audience == "internal" else {"public", "internal", "private"}
+        with self._connect() as db:
+            current = db.execute("SELECT payload FROM records WHERE id=?", (record_id,)).fetchone()
+            rows = db.execute("SELECT sequence,event_type,record_id,revision,record FROM events WHERE record_id=? ORDER BY sequence", (record_id,)).fetchall()
+            quarantined = {}
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_view_history'").fetchone():
+                quarantined = dict(db.execute("SELECT source,through_sequence FROM receipt_view_history"))
+        if not rows or (not current and rows[-1][1] != "delete"):
+            return []
+        boundary = json.loads(current[0] if current else rows[-1][4])
+        # A formerly indexed receipt view cannot authorize its own leaked audit
+        # trail. Later clean notes at a retired path have sequences past the cutoff.
+        if rows[-1][0] <= quarantined.get(boundary.get("source"), 0):
+            return []
+        if (boundary.get("visibility") not in allowed or boundary.get("trust") == "untrusted" or
+                boundary.get("trusted") is False or boundary.get("status") == "untrusted" or
+                boundary.get("kind") == "untrusted"):
+            return []
+        if current:
+            try:
+                source = self._source(boundary.get("source"))
+                actual = hashlib.sha256((self.vault_root / source).read_bytes()).hexdigest()
+                if actual != boundary.get("source_sha256"):
+                    return []
+            except (ValueError, OSError, TypeError):
+                return []
+        return [{"sequence": row[0], "event_type": row[1], "record_id": row[2], "revision": row[3], "record": record}
+                for row in rows if (record := json.loads(row[4])).get("visibility") in allowed and
+                row[0] > quarantined.get(record.get("source"), 0) and
+                record.get("trust") != "untrusted" and record.get("trusted") is not False and
+                record.get("status") != "untrusted" and record.get("kind") != "untrusted"]
+
+    def submit_receipt(self, event_id, summary, refs, harness, links=None):
+        self._require_writable()
+        if not isinstance(event_id, str) or not event_id.strip():
+            raise ValueError("event_id required")
+        if not isinstance(summary, str) or not summary.strip():
+            raise ValueError("summary required")
+        if harness not in HARNESSES + ("manual",):
+            raise ValueError("unsupported harness")
+        if not isinstance(refs, list) or not refs:
+            raise ValueError("source refs required")
+        event = {"event_id": event_id, "summary": summary, "refs": [self._source(ref) for ref in refs], "harness": harness}
+        if links:
+            if not isinstance(links, list) or len(links) > MAX_RECEIPT_LINKS or not all(
+                    isinstance(link, str) and _plain_link(link) for link in links):
+                raise ValueError("links must be http(s) URLs without spaces or credentials")
+            event["links"] = list(links)
+        payload = _json(event)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            old = db.execute("SELECT payload FROM receipts WHERE id=?", (event_id,)).fetchone()
+            if old:
+                previous = json.loads(old[0])
+                if (previous["summary"], previous["refs"], previous.get("links")) != (summary, event["refs"], event.get("links")):
+                    raise ReceiptConflict("event_id reused with different payload")
+                event = previous
+            db.execute("INSERT OR IGNORE INTO receipts VALUES (?,?)", (event_id, payload))
+        return dict(event, id=event_id, status="succeeded")
+
+    def retrieve(self, query, project=None, audience="internal", statuses=None, limit=5, budget_chars=8000, strict=False, today=None):
+        return self._retrieve(query, project, audience, statuses, limit, budget_chars, strict=strict, today=today)
+
+    def candidates(self, query, project=None, audience="internal", statuses=None, limit=32, strict=False, today=None):
+        """Bounded eligible candidates before any final context packing.
+
+        Callers must build separately bounded provider cards and pack final output.
+        A long leading source must not hide later candidates from a reranker.
+        """
+        if type(limit) is not int or not 0 <= limit <= 128:
+            raise ValueError("candidate limit must be 0..128")
+        return self._retrieve(query, project, audience, statuses, limit, 0,
+                              strict=strict, candidate_only=True, today=today)
+
+    def snapshot_context(self, audience="internal", budget_chars=6000, limit=5, project=None, today=None):
+        """Explicit bounded current-state snapshot; normal empty queries abstain."""
+        return self._retrieve("", project=project, audience=audience, statuses=("active", "waiting", "inbox"),
+                              limit=limit, budget_chars=budget_chars, snapshot=True, today=today)
+
+    def due_tasks_context(self, audience="internal", budget_chars=1500, limit=5, project=None, today=None):
+        """Bounded due task snapshot when ambient snapshot is skipped."""
+        with self._connect() as db:
+            rows = db.execute("SELECT payload FROM records WHERE payload LIKE '%\"due_at\"%' ORDER BY id")
+            records = [json.loads(row[0]) for row in rows]
+        eligible, stale_count = self._eligible(audience=audience, project=project, records=records)
+        today_iso = str(today)[:10] if today else date.today().isoformat()
+        due_records = [r for r in eligible if is_due_task(r, today_iso)]
+        due_records.sort(key=lambda r: (str(r.get("due_at", ""))[:10], r.get("id", "")))
+        return pack_context(due_records, limit, budget_chars, stale_count)
+
+    def source_snapshot(self, source_names, audience="internal", budget_chars=3000, source_directory=None, text_transform=None):
+        """Return a bounded, source-verified continuity set in requested order."""
+        if (not isinstance(source_names, (list, tuple)) or
+                not all(isinstance(name, str) and name and "/" not in name and "\\" not in name
+                        for name in source_names) or
+                type(budget_chars) is not int or budget_chars < 0):
+            raise ValueError("invalid source snapshot request")
+        if audience not in ("public", "internal", "private"):
+            raise ValueError("invalid audience")
+        allowed = {"public"} if audience == "public" else {"public", "internal"} if audience == "internal" else {"public", "internal", "private"}
+        # Decode only rows that can match; the full Python gates below still decide.
+        # Markdown-owned records: sync writes markdown_sources(id, source) in the same
+        # transaction as the payload, so their basenames are read from that small table.
+        # Other records (ingest): every writer stores _json() payloads, so a matching
+        # source contains the name exactly as _json() serializes it (Unicode, escapes).
+        # Both are supersets of the matches; anything unusual keeps the full scan.
+        needles = list(dict.fromkeys(_json(name)[1:-1] for name in source_names))
+        wanted = set(source_names)
+        with self._connect() as db:
+            try:
+                owned = db.execute("SELECT id, source FROM markdown_sources").fetchall()
+            except sqlite3.OperationalError:
+                owned = None  # a store that never synced Markdown has no ownership table
+            ids = None if owned is None else sorted(id for id, source in owned if Path(source).name in wanted)
+            if ids is None or len(needles) > 128 or len(ids) > 512:
+                query, params = "SELECT payload FROM records ORDER BY id", ()
+            else:
+                other = "id NOT IN (SELECT id FROM markdown_sources) AND (" + (
+                    " OR ".join("instr(payload, ?) > 0" for _ in needles) or "0") + ")"
+                clause = ("id IN (" + ",".join("?" * len(ids)) + ") OR (" + other + ")") if ids else other
+                query, params = "SELECT payload FROM records WHERE " + clause + " ORDER BY id", ids + needles
+            records = [json.loads(row[0]) for row in db.execute(query, params)]
+        candidates = {name: [] for name in source_names}
+        stale_count = 0
+        for record in records:
+            if sensitive_source(record.get("source")):
+                continue
+            if (record.get("visibility") not in allowed or record.get("trust") == "untrusted" or
+                    record.get("trusted") is False or record.get("status") == "untrusted" or
+                    record.get("kind") == "untrusted" or _rejected_inference(record)):
+                continue
+            source = record.get("source", "")
+            if source_directory is not None and Path(source).parent.as_posix() != source_directory:
+                continue
+            name = Path(source).name
+            if name not in candidates:
+                continue
+            try:
+                self._source(source)
+                actual = hashlib.sha256((self.vault_root / source).read_bytes()).hexdigest()
+                if actual != record.get("source_sha256"):
+                    stale_count += 1
+                    continue
+            except (ValueError, OSError):
+                stale_count += 1
+                continue
+            preferred = 0 if any(part.casefold().endswith(("companion", "echo")) for part in Path(source).parts[:-1]) else 1
+            candidates[name].append((preferred, len(source), source, record))
+        chosen = []
+        missing = []
+        for name in source_names:
+            if not candidates[name]:
+                missing.append(name)
+                continue
+            record = min(candidates[name], key=lambda item: item[:3])[3]
+            chosen.append({key: record[key] for key in ("id", "source", "title", "kind", "status", "updated_at") if key in record})
+            text = record.get("text", "")
+            chosen[-1]["text"] = text_transform(name, text) if text_transform else text
+        result = {"records": chosen, "citations": [{"id": record["id"], "source": record["source"]} for record in chosen],
+                  "requested_sources": list(source_names), "missing_sources": missing,
+                  "stale_excluded": stale_count, "truncated": False}
+        empty = json.loads(json.dumps(result))
+        for record in empty["records"]:
+            record["text"] = ""
+        available = budget_chars - len(_json(empty))
+        if available < 0:
+            return {"records": [], "citations": [], "requested_sources": list(source_names),
+                    "missing_sources": list(source_names), "stale_excluded": stale_count,
+                    "truncated": bool(chosen)}
+        share = available // max(1, len(chosen))
+        # A record shorter than its share hands the rest to the longer ones (#374): an equal
+        # split cut a 45k Kurallar.md to its fifth of the bound while the handoff files used a
+        # fraction of theirs, so the companion layer clipped and counted rules on a fragment.
+        lengths, left = sorted(len(record["text"]) for record in chosen), available
+        for index, length in enumerate(lengths[:-1]):
+            if length > share:
+                break
+            left -= length
+            share = left // (len(lengths) - index - 1)
+        marker = "[truncated]"
+        for record in chosen:
+            text = record["text"]
+            if len(text) > share:
+                keep = max(0, share - len(marker) - 1)
+                name = Path(record["source"]).name
+                if not keep:
+                    record["text"] = marker
+                elif name == "Journal.md":
+                    record["text"] = marker + "\n" + text[-keep:]
+                elif name == "Kurallar.md" and keep > 1:
+                    # Head and tail, as the companion layer shows a rule set: the head holds
+                    # the summary and the oldest rules, the tail the newest corrections (#374).
+                    keep -= 1
+                    record["text"] = text[:keep - keep // 2] + "\n" + marker + "\n" + text[len(text) - keep // 2:]
+                else:
+                    record["text"] = text[:keep] + "\n" + marker
+                result["truncated"] = True
+        prefix, suffix, middle = marker + "\n", "\n" + marker, "\n" + marker + "\n"
+        while any(record["text"] for record in chosen):
+            # JSON escapes can still overflow; cut the whole excess at once. One character
+            # per pass re-serialized the result for every newline of a long record (#374).
+            over = len(_json(result)) - budget_chars
+            if over <= 0:
+                break
+            record = max(chosen, key=lambda item: len(item["text"]))
+            text = record["text"]
+            if text.startswith(prefix) and len(text) > len(prefix):
+                record["text"] = prefix + text[len(prefix) + over:]
+            elif text.endswith(suffix) and len(text) > len(suffix):
+                record["text"] = text[:max(0, len(text) - len(suffix) - over)] + suffix
+            elif Path(record["source"]).name == "Kurallar.md" and text.find(middle) > 0:
+                head, tail = text.split(middle, 1)
+                record["text"] = head[:max(0, len(head) - over)] + middle + tail
+            else:
+                record["text"] = text[:max(0, len(text) - over)]
+            result["truncated"] = True
+        return result
+
+    @staticmethod
+    def _lexical_weights(ranked, terms, vocabularies):
+        """(weight, shared_count, record) for every candidate; see the strict comment for the formula."""
+        frequency = {}
+        for vocabulary in vocabularies.values():
+            for token in vocabulary:
+                frequency[token] = frequency.get(token, 0) + 1
+        total = max(1, len(vocabularies))
+        idf_max = math.log((total + 1) / 2) + 1
+        weighted = []
+        for shared_count, record in ranked:
+            vocabulary = vocabularies[record["id"]]
+            weight = sum(math.log((total + 1) / (frequency.get(token, 0) + 1)) + 1 for token in terms & vocabulary)
+            weighted.append((weight / idf_max / math.log(10 + len(vocabulary)), shared_count, record))
+        return weighted
+
+    @staticmethod
+    def _by_weight(weighted):
+        weighted.sort(key=lambda item: (item[1].get("updated_at", ""), item[1]["id"]), reverse=True)
+        weighted.sort(key=lambda item: -item[0])
+        return weighted
+
+    @staticmethod
+    def _name_candidates(record):
+        return _name_candidates(record)
+
+    @staticmethod
+    def _name_match_score(record, terms):
+        return _name_match_score(record, terms)
+
+    is_due_task = staticmethod(is_due_task)
+
+    def _strict_rank(self, ranked, terms, vocabularies, name_scores=None, today=None, allowed_statuses=None):
+        """Keep meaningful matches without making one-word queries impossible."""
+        min_shared = min(self.STRICT_MIN_SHARED, len(terms))
+        min_weight = self.STRICT_SINGLE_TERM_MIN_WEIGHT if len(terms) == 1 else self.STRICT_MIN_WEIGHT
+        today_iso = str(today)[:10] if today else date.today().isoformat()
+        weighted = []
+        for weight, shared_count, record in self._lexical_weights(ranked, terms, vocabularies):
+            if shared_count >= min_shared and weight >= min_weight:
+                if name_scores and record["id"] in name_scores:
+                    weight += self.NAME_MATCH_STRICT_WEIGHT * name_scores[record["id"]]
+                if is_due_task(record, today_iso):
+                    weight += self.DUE_STRICT_BONUS
+                elif allowed_statuses is None and _is_closed_task(record):
+                    weight -= self.CLOSED_TASK_PENALTY
+                weighted.append((weight, record))
+        return self._by_weight(weighted)
+
+    BM25_K1 = 1.5
+    BM25_B = 0.75
+    NAME_MATCH_WEIGHT = 20.0
+    NAME_MATCH_STRICT_WEIGHT = 10.0
+    DUE_BONUS = 50.0
+    DUE_STRICT_BONUS = 25.0
+    CLOSED_TASK_PENALTY = 50.0
+
+    def _weighted_rank(self, ranked, terms, term_counts, name_scores=None, today=None, allowed_statuses=None):
+        """Order without dropping anything: Okapi BM25 over stem counts, no thresholds.
+
+        A raw shared-term count favours whichever note has the largest vocabulary, so one long
+        hub note can win every query; a presence-only idf weight still cannot tell a note that
+        is about a term from one that mentions it once. Records with no shared term (scoped
+        listings, snapshots) weigh 0 and keep their previous updated_at order.
+        """
+        total = len(term_counts)
+        lengths = {rid: sum(counts.values()) for rid, counts in term_counts.items()}
+        average = sum(lengths.values()) / total if total else 0
+        frequency = {term: sum(1 for counts in term_counts.values() if term in counts) for term in terms}
+        today_iso = str(today)[:10] if today else date.today().isoformat()
+        weighted = []
+        for _, record in ranked:
+            counts = term_counts[record["id"]]
+            norm = self.BM25_K1 * (1 - self.BM25_B + self.BM25_B * (lengths[record["id"]] / average if average else 0))
+            weight = sum(math.log((total - frequency[term] + 0.5) / (frequency[term] + 0.5) + 1) *
+                         counts[term] * (self.BM25_K1 + 1) / (counts[term] + norm)
+                         for term in terms if counts.get(term))
+            if name_scores and record["id"] in name_scores:
+                weight += self.NAME_MATCH_WEIGHT * name_scores[record["id"]]
+            if is_due_task(record, today_iso):
+                weight += self.DUE_BONUS
+            elif allowed_statuses is None and _is_closed_task(record):
+                weight -= self.CLOSED_TASK_PENALTY
+            weighted.append((weight, record))
+        return self._by_weight(weighted)
+
+    # Strict automatic context: multiword queries need two shared words so that an incidental
+    # common word cannot pull an unrelated note into the prompt. One-word queries use a
+    # separate weight floor and still reject weak matches. Weight = sum of relative idf over
+    # shared terms, divided by log(10 + note vocabulary size). Relative idf (idf / idf of a
+    # term seen in exactly one note) keeps the scale independent of vault size, so the
+    # threshold works for a 20-note vault and a 300-note vault alike.
+    # Calibration (real vault, 265 notes, 16 prompts): irrelevant prompts scored 0.19-0.37,
+    # relevant 0.33-1.21; 0.30 silenced 6/7 irrelevant and kept 7/7 relevant.
+    STRICT_MIN_SHARED = 2
+    STRICT_MIN_WEIGHT = 0.30
+    # A single query term cannot meet the two-term gate; still exclude incidental long-note hits.
+    STRICT_SINGLE_TERM_MIN_WEIGHT = 0.20
+    STRICT_EXCLUDE = ("daily/",)  # session logs are records, not knowledge; they match everything
+
+    # Per-turn strict context ranks Markdown passages instead of whole notes and delivers the
+    # matching block (#83, beyin_v3_passage.py). An empty passage result is an answer.
+    STRICT_PASSAGES = True
+
+    def _records(self):
+        with self._connect() as db:
+            return [json.loads(row[0]) for row in db.execute("SELECT payload FROM records ORDER BY id")]
+
+    def _eligible(self, audience="internal", project=None, rejected_only=False, records=None):
+        """Visibility, trust, project and source-freshness gates shared by every retrieval path.
+
+        rejected_only inverts the rejection gate alone, for rejected_matches: the same
+        scope applies to history that is looked up but never delivered. records lets a
+        caller that also needs the supersession set read the table once.
+        """
+        if audience not in ("public", "internal", "private"):
+            raise ValueError("invalid audience")
+        if records is None:
+            records = self._records()
+        allowed = {"public"} if audience == "public" else {"public", "internal"} if audience == "internal" else {"public", "internal", "private"}
+        # Read only for an explicit project: the per-turn hook path passes none.
+        scopes = read_project_scopes(self.vault_root) if project is not None else None
+        eligible = []
+        stale_count = 0
+        for record in records:
+            # Old indexes can still hold these notes until the next sync. Never deliver them.
+            if sensitive_source(record.get("source")):
+                continue
+            if record["visibility"] not in allowed or record.get("trust") == "untrusted" or record.get("trusted") is False or record.get("status") == "untrusted" or record.get("kind") == "untrusted" or _rejected_inference(record) != rejected_only:
+                continue
+            if project is not None:
+                if scopes is None:
+                    if record.get("project") != project:
+                        continue
+                else:
+                    scope = record_scope(record, scopes)
+                    if scope != project and not (scope is None and scopes["shared_unscoped"]):
+                        continue
+            try:
+                self._source(record["source"])
+                actual = hashlib.sha256((self.vault_root / record["source"]).read_bytes()).hexdigest()
+                if actual != record.get("source_sha256"):
+                    stale_count += 1
+                    continue
+            except (ValueError, OSError):
+                stale_count += 1
+                continue
+            eligible.append(record)
+        return eligible, stale_count
+
+    def _superseded_ids(self, records=None):
+        """Ids retired by any trusted record, not only by the ones this reader may see (#201)."""
+        return resolve_supersedes(self._records() if records is None else records)[0]
+
+    def _retrieve(self, query, project=None, audience="internal", statuses=None, limit=5, budget_chars=8000, snapshot=False, strict=False, candidate_only=False, today=None):
+        if audience not in ("public", "internal", "private"):
+            raise ValueError("invalid audience")
+        if not isinstance(query, str) or type(limit) is not int or limit < 0 or type(budget_chars) is not int or budget_chars < 0:
+            raise ValueError("invalid query or budget")
+        records = self._records()
+        eligible, stale_count = self._eligible(audience, project, records=records)
+        superseded = self._superseded_ids(records)
+        allowed_statuses = _allowed_statuses(statuses)
+        if strict:
+            try:
+                if _MODULE_DIR not in sys.path:
+                    sys.path.insert(0, _MODULE_DIR)
+                from beyin_v3_passage import _path_key, settings
+            except ImportError:
+                # Without the exclusion policy, strict fallback must not deliver sources.
+                return [] if candidate_only else pack_context([], limit, budget_chars, stale_count)
+            prefixes = tuple(_path_key(prefix) for prefix in settings(self.state_dir)["exclude"])
+            eligible = [record for record in eligible
+                        if not _path_key(str(record.get("source", ""))).startswith(prefixes)]
+        query_tokens = _tokens(query)
+        project_tokens = _tokens(project or "")
+        terms = query_tokens - STOPWORDS - project_tokens
+        scoped_listing = project is not None and bool(query_tokens & project_tokens) and not (query_tokens - STOPWORDS - project_tokens)
+        if strict:
+            terms = _strict_terms(terms)
+            if not terms and not scoped_listing and not snapshot:
+                if candidate_only:
+                    return []
+                return pack_context([], limit, budget_chars, stale_count)
+        ranked = []
+        vocabularies = {}
+        term_counts = {}
+        name_scores = {}
+        for record in eligible:
+            if record["id"] in superseded:
+                continue
+            if not _status_allowed(record, allowed_statuses):
+                continue
+            if strict and str(record.get("source", "")).startswith(self.STRICT_EXCLUDE):
+                continue
+            # Aliases are source metadata, never a shortcut around eligibility gates.
+            aliases = record.get("aliases", [])
+            aliases = aliases if isinstance(aliases, list) else []
+            alias_text = " ".join(a[:160] for a in aliases[:32] if isinstance(a, str))
+            name_score = self._name_match_score(record, terms)
+            # A filename is a salience signal only for an actual topical name match.
+            # Unrelated/generic stems must not widen candidates or dilute BM25 lengths.
+            source_stem = (Path(record.get("source", "")).stem.replace("-", " ").replace("_", " ")
+                           if name_score else "")
+            counts = _token_counts(record["text"] + " " + _json(record["facts"]) + " " + str(record.get("title", "")) + " " + alias_text + " " + source_stem)
+            for stopword in STOPWORDS & counts.keys():
+                del counts[stopword]
+            vocabulary = set(counts)
+            vocabularies[record["id"]] = vocabulary
+            term_counts[record["id"]] = counts
+            if name_score:
+                name_scores[record["id"]] = name_score
+            score = len(terms & vocabulary)
+            if score or name_score or scoped_listing or snapshot:
+                ranked.append((score, record))
+        if strict and not snapshot:
+            ranked = self._strict_rank(ranked, terms, vocabularies, name_scores=name_scores,
+                                       today=today, allowed_statuses=allowed_statuses)
+        else:
+            ranked = self._weighted_rank(ranked, terms, term_counts, name_scores=name_scores,
+                                         today=today, allowed_statuses=allowed_statuses)
+        if candidate_only:
+            return [record for _, record in ranked[:limit]]
+        return pack_context([record for _, record in ranked], limit, budget_chars, stale_count)
+
+
+# A rejected claim is proposed again when the new text restates most of it. Coverage is
+# measured on the rejected statement, not on the new text, so a proposal that wraps the
+# old claim in extra context is still caught. Both constants are pinned by tests.
+REJECTED_MIN_SHARED = 2
+REJECTED_MIN_COVERAGE = 0.6
+# A title is a topic label more often than a claim: "Kahve tercihi" would otherwise match
+# any new claim that names the same topic, including the user's own correction.
+REJECTED_MIN_TITLE_TERMS = 3
+
+
+def rejected_matches(store, text, project, audience="internal", limit=4):
+    """Rejected inference/preference records in scope that the text restates.
+
+    Lexical and local: no model call, no write. The comparison uses _tokens, so casing,
+    Unicode form and Turkish suffixes normalize the same way on both sides. A record is
+    compared by its title and by its text separately, and the better coverage counts.
+    Only identities are returned; the rejected text and reason never leave this function,
+    so they cannot reach context or an advisor request.
+    """
+    if (not isinstance(text, str) or not isinstance(project, str) or not project.strip() or
+            type(limit) is not int or limit < 0):
+        raise ValueError("invalid rejected match query")
+    ignored = STOPWORDS | _tokens(project)
+    claim = _tokens(text) - ignored
+    if not claim:
+        return []
+    records, _ = store._eligible(audience, project, rejected_only=True)
+    matches = []
+    for record in records:
+        coverage = 0.0
+        for statement, minimum in ((str(record.get("title", "")), REJECTED_MIN_TITLE_TERMS), (record["text"], 0)):
+            terms = _tokens(statement) - ignored
+            if len(terms) < minimum:
+                continue
+            shared = len(claim & terms)
+            if shared >= REJECTED_MIN_SHARED:
+                coverage = max(coverage, shared / len(terms))
+        if coverage >= REJECTED_MIN_COVERAGE:
+            matches.append((coverage, record))
+    matches.sort(key=lambda item: (-item[0], item[1]["id"]))
+    return [{"record_id": record["id"], "source": record["source"],
+             "rejected_at": record.get("rejected_at"), "coverage": round(coverage, 3)}
+            for coverage, record in matches[:limit]]
+
+CONTEXT_MARKER = " [truncated]"
+MIN_CONTEXT_TEXT = 150     # smallest excerpt of a source that is worth a slot
+SHORT_CONTEXT_TEXT = 500   # a short source is reserved whole when it fits, else like a long one
+TOP_CONTEXT_TEXT = 1100    # the best source keeps at least this much: one passage window (#83)
+TOP_CONTEXT_SHARE = 0.4    # ... or this share of the budget, whichever is larger
+
+
+class PackedContext(dict):
+    """Packed context that remembers its unclipped sources in rank order.
+
+    The attribute is never serialized (json sees a plain dict), so render_context can
+    re-pack for the hook envelope from the originals instead of clipping a clip, and a
+    source dropped there returns its share to the better sources.
+    """
+    sources = ()
+
+
+def _clip_to(record, citation, room):
+    """Longest text prefix whose serialized record+citation fits in room, else None."""
+    text, best = record["text"], None
+    low, high = 0, len(text)
+    while low <= high:  # JSON escaping only grows with the prefix, so bisection is exact
+        middle = (low + high) // 2
+        candidate = dict(record, text=text[:middle] + CONTEXT_MARKER, text_truncated=True)
+        if len(_json(candidate)) + len(_json(citation)) <= room:
+            best, low = candidate, middle + 1
+        else:
+            high = middle - 1
+    return best
+
+
+def _clipped_size(record, citation, chars):
+    """Serialized size of record+citation with the first `chars` characters, or whole if shorter."""
+    full = len(_json(record)) + len(_json(citation))
+    if len(record["text"]) <= chars:
+        return full
+    return min(full, len(_json(dict(record, text=record["text"][:chars] + CONTEXT_MARKER, text_truncated=True)))
+               + len(_json(citation)))
+
+
+def pack_context(records, limit=5, budget_chars=8000, stale_count=0):
+    """Pack successfully delivered sources, not a prefix of attempted candidates.
+
+    An oversized metadata record cannot consume a source slot. Text may be clipped,
+    never identity/citation fields. used_chars measures compact record+citation JSON;
+    render_context additionally accounts for the complete hook envelope.
+
+    Budget is reserved before it is spent (#79). The best source first keeps the larger
+    of TOP_CONTEXT_TEXT characters and TOP_CONTEXT_SHARE of the budget, so a passage
+    (#83) reaches a small prompt whole and a long note keeps a real excerpt. Every
+    further source in rank order then reserves its floor (its first MIN_CONTEXT_TEXT
+    characters, or all of a short text when that fits); a source whose floor does not
+    fit is skipped without consuming a slot. What is left goes back in rank order.
+    Reservations are exact serialized sizes, JSON escaping included, so an admitted
+    source is never dropped later and one long note can no longer starve the rest.
+    """
+    if type(limit) is not int or limit < 0 or type(budget_chars) is not int or budget_chars < 0:
+        raise ValueError("invalid budget")
+    admitted, reserved, protected = [], 0, 0
+    for record in records:
+        if len(admitted) >= limit:
+            break
+        citation = {"id": record["id"], "source": record["source"]}
+        full = len(_json(record)) + len(_json(citation))
+        floor = _clipped_size(record, citation, MIN_CONTEXT_TEXT)
+        claim = full if len(record["text"]) <= SHORT_CONTEXT_TEXT else floor
+        if reserved + claim > budget_chars - protected:
+            claim = floor
+        if reserved + claim > budget_chars - protected:
+            continue
+        admitted.append([record, citation, full, claim])
+        reserved += claim
+        if len(admitted) == 1:
+            keep = max(_clipped_size(record, citation, TOP_CONTEXT_TEXT), int(budget_chars * TOP_CONTEXT_SHARE))
+            protected = max(0, min(full, keep, budget_chars) - claim)
+    spare = budget_chars - reserved
+    for item in admitted:
+        extra = min(spare, item[2] - item[3])
+        item[3] += extra
+        spare -= extra
+    selected, citations, sources = [], [], []
+    used, carry, clipped_any = 0, 0, False
+    for record, citation, full, allocation in admitted:
+        room = allocation + carry
+        source = record
+        if full > room:
+            record = _clip_to(record, citation, room)
+            if record is None:  # unreachable while room >= floor; never overspend
+                carry = room
+                continue
+        size = len(_json(record)) + len(_json(citation))
+        carry = room - size
+        selected.append(record)
+        sources.append(source)
+        citations.append(citation)
+        clipped_any = clipped_any or bool(record.get("text_truncated"))
+        used += size
+    omitted = len(records) - len(selected)
+    packed = PackedContext({"records": selected, "citations": citations, "abstained": not selected,
+                            "truncated": bool(omitted) or clipped_any, "omitted_count": omitted,
+                            "used_chars": used, "budget_chars": budget_chars, "stale_count": stale_count})
+    packed.sources = tuple(sources)
+    return packed
+
+
+def shared_context(store, harness, query, **kwargs):
+    """All supported harnesses call the same source-backed retrieval function."""
+    if harness not in HARNESSES:
+        raise ValueError("unsupported harness")
+    return store.retrieve(query, **kwargs)
+
+
+def codex_context(store, query, **kwargs):
+    return shared_context(store, "codex", query, **kwargs)
+
+
+def claude_context(store, query, **kwargs):
+    return shared_context(store, "claude", query, **kwargs)
+
+
+def optional_provider(enabled=False, factory=None):
+    """No provider code is imported or called unless explicitly enabled."""
+    if not enabled:
+        return None
+    if factory is None or not callable(factory):
+        raise ValueError("explicit provider factory required")
+    return factory()
+
+
+def render_context(context, budget_chars, prefix="", suffix=""):
+    """Serialize a complete context within the delivery budget; never slice JSON.
+
+    Return the delivered projection as well so continuity cannot remember an omitted
+    source. Auxiliary receipt text yields to complete source identities and citations.
+    """
+    if type(budget_chars) is not int or budget_chars < 0:
+        raise ValueError("invalid budget")
+    records = context.get("records", [])
+    sources = getattr(context, "sources", ())
+    if len(sources) == len(records) and all(s["id"] == r["id"] for s, r in zip(sources, records)):
+        records = list(sources)  # re-clip the envelope from the originals, not from a clip
+    extra = {k: v for k, v in context.items() if k not in
+             {"records", "citations", "used_chars", "budget_chars", "omitted_count", "truncated", "abstained", "stale_count"}}
+    available = max(0, budget_chars - len(prefix))
+    payload_budget = available
+    while True:
+        packed = pack_context(records, len(records), payload_budget, context.get("stale_count", 0))
+        packed["omitted_count"] += context.get("omitted_count", 0)
+        packed["truncated"] = packed["truncated"] or bool(context.get("truncated"))
+        packed.update(extra)
+        text = json.dumps(packed, ensure_ascii=False)
+        overflow = len(text) - available
+        if overflow <= 0:
+            tail = suffix if len(prefix) + len(text) + len(suffix) <= budget_chars else ""
+            return prefix + text + tail, packed
+        if payload_budget == 0:
+            # A nonsensically small budget cannot carry even an empty envelope.
+            return "", dict(packed, records=[], citations=[], abstained=True, used_chars=0)
+        payload_budget = max(0, payload_budget - overflow - 8)

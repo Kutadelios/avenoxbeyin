@@ -779,18 +779,14 @@ def context(store, budget, session, harness, query='', receipt='', warning='', p
         retrieval_budget = min(remaining, retrieval_share) if companion_clipped else remaining
         ranked = store.context_for(harness, query, project=project, budget_chars=max(0, retrieval_budget - 100))
     elif remaining > 200:
-        snapshot = store.snapshot_context(project=project, budget_chars=min(1500, max(0, remaining - 100)))
-        if companion_clipped:
-            check_due = getattr(store, 'is_due_task', None)
-            if check_due is None:
-                try:
-                    from beyin_v3 import is_due_task
-                    check_due = is_due_task
-                except ImportError:
-                    check_due = lambda r: False
-            ranked = {'records': [r for r in snapshot.get('records', []) if check_due(r)]}
+        if not companion_clipped:
+            ranked = store.snapshot_context(project=project, budget_chars=min(1500, max(0, remaining - 100)))
         else:
-            ranked = snapshot
+            due_fn = getattr(store, 'due_tasks_context', None)
+            if due_fn is not None:
+                ranked = due_fn(project=project, budget_chars=min(1500, max(0, remaining - 100)))
+            else:
+                ranked = {'records': []}
     else:
         ranked = {'records': []}
     used = {r['source'] for r in records}
