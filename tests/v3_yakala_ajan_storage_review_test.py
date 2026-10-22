@@ -378,6 +378,176 @@ class CaptureStoreScopeTest(StorageFiles):
         self.assertEqual(yakala._agent_note_search(self.vault, 'PRIVATE_CANARY', self.state)['matches'], [])
 
 
+class AgentJournalTest(StorageFiles):
+    def journal_job(self):
+        # A fresh source per job: capturing the same URL again returns the existing card instead.
+        job = self.job('https://example.com/j/' + uuid.uuid4().hex[:6])
+        job.update(session_id=str(uuid.uuid4()), journal_time='2026-10-20T12:34:56+03:00',
+                   outcome=(Path(job['card_path']).parent / 'Ajan' / job['id'] / '__host-result.md').as_posix(),
+                   receipt='memory/receipt-' + job['id'] + '.md')
+        self.note(job['outcome'], '---\nvisibility: private\n---\nPRIVATE_RESULT_CANARY')
+        self.note(job['receipt'], '# Receipt\n')
+        return job
+
+    def write(self, job, terminal='completed'):
+        return yakala._agent_write_journal(self.vault, self.state, job, terminal)
+
+    def test_configured_capture_folder_is_used_without_companion_scan(self):
+        self.state.mkdir(parents=True)
+        (self.state / yakala.STATE_FILE).write_text(json.dumps({'klasor': 'Custom/Captures'}), encoding='utf-8')
+        (self.vault / 'Custom/Captures').mkdir(parents=True)
+        job = self.journal_job()
+        unrelated = [self.note(path, '# User session\n') for path in (
+            '850-Companion/Last-Session.md', '850-Echo/Last-Session.md',
+            'archive/850-Companion/Last-Session.md', 'projects/docs/Last-Session.md')]
+        before = [path.read_bytes() for path in unrelated]
+        with patch.object(yakala.os, 'scandir', side_effect=AssertionError('No companion discovery')):
+            journal = self.write(job)
+        self.assertEqual(journal, self.vault / 'Custom/Captures/Ajan/Gunluk-2026-10.md')
+        self.assertEqual([path.read_bytes() for path in unrelated], before)
+        self.assertEqual(job['journal'], 'Custom/Captures/Ajan/Gunluk-2026-10.md')
+
+    def test_missing_file_has_internal_frontmatter_title_and_one_short_entry(self):
+        job = self.journal_job()
+        journal = self.write(job)
+        text = yakala._agent_read_note(journal)  # No own/private exemption.
+        self.assertIn('visibility: "internal"', text)
+        self.assertIn('# Yakala ajan gunlugu - 2026-10\n\n- 2026-10-20 12:34', text)
+        entry = text[text.index('- 2026-10-20'):]
+        self.assertEqual(entry.count('<!-- yakala-ajan:' + job['id'] + ' -->'), 1)
+        self.assertLessEqual(len(entry), 300)  # Includes all link targets and the UUID marker.
+        self.assertIn('claude · ' + job['session_id'][:8] + ' · completed', entry)
+        self.assertNotIn(job['session_id'], entry)
+        matches = yakala._agent_note_search(self.vault, 'Gunluk-2026-10', self.state)['matches']
+        self.assertEqual([item['path'] for item in matches], [job['journal']])
+
+    def test_repeat_after_reload_and_month_rollover_keeps_one_byte_identical_entry(self):
+        job = self.journal_job()
+        journal = self.write(job)
+        before = journal.read_bytes()
+        saved = json.loads((yakala._agent_job_dir(self.vault, self.state, job['id']) / 'job.json').read_text(encoding='utf-8'))
+        with patch.object(yakala, 'now', return_value=yakala.datetime(2026, 11, 1)), \
+                patch.object(yakala, '_atomic_bytes') as replace, patch.object(yakala, '_agent_create_bytes') as create:
+            self.assertEqual(self.write(saved), journal)
+        replace.assert_not_called()
+        create.assert_not_called()
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertFalse(journal.with_name('Gunluk-2026-11.md').exists())
+
+    def test_first_attempt_pins_month_before_publication_even_when_write_fails(self):
+        job = self.journal_job()
+        job.pop('journal_time')
+        with patch.object(yakala, 'now', return_value=yakala.datetime(2026, 10, 31, 23, 59)), \
+                patch.object(yakala, '_agent_create_bytes', side_effect=OSError('Disk full')), \
+                self.assertRaises(OSError):
+            self.write(job)
+        saved = json.loads((yakala._agent_job_dir(self.vault, self.state, job['id']) / 'job.json').read_text(encoding='utf-8'))
+        self.assertEqual(saved['journal_time'], '2026-10-31T23:59:00')
+        self.assertNotIn('journal', saved)
+        with patch.object(yakala, 'now', return_value=yakala.datetime(2026, 11, 1)):
+            journal = self.write(saved)
+        self.assertEqual(journal.name, 'Gunluk-2026-10.md')
+        self.assertEqual(journal.read_text(encoding='utf-8').count('<!-- yakala-ajan:'), 1)
+
+    def test_newest_first_preserves_frontmatter_earlier_bytes_and_crlf(self):
+        first = self.journal_job()
+        journal = self.write(first)
+        before = journal.read_bytes().replace(b'\n', b'\r\n')
+        journal.write_bytes(before)
+        second = self.journal_job()
+        second['journal_time'] = '2026-10-20T12:35:00+03:00'
+        self.write(second, 'approval_required')
+        text = journal.read_bytes()
+        split = before.index(b'- 2026-10-20')
+        self.assertTrue(text.startswith(before[:split]))
+        self.assertTrue(text.endswith(before[split:]))
+        self.assertLess(text.index(second['id'].encode()), text.index(first['id'].encode()))
+        self.assertEqual(text.count(b'\n'), text.count(b'\r\n'))
+        self.assertEqual(text.count(b'# Yakala ajan gunlugu'), 1)
+        self.assertEqual(text.count(b'<!-- yakala-ajan:'), 2)
+        self.assertIn('visibility: "internal"', yakala._agent_read_note(journal))
+
+    def test_new_job_in_new_month_creates_separate_journal(self):
+        job = self.journal_job()
+        october = self.write(job)
+        before = october.read_bytes()
+        next_job = self.journal_job()
+        next_job['journal_time'] = '2026-11-01T00:00:00+03:00'
+        november = self.write(next_job)
+        self.assertEqual(november.name, 'Gunluk-2026-11.md')
+        self.assertEqual(october.read_bytes(), before)
+        self.assertNotIn(job['id'], november.read_text(encoding='utf-8'))
+
+    def test_legacy_last_session_field_is_not_a_write_target(self):
+        job = self.journal_job()
+        job['last_session'] = 'nonexistent/Last-Session.md'
+        self.write(job)
+        self.assertNotIn('last_session', job)
+        self.assertFalse((self.vault / 'nonexistent').exists())
+
+    def test_linked_journal_is_not_followed(self):
+        job = self.journal_job()
+        outside = self.note('elsewhere/user.md', 'USER BYTES')
+        journal = self.vault / Path(job['outcome']).parent.parent / 'Gunluk-2026-10.md'
+        try:
+            journal.symlink_to(outside)
+        except OSError as exc:
+            self.skipTest('Symlink creation unavailable: ' + str(exc))
+        with self.assertRaises(ValueError):
+            self.write(job)
+        self.assertEqual(outside.read_bytes(), b'USER BYTES')
+
+    def test_linked_journal_directory_is_not_followed(self):
+        job = self.journal_job()
+        other = self.vault / 'Other'
+        other.mkdir()
+        # Use a fresh card parent so the per-job notes do not already occupy Ajan/.
+        job['card_path'] = 'Other/card.md'
+        self.note(job['card_path'])
+        try:
+            (other / 'Ajan').symlink_to(self.vault / Path(job['outcome']).parent.parent, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest('Symlink creation unavailable: ' + str(exc))
+        with self.assertRaises(ValueError):
+            self.write(job)
+        self.assertFalse((other / 'Ajan/Gunluk-2026-10.md').exists())
+
+    def test_creation_race_does_not_replace_other_writer(self):
+        job = self.journal_job()
+        original = yakala._agent_create_bytes
+
+        def race(path, data):
+            path.write_bytes(b'OTHER WRITER')
+            return original(path, data)
+
+        with patch.object(yakala, '_agent_create_bytes', side_effect=race), self.assertRaises(FileExistsError):
+            self.write(job)
+        journal = self.vault / Path(job['outcome']).parent.parent / 'Gunluk-2026-10.md'
+        self.assertEqual(journal.read_bytes(), b'OTHER WRITER')
+        self.assertNotIn('journal', job)
+
+    def test_full_readback_is_verified_even_when_marker_survives(self):
+        job = self.journal_job()
+        original = yakala._agent_create_bytes
+
+        def corrupt(path, data):
+            return original(path, data.replace(b'completed', b'CORRUPTED'))
+
+        with patch.object(yakala, '_agent_create_bytes', side_effect=corrupt), \
+                self.assertRaisesRegex(ValueError, 'geri okunamadi'):
+            self.write(job)
+        self.assertNotIn('journal', job)
+
+    def test_oversized_journal_is_preserved(self):
+        job = self.journal_job()
+        journal = self.vault / Path(job['outcome']).parent.parent / 'Gunluk-2026-10.md'
+        before = b'x' * (2 * 1024 * 1024 + 1)
+        journal.write_bytes(before)
+        with self.assertRaisesRegex(ValueError, 'cok buyuk'):
+            self.write(job)
+        self.assertEqual(journal.read_bytes(), before)
+
+
 class CaptureLockScopeTest(StorageFiles):
     @unittest.skipIf(os.name == 'nt', 'Windows uses its existing named mutex')
     def test_agent_disabled_capture_creates_no_vault_lock_or_agent_state(self):
