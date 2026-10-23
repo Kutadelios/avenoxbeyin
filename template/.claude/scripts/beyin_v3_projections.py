@@ -407,9 +407,11 @@ def receipt_coverage(db, now=None, state=None):
         chk_at = row[2]
         active = (('all_time', True), ('last_30d', chk_at >= thirty_days), ('last_7d', chk_at >= seven_days))
         if not row[6]:
-            # Still kept out of the ratio, but counted: the global bridge installs no
-            # UserPromptSubmit, so every session outside the vault lands here, receipts
-            # included, and an unexplained small total reads as missing data.
+            # Still kept out of the ratio, but counted, receipts included: an unexplained
+            # small total reads as missing data. Any session without a prompt marker lands
+            # here: every session outside the vault (the global bridge installs no
+            # UserPromptSubmit), and vault sessions recorded before the marker existed or
+            # closed before a prompt was observed.
             has_receipt = (row[0], row[1]) in latest
             for w_name, w_active in active:
                 if w_active:
