@@ -30,7 +30,7 @@ import tempfile
 import time
 import unicodedata
 
-from beyin_v3 import HARNESSES, STOPWORDS, _allowed_statuses, _json, _name_match_score, _status_allowed, _strict_terms, _tokens, pack_context
+from beyin_v3 import HARNESSES, STOPWORDS, _allowed_statuses, _json, _name_match_score, _query_roots, _status_allowed, _strict_terms, _tokens, pack_context
 
 # #83 chose 0.15 on one 263-note Turkish vault without a coverage cap. With the cap, on a
 # second 1,285-note vault 0.20 is the lowest floor that keeps everyday and agent-command
@@ -347,11 +347,19 @@ def search(index, terms, limit=5, floor=FLOOR, min_shared=MIN_SHARED):
     passages_total = max(1, len(index.passages))
     sources_total = max(1, index.sources)
     wanted = min(len(terms), COVERAGE_CAP)
-    probes = [(term, " " + term + " ") for term in sorted(terms)]
+    # A term may also match a shorter root; shared then holds the root, so its own idf weighs it.
+    alternatives = _query_roots(terms, lambda token: index.source_df.get(token, 0), STOPWORDS)
+    probes = [tuple((token, " " + token + " ") for token in (term,) + alternatives.get(term, ()))
+              for term in sorted(terms)]
     best = {}
     for passage in index.passages:
         tokens = passage[4]
-        shared = [term for term, probe in probes if probe in tokens]
+        shared = []
+        for options in probes:
+            for token, probe in options:
+                if probe in tokens:
+                    shared.append(token)
+                    break
         if len(shared) < min_shared:
             continue
         size = tokens.count(" ") - 1

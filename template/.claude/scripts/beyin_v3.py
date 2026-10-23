@@ -571,6 +571,34 @@ def _stem(word):
     return word
 
 
+# A possessive on a three-letter root stays on the word: _stem keeps four letters, so "boyum"
+# (my height) keeps its own stem while the note says "Boy: 180". -m after a vowel ("kilom")
+# has no _SUFFIXES rule at all. Only a query word tries these shorter roots (_query_roots);
+# note-side stems never change, so dur/durum and yay/yayin stay apart. Gates as in _SUFFIXES.
+_SHORT_ROOT_SUFFIXES = (
+    ("im", "consonant"), ("um", "consonant"), ("in", "consonant"), ("un", "consonant"),
+    ("i", "consonant"), ("u", "consonant"), ("m", "vowel"),
+)
+
+
+@functools.lru_cache(maxsize=16384)
+def _short_roots(stem):
+    """Stems one possessive shorter than stem, each as _stem would write the bare root."""
+    roots = []
+    for suffix, gate in _SHORT_ROOT_SUFFIXES:
+        root = stem[:-len(suffix)]
+        if not stem.endswith(suffix) or len(root) < 3 or not _attaches(root, gate):
+            continue
+        # Folding keeps rounding: i follows a, e, i (a ı e i) and u follows o, u (o ö u ü).
+        last = next((c for c in reversed(root) if c in _VOWELS), "")
+        if suffix[0] in "iu" and last not in ("aei" if suffix[0] == "i" else "ou"):
+            continue
+        root = _stem(root)
+        if root != stem and root not in roots:
+            roots.append(root)
+    return tuple(roots)
+
+
 def _token_counts(text):
     """Stem -> occurrence count; the keys are exactly _tokens(text)."""
     text = unicodedata.normalize("NFKD", str(text).casefold())
@@ -596,6 +624,40 @@ def _strict_terms(terms):
     and alphanumeric identifiers ('722b4dd').
     """
     return {t for t in terms if len(t) >= 2 and not (t.isdigit() and len(t) < 3)}
+
+
+def _query_roots(terms, frequency, ignored=frozenset()):
+    """Query term -> the shorter roots (_short_roots) it also matches.
+
+    A root joins only where more notes use it than the inflected word: boyum is rare beside
+    boy, while durum, a word of its own, is used more than dur and keeps matching itself only.
+    frequency(stem) is the number of notes that use the stem. A term still counts once.
+    """
+    alternatives = {}
+    for term in terms:
+        candidates = [root for root in _short_roots(term) if root not in terms and root not in ignored]
+        if candidates:
+            seen = frequency(term)
+            roots = tuple(root for root in candidates if frequency(root) > seen)
+            if roots:
+                alternatives[term] = roots
+    return alternatives
+
+
+def _fold_query_roots(term_counts, terms, ignored):
+    """Count each note's _query_roots occurrences under the query term, in place."""
+    term_counts = list(term_counts)
+    alternatives = _query_roots(terms, lambda token: sum(1 for counts in term_counts if token in counts), ignored)
+    if not alternatives:
+        return
+    roots = {root for found in alternatives.values() for root in found}
+    for counts in term_counts:
+        for term, found in alternatives.items():
+            extra = sum(counts.get(root, 0) for root in found)
+            if extra:
+                counts[term] += extra
+        for root in roots & counts.keys():
+            del counts[root]
 
 
 def _name_candidates(record):
@@ -1262,6 +1324,7 @@ class MemoryStore:
         vocabularies = {}
         term_counts = {}
         name_scores = {}
+        scanned = []
         for record in eligible:
             if record["id"] in superseded:
                 continue
@@ -1281,13 +1344,17 @@ class MemoryStore:
             counts = _token_counts(record["text"] + " " + _json(record["facts"]) + " " + str(record.get("title", "")) + " " + alias_text + " " + source_stem)
             for stopword in STOPWORDS & counts.keys():
                 del counts[stopword]
-            vocabulary = set(counts)
-            vocabularies[record["id"]] = vocabulary
             term_counts[record["id"]] = counts
             if name_score:
                 name_scores[record["id"]] = name_score
+            scanned.append(record)
+        # Root use is counted over every scanned note, so the counts are final only after the scan.
+        _fold_query_roots(term_counts.values(), terms, STOPWORDS | project_tokens)
+        for record in scanned:
+            vocabulary = set(term_counts[record["id"]])
+            vocabularies[record["id"]] = vocabulary
             score = len(terms & vocabulary)
-            if score or name_score or scoped_listing or snapshot:
+            if score or record["id"] in name_scores or scoped_listing or snapshot:
                 ranked.append((score, record))
         if strict and not snapshot:
             ranked = self._strict_rank(ranked, terms, vocabularies, name_scores=name_scores)
