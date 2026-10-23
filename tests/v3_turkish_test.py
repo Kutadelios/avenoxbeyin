@@ -68,12 +68,12 @@ GUARDS = (
     ('claude', 'claudenin'), ('claude', 'claudeye'), ('claude', 'claudede'),
 )
 
-# A possessive on a three-letter root stays on the word, because _stem keeps four letters, and
-# _stem has no rule for -m after a vowel. (note word, question word): the question must still
-# find the root. Upper case questions run Turkish I/ı and İ/i folding through the same path.
+# A possessive on a three-letter root stays on the word, because _stem keeps four letters.
+# (note word, question word): the question must still find the root. Upper case questions run
+# Turkish I/ı and İ/i folding through the same path.
 SHORT_ROOTS = (
     ('boy', 'boyum'), ('yaş', 'yaşını'), ('göz', 'gözümün'), ('kol', 'kolumda'),
-    ('baş', 'başı'), ('kilo', 'kilom'), ('araba', 'arabam'), ('kız', 'KIZIM'), ('diş', 'DİŞİM'),
+    ('baş', 'başı'), ('kız', 'KIZIM'), ('diş', 'DİŞİM'), ('ses', 'sesimi'),
 )
 
 FILLER = 'Bu sentetik test kaydıdır.'

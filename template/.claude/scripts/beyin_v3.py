@@ -572,30 +572,28 @@ def _stem(word):
 
 
 # A possessive on a three-letter root stays on the word: _stem keeps four letters, so "boyum"
-# (my height) keeps its own stem while the note says "Boy: 180". -m after a vowel ("kilom")
-# has no _SUFFIXES rule at all. Only a query word tries these shorter roots (_query_roots);
-# note-side stems never change, so dur/durum and yay/yayin stay apart. Gates as in _SUFFIXES.
+# (my height) keeps its own stem while the note says "Boy: 180". Only a query word tries the
+# root (_query_roots); note-side stems never change, so dur/durum and yay/yayin stay apart.
+# -m after a vowel stays out: _stem leaves it on verbal nouns too (yedeklemenin -> yedeklem).
 _SHORT_ROOT_SUFFIXES = (
     ("im", "consonant"), ("um", "consonant"), ("in", "consonant"), ("un", "consonant"),
-    ("i", "consonant"), ("u", "consonant"), ("m", "vowel"),
+    ("i", "consonant"), ("u", "consonant"),
 )
 
 
 @functools.lru_cache(maxsize=16384)
 def _short_roots(stem):
-    """Stems one possessive shorter than stem, each as _stem would write the bare root."""
+    """Three-letter roots one possessive shorter than stem; longer ones _stem peels itself."""
     roots = []
     for suffix, gate in _SHORT_ROOT_SUFFIXES:
         root = stem[:-len(suffix)]
-        if not stem.endswith(suffix) or len(root) < 3 or not _attaches(root, gate):
+        if not stem.endswith(suffix) or len(root) != 3 or not _attaches(root, gate):
             continue
         # Folding keeps rounding: i follows a, e, i (a ı e i) and u follows o, u (o ö u ü).
         last = next((c for c in reversed(root) if c in _VOWELS), "")
-        if suffix[0] in "iu" and last not in ("aei" if suffix[0] == "i" else "ou"):
+        if last not in ("aei" if suffix[0] == "i" else "ou"):
             continue
-        root = _stem(root)
-        if root != stem and root not in roots:
-            roots.append(root)
+        roots.append(root)
     return tuple(roots)
 
 
