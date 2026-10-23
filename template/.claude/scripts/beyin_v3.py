@@ -582,9 +582,8 @@ _SHORT_ROOT_SUFFIXES = (
 
 
 @functools.lru_cache(maxsize=16384)
-def _short_roots(stem):
-    """Three-letter roots one possessive shorter than stem; longer ones _stem peels itself."""
-    roots = []
+def _short_root(stem):
+    """The three-letter root one possessive shorter than stem, or None; _stem peels longer ones."""
     for suffix, gate in _SHORT_ROOT_SUFFIXES:
         root = stem[:-len(suffix)]
         if not stem.endswith(suffix) or len(root) != 3 or not _attaches(root, gate):
@@ -593,8 +592,9 @@ def _short_roots(stem):
         last = next((c for c in reversed(root) if c in _VOWELS), "")
         if last not in ("aei" if suffix[0] == "i" else "ou"):
             continue
-        roots.append(root)
-    return tuple(roots)
+        # Softening as in _stem (kabim, cebim). A short g stays: dag, sag and yag end in a real g.
+        return root[:-1] + "p" if root[-1] == "b" and root[-2] in _VOWELS else root
+    return None
 
 
 def _token_counts(text):
@@ -624,21 +624,24 @@ def _strict_terms(terms):
     return {t for t in terms if len(t) >= 2 and not (t.isdigit() and len(t) < 3)}
 
 
+# bu and su are stopwords; their oblique stem (bunu, sunun, bunlar -> bun) is not a topic either.
+_PRONOUN_ROOTS = frozenset(("bun", "sun"))
+
+
 def _query_roots(terms, frequency, ignored=frozenset()):
-    """Query term -> the shorter roots (_short_roots) it also matches.
+    """Query term -> the shorter root (_short_root) it also matches.
 
     A root joins only where more notes use it than the inflected word: boyum is rare beside
     boy, while durum, a word of its own, is used more than dur and keeps matching itself only.
-    frequency(stem) is the number of notes that use the stem. A term still counts once.
+    frequency(stem) is the number of notes that use the stem. A term still counts once, and a
+    root serves one term only: "boyum boyun" must not pass the two-word gate on one "Boy".
     """
     alternatives = {}
-    for term in terms:
-        candidates = [root for root in _short_roots(term) if root not in terms and root not in ignored]
-        if candidates:
-            seen = frequency(term)
-            roots = tuple(root for root in candidates if frequency(root) > seen)
-            if roots:
-                alternatives[term] = roots
+    for term in sorted(terms):
+        root = _short_root(term)
+        if (root and root not in terms and root not in ignored and root not in _PRONOUN_ROOTS
+                and root not in alternatives.values() and frequency(root) > frequency(term)):
+            alternatives[term] = root
     return alternatives
 
 
@@ -646,16 +649,10 @@ def _fold_query_roots(term_counts, terms, ignored):
     """Count each note's _query_roots occurrences under the query term, in place."""
     term_counts = list(term_counts)
     alternatives = _query_roots(terms, lambda token: sum(1 for counts in term_counts if token in counts), ignored)
-    if not alternatives:
-        return
-    roots = {root for found in alternatives.values() for root in found}
     for counts in term_counts:
-        for term, found in alternatives.items():
-            extra = sum(counts.get(root, 0) for root in found)
-            if extra:
-                counts[term] += extra
-        for root in roots & counts.keys():
-            del counts[root]
+        for term, root in alternatives.items():
+            if root in counts:
+                counts[term] += counts.pop(root)
 
 
 def _name_candidates(record):

@@ -73,7 +73,7 @@ GUARDS = (
 # Turkish I/ı and İ/i folding through the same path.
 SHORT_ROOTS = (
     ('boy', 'boyum'), ('yaş', 'yaşını'), ('göz', 'gözümün'), ('kol', 'kolumda'),
-    ('baş', 'başı'), ('kız', 'KIZIM'), ('diş', 'DİŞİM'), ('ses', 'sesimi'),
+    ('baş', 'başı'), ('kız', 'KIZIM'), ('diş', 'DİŞİM'), ('ses', 'sesimi'), ('cep', 'cebimi'),
 )
 
 FILLER = 'Bu sentetik test kaydıdır.'
@@ -297,6 +297,31 @@ class TurkishShortRootTest(VaultTestCase):
             self.store.STRICT_PASSAGES = passages
             with self.subTest(passages=passages):
                 self.assertCountEqual(self.context('durum'), ['durum-1', 'durum-2'])
+
+    def test_a_pronoun_does_not_fall_back(self):
+        common = lambda stem: 9 if stem in ('bun', 'sun') else 0
+        self.assertEqual(self.module._query_roots({'bunu', 'bunun', 'sunu'}, common), {})
+
+    def test_one_root_answers_one_question_word(self):
+        # A single "Boy" in the note must not pass the two-word gate for boyum and boyun.
+        for passages in (True, False):
+            self.store.STRICT_PASSAGES = passages
+            with self.subTest(passages=passages):
+                self.assertEqual(self.context('boyum boyun'), [])
+
+    def test_a_project_word_does_not_return_as_a_root(self):
+        text = 'Boy projesi: zirkon seçildi.'
+        (self.vault / 'notes').mkdir(exist_ok=True)
+        (self.vault / 'notes/zirkon.md').write_text(text, encoding='utf-8')
+        self.store.ingest({'id': 'zirkon', 'kind': 'note', 'status': 'active', 'visibility': 'internal',
+                           'text': text, 'facts': {}, 'source': 'notes/zirkon.md', 'project': 'boy',
+                           'updated_at': '2026-09-18T10:00:00Z'})
+        for passages in (True, False):
+            self.store.STRICT_PASSAGES = passages
+            with self.subTest(passages=passages):
+                found = self.store.context_for('claude', 'boyum zirkon', project='boy', strict=True,
+                                               budget_chars=2000)['records']
+                self.assertEqual(found, [])
 
 
 class TurkishShortRootMatrixTest(VaultTestCase):
