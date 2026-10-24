@@ -298,6 +298,21 @@ class TurkishShortRootTest(VaultTestCase):
             with self.subTest(passages=passages):
                 self.assertCountEqual(self.context('durum'), ['durum-1', 'durum-2'])
 
+    def test_a_word_of_its_own_stays_apart_where_the_root_is_more_common(self):
+        # durum and verim are words, not dur and ver plus a possessive: a vault that says dur
+        # or ver in more notes must still answer them with the notes that say durum and verim.
+        self.ingest('dur-1', 'Zirkon rotasında dur.', 'notes/dur-1.md')
+        self.ingest('dur-2', 'Zirkon yolunda dur.', 'notes/dur-2.md')
+        self.ingest('durum', 'Zirkon durum raporu.', 'notes/durum.md')
+        self.ingest('ver-1', 'Zirkon kartını ajana ver.', 'notes/ver-1.md')
+        self.ingest('ver-2', 'Zirkon özetini Codex\'e ver.', 'notes/ver-2.md')
+        self.ingest('verim', 'Zirkon verim ölçümü.', 'notes/verim.md')
+        for passages in (True, False):
+            self.store.STRICT_PASSAGES = passages
+            with self.subTest(passages=passages):
+                self.assertEqual(self.context('zirkon durum'), ['durum'])
+                self.assertEqual(self.context('zirkon verim'), ['verim'])
+
     def test_a_pronoun_does_not_fall_back(self):
         common = lambda stem: 9 if stem in ('bun', 'sun') else 0
         self.assertEqual(self.module._query_roots({'bunu', 'bunun', 'sunu'}, common), {})
