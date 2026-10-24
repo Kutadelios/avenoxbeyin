@@ -627,18 +627,25 @@ def _strict_terms(terms):
 # bu and su are stopwords; their oblique stem (bunu, sunun, bunlar -> bun) is not a topic either.
 _PRONOUN_ROOTS = frozenset(("bun", "sun"))
 
+# Nouns made from a verb with -Im/-Um look like a possessive on the verb (durum, dur + um).
+# Note frequency cannot tell them apart: a vault may say dur or ver in more notes than durum
+# or verim, so these never fall back to the verb.
+_WHOLE_WORDS = _tokens("durum kurum verim yazım yapım seçim bölüm sürüm doğum yorum konum tutum biçim "
+                       "bilim geçim kesim satım giyim dikim dönüm çözüm basım takım tanım çekim döküm "
+                       "dolum yayım ölçüm")
+
 
 def _query_roots(terms, frequency, ignored=frozenset()):
     """Query term -> the shorter root (_short_root) it also matches.
 
     A root joins only where more notes use it than the inflected word: boyum is rare beside
-    boy, while durum, a word of its own, is used more than dur and keeps matching itself only.
+    boy. A noun of its own (_WHOLE_WORDS) keeps matching itself only, however common its verb.
     frequency(stem) is the number of notes that use the stem. A term still counts once, and a
     root serves one term only: "boyum boyun" must not pass the two-word gate on one "Boy".
     """
     alternatives = {}
     for term in sorted(terms):
-        root = _short_root(term)
+        root = None if term in _WHOLE_WORDS else _short_root(term)
         if (root and root not in terms and root not in ignored and root not in _PRONOUN_ROOTS
                 and root not in alternatives.values() and frequency(root) > frequency(term)):
             alternatives[term] = root
