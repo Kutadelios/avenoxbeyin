@@ -96,6 +96,19 @@ class JevCardPassageTest(unittest.TestCase):
         self.assertIn('deploy again', card['excerpt'])
         self.assertNotIn('ofis masasi ve sandalye', card['excerpt'])
 
+    def test_long_paragraph_card_contains_the_matching_window(self):
+        client.set_mode(self.state, 'on', enable=['auto_context'])
+        query = 'Quartz deploy steps and pricing'
+        text = '# General\n\n' + ('Ordinary unrelated filler. ' * 29) + 'Rollback deploy again.\n'
+        self.record('long', text)
+        context = self.store.context_for('claude', query, strict=True)
+        self.assertEqual(context['records'], [])
+        advisor.auto_context(self.store, 'claude', query, context,
+                             budget_chars=4000, transport=self.transport)
+        card = next(iter(self.calls[0][0]['state']['notes'].values()))
+        self.assertIn('deploy again', card['excerpt'])
+        self.assertLessEqual(len(card['excerpt']), advisor.AUTO_EXCERPT)
+
     def test_card_excerpt_preserves_short_note_and_strict_passage(self):
         # Short note
         short_rec = {'id': 'short', 'text': 'Kisa metin.', 'text_truncated': False}

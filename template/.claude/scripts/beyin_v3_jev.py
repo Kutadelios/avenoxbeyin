@@ -215,27 +215,25 @@ def card_excerpt(record, query='', project=None):
         if not terms:
             return text[:AUTO_EXCERPT]
 
-        blocks = split_blocks(text)
+        blocks = split_blocks(text, target=AUTO_EXCERPT // 2, overlap=AUTO_EXCERPT // 6)
         if not blocks:
             return text[:AUTO_EXCERPT]
 
         best_score = 0
         best_block = None
         for head, start, end in blocks:
+            # Score only the bounded window that will actually reach the advisor.
+            # Reserve up to a third for headings; long paragraphs are split above.
+            head = head[:AUTO_EXCERPT // 3 - 2]
             body = text[start:end]
-            block_tokens = _tokens(body)
-            if head:
-                block_tokens |= _tokens(head)
-            score = len(terms & block_tokens)
+            passage = (head + '\n\n' + body if head else body)[:AUTO_EXCERPT]
+            score = len(terms & _tokens(passage))
             if score > best_score:
                 best_score = score
-                best_block = (head, start, end)
+                best_block = passage
 
         if best_block is not None and best_score > 0:
-            head, start, end = best_block
-            body = text[start:end]
-            passage = head + '\n\n' + body if head else body
-            return passage[:AUTO_EXCERPT]
+            return best_block
     except Exception:
         pass
 
