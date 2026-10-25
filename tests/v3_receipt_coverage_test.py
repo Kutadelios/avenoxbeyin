@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from v3_package_helpers import inherited_env
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -144,7 +145,7 @@ class ReceiptCoverageTest(unittest.TestCase):
         """Review Point 6: doctor must report potential_missing_receipts=None when receipt-gaps.json does not exist."""
         cmd = [sys.executable, str(ROOT / 'scripts/beyin_v3.py'), '--vault', str(self.vault),
                '--state', str(self.state), 'doctor']
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=True, env=inherited_env())
         doc = json.loads(proc.stdout)
         self.assertIsNone(doc.get('potential_missing_receipts'))
         self.assertIsNone(doc.get('receipt_coverage'))
@@ -176,7 +177,7 @@ class ReceiptCoverageTest(unittest.TestCase):
 
         cmd = [sys.executable, str(ROOT / 'scripts/beyin_v3.py'), '--vault', str(self.vault),
                '--state', str(self.state), 'doctor']
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=True, env=inherited_env())
         doc = json.loads(proc.stdout)
 
         self.assertEqual(doc.get('potential_missing_receipts'), 1)
@@ -232,7 +233,7 @@ class ReceiptCoverageTest(unittest.TestCase):
         self.assertEqual((gaps['receipt_coverage']['covered'], gaps['receipt_coverage']['total']), (1, 2))
         cmd = [sys.executable, str(ROOT / 'scripts/beyin_v3.py'), '--vault', str(self.vault),
                '--state', str(self.state), 'doctor']
-        doc = json.loads(subprocess.run(cmd, capture_output=True, text=True, check=True).stdout)
+        doc = json.loads(subprocess.run(cmd, capture_output=True, text=True, check=True, env=inherited_env()).stdout)
         self.assertEqual(doc['potential_missing_receipts'], 1)
         self.assertEqual((doc['receipt_coverage']['covered'], doc['receipt_coverage']['missing']), (1, 1))
 
@@ -396,6 +397,7 @@ class ReceiptCoverageTest(unittest.TestCase):
 
         # 3. Harness without edit observation (Antigravity: scope limitation preserved)
         self._enqueue('SessionStart', 'sess_ag', at=now - 25, harness='antigravity')
+        self._enqueue('UserPromptSubmit', 'sess_ag', at=now - 23, harness='antigravity')
         self._enqueue('Stop', 'sess_ag', at=now - 20, harness='antigravity')
 
         hook.drain_queue(self.vault, self.state)
@@ -404,18 +406,19 @@ class ReceiptCoverageTest(unittest.TestCase):
         gaps_path = self.state / 'receipt-gaps.json'
         self.assertTrue(gaps_path.exists())
         gaps_data = json.loads(gaps_path.read_text(encoding='utf-8'))
-        self.assertEqual(gaps_data['potential_missing_receipts'], 2)
+        self.assertEqual(gaps_data['potential_missing_receipts'], 3)
         self.assertEqual(gaps_data['no_observed_edit'], 1)
 
         # Checkpoints in gaps: read-only has no_observed_edit=True
         gap_items = {g['session']: g for g in gaps_data['checkpoints']}
         self.assertTrue(gap_items['sess_read_only'].get('no_observed_edit'))
         self.assertNotIn('no_observed_edit', gap_items['sess_edit_only'])
+        self.assertNotIn('no_observed_edit', gap_items['sess_ag'])
 
         # Check hook-health.json
         health_data = json.loads((self.state / 'hook-health.json').read_text(encoding='utf-8'))
         sync_result = health_data.get('sync', {})
-        self.assertEqual(sync_result.get('recent_missing_receipts'), 2)
+        self.assertEqual(sync_result.get('recent_missing_receipts'), 3)
         self.assertEqual(sync_result.get('recent_no_observed_edit'), 1)
 
         # Verify hook warning output
@@ -423,10 +426,10 @@ class ReceiptCoverageTest(unittest.TestCase):
         cmd = [sys.executable, str(hook_path), '--vault', str(self.vault),
                '--state', str(self.state), '--harness', 'claude']
         payload = {'hook_event_name': 'SessionStart', 'session_id': 'sess_check_warning'}
-        proc = subprocess.run(cmd, input=json.dumps(payload), capture_output=True, text=True, check=True)
+        proc = subprocess.run(cmd, input=json.dumps(payload), capture_output=True, text=True, check=True, env=inherited_env())
         out = json.loads(proc.stdout)
         context = out.get('hookSpecificOutput', {}).get('additionalContext', '')
-        self.assertIn('Prior checkpoints may lack structured receipts (2 in the last 7 days (1 without observed edits))', context)
+        self.assertIn('Prior checkpoints may lack structured receipts (3 in the last 7 days (1 without observed edits))', context)
 
     def test_mark_session_edit_records_session_marker(self):
         """mark_session_edit creates a receipt reminder marker for the active Claude session (#212)."""
