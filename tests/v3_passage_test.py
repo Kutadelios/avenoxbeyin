@@ -136,6 +136,29 @@ class PassageContextTest(Vault):
                     self.assertIn(alone[record['id']].split('\n\n', 1)[-1], record['text'])
                     self.assertGreaterEqual(len(record['text']), len(alone[record['id']]))
 
+    def test_a_smaller_envelope_drops_second_passages_before_cutting_a_source(self):
+        filler = 'Satır satır kayıt tutulur, sütunlar sabit kalır. ' * 12
+        for index in range(5):
+            name = 'Zirkon Takvimi Kredi %d' % index
+            self.ingest('t%d' % index, '# %s\n\n## Özet\n\nZirkon takvimi kredi özeti %d.\n\n## Kayıtlar\n\n%s\n\n'
+                        '## Amaç\n\nZirkon takvimi kredi planı: sınır %d.\n' % (name, index, filler, index),
+                        'notes/t%d.md' % index, title=name)
+        context = passage.context_for(self.store, 'claude', 'zirkon takvimi kredi planı', budget_chars=5000)
+        self.assertTrue(all('[…]' in r['text'] for r in context['records']))  # room for every second passage
+        primary = {r['id']: r['text'] for r in context.sources}
+        narrow = runtime.PackedContext(context)
+        narrow.sources = context.sources  # the same context without second passages
+        prefix = 'Receipt session=x\n'
+        for budget in (1200, 1800, 3000):
+            with self.subTest(budget=budget):
+                shown = json.loads(runtime.render_context(context, budget, prefix=prefix)[0][len(prefix):])['records']
+                alone = json.loads(runtime.render_context(narrow, budget, prefix=prefix)[0][len(prefix):])['records']
+                self.assertEqual([r['id'] for r in shown], [r['id'] for r in alone])
+                for record, without in zip(shown, alone):
+                    self.assertGreaterEqual(len(record['text']), len(without['text']))
+                    if not without.get('text_truncated') or without['text'] == primary[without['id']]:
+                        self.assertIn(primary[record['id']].split('\n\n', 1)[-1], record['text'])
+
     def test_excerpt_joins_overlapping_windows_and_marks_gaps(self):
         record = {'text': 'aaaa bbbb cccc dddd eeee'}
         span = lambda head, start, end: (record, head, start, end, '')
