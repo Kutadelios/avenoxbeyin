@@ -1354,9 +1354,11 @@ class PackedContext(dict):
 
     The attribute is never serialized (json sees a plain dict), so render_context can
     re-pack for the hook envelope from the originals instead of clipping a clip, and a
-    source dropped there returns its share to the better sources.
+    source dropped there returns its share to the better sources. `wider` holds the wider
+    version of a record (see pack_widened) that a later pack may use if its budget has room.
     """
     sources = ()
+    wider = {}
 
 
 def _clip_to(record, citation, room):
@@ -1447,6 +1449,33 @@ def pack_context(records, limit=5, budget_chars=8000, stale_count=0):
     return packed
 
 
+def pack_widened(records, wider, limit=5, budget_chars=8000, stale_count=0):
+    """pack_context, then each wholly delivered record may take its wider version (id -> record)
+    from the room every record left over, in rank order.
+
+    A wider version (a second passage of the same note) never cuts another record short: it is
+    used whole or not at all, and only once each record's own text fits. The result's sources
+    stay the narrow originals and .wider is kept, so every later pack (the advisor's, the final
+    envelope's) decides again at its own budget.
+    """
+    packed = pack_context(records, limit, budget_chars, stale_count)
+    widened, spare, chosen = False, budget_chars - packed["used_chars"], list(records)
+    whole = {r["id"] for r, s in zip(packed["records"], packed.sources) if r["text"] == s["text"]}
+    for position, record in enumerate(records):
+        broader = wider.get(record["id"])
+        if broader is None or record["id"] not in whole:
+            continue
+        extra = len(_json(broader)) - len(_json(record))
+        if extra <= spare:
+            chosen[position], spare, widened = broader, spare - extra, True
+    if widened:
+        packed = pack_context(chosen, limit, budget_chars, stale_count)
+    by_id = {r["id"]: r for r in records}
+    packed.sources = tuple(by_id[s["id"]] for s in packed.sources)
+    packed.wider = dict(wider)
+    return packed
+
+
 def shared_context(store, harness, query, **kwargs):
     """All supported harnesses call the same source-backed retrieval function."""
     if harness not in HARNESSES:
@@ -1500,13 +1529,15 @@ def render_context(context, budget_chars, prefix="", suffix=""):
     if len(sources) == len(records) and all(s["id"] == r["id"] for s, r in zip(sources, records)):
         records = list(sources)  # re-clip the envelope from the originals, not from a clip
     full = {r["id"]: r for r in records}
+    wider = getattr(context, "wider", {})
     records = [_delivery_view(r) for r in records]
+    wider_views = {key: _delivery_view(record) for key, record in wider.items()}
     extra = {k: v for k, v in context.items() if k not in
              {"records", "citations", "used_chars", "budget_chars", "omitted_count", "truncated", "abstained", "stale_count"}}
     available = max(0, budget_chars - len(prefix))
     payload_budget = available
     while True:
-        packed = pack_context(records, len(records), payload_budget, context.get("stale_count", 0))
+        packed = pack_widened(records, wider_views, len(records), payload_budget, context.get("stale_count", 0))
         packed["omitted_count"] += context.get("omitted_count", 0)
         packed["truncated"] = packed["truncated"] or bool(context.get("truncated"))
         packed.update(extra)
@@ -1518,6 +1549,7 @@ def render_context(context, budget_chars, prefix="", suffix=""):
                 dict(full[r["id"]], **{k: r[k] for k in ("text", "text_truncated") if k in r})
                 for r in packed["records"]])
             delivered.sources = tuple(full[s["id"]] for s in packed.sources)  # a re-render keeps identities
+            delivered.wider = dict(wider)
             return prefix + text + tail, delivered
         if payload_budget == 0:
             # A nonsensically small budget cannot carry even an empty envelope.
