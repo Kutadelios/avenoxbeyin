@@ -30,8 +30,9 @@ class JevEvidenceTest(EvidenceFixture):
         local = self.local(query)
         client.set_mode(self.store.state_dir, 'on', enable=['auto_context'])
         with patch.dict(os.environ, {'TYPESAFE_API_KEY': 'synthetic'}, clear=True), \
-                patch.object(client, '_transport', side_effect=AssertionError('sensitive input left the machine')):
+                patch.object(client, '_transport', side_effect=AssertionError('sensitive input left the machine')) as transport:
             result = jev.auto_context(self.store, 'claude', query, local, budget_chars=5000)
+        transport.assert_not_called()
         self.assertIs(result, local)
 
     def test_second_strict_passage_is_represented_on_card(self):
@@ -43,4 +44,3 @@ class JevEvidenceTest(EvidenceFixture):
         result = self.judge(query, local, marker)
         self.assertIn('Quartz rollback instructions.', self.calls[0]['state']['notes']['k0']['excerpt'])
         self.assertIn(marker, rt.render_context(result, 5000)[0])
-

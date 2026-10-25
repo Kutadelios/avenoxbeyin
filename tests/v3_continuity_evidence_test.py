@@ -63,4 +63,3 @@ class ContinuityEvidenceTest(EvidenceFixture):
         original['version'] = 1
         path.write_text(json.dumps(original), encoding='utf-8')
         self.assertFalse(continuity.resolve(self.store, 'claude', 'session', 'bunu detaylandır', rt.pack_context([]), budget_chars=3000, now=101)[1])
-

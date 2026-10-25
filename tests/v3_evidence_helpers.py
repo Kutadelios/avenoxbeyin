@@ -48,4 +48,3 @@ class EvidenceFixture(unittest.TestCase):
         for note in self.calls[-1]['state']['notes'].values():
             self.assertLessEqual(len(note['excerpt']), 600)
         return result
-
