@@ -1076,7 +1076,7 @@ class YakalaUnitTest(unittest.TestCase):
                 patch.object(yakala.sys, 'platform', 'darwin'), \
                 patch.object(yakala.os, 'getuid', return_value=501, create=True), \
                 patch.object(yakala, '_listener_ok', return_value=True), \
-                patch.object(yakala.subprocess, 'run'):
+                patch.object(yakala.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, b'', b'')):
             yakala.install(self.vault, state)
             import plistlib
             plist = plistlib.loads(agent.read_bytes())
@@ -1139,6 +1139,17 @@ class YakalaUnitTest(unittest.TestCase):
             yakala.install(self.vault, state)
         self.assertEqual(calls, [('bootout', True), ('bootstrap', True), ('print', True)])
         self.assertEqual(runner.read_bytes(), script.read_bytes())
+
+    def test_mac_bootstrap_retries_only_eio_without_final_sleep(self):
+        for code, attempts in ((5, 3), (1, 1), (64, 1)):
+            with self.subTest(code=code):
+                result = subprocess.CompletedProcess(['launchctl', 'bootstrap'], code, b'', b'failure')
+                with patch.object(yakala.subprocess, 'run', return_value=result) as run, patch('time.sleep') as sleep:
+                    with self.assertRaises(subprocess.CalledProcessError) as raised:
+                        yakala._bootstrap_with_retry('gui/501', Path('test.plist'), retries=3)
+                self.assertEqual(raised.exception.returncode, code)
+                self.assertEqual(run.call_count, attempts)
+                self.assertEqual(sleep.call_count, attempts - 1)
 
     def test_mac_install_retries_bootstrap_on_eio(self):
         state, agent = Path(self.tmp.name) / 'mac-state', Path(self.tmp.name) / 'agent.plist'

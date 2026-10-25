@@ -6743,17 +6743,14 @@ def _bootstrap_with_retry(domain, agent, retries=5, delay=0.2):
     EIO (5) until the previous job completely unbinds.
     """
     import time
-    last_proc = None
     for attempt in range(retries):
         proc = subprocess.run(['launchctl', 'bootstrap', domain, str(agent)], capture_output=True)
-        if not isinstance(getattr(proc, 'returncode', None), int) or proc.returncode == 0:
+        if proc.returncode == 0:
             return proc
-        last_proc = proc
+        if proc.returncode != 5 or attempt == retries - 1:
+            raise subprocess.CalledProcessError(proc.returncode, proc.args,
+                                                output=proc.stdout, stderr=proc.stderr)
         time.sleep(delay * (attempt + 1))
-    if last_proc is not None and isinstance(getattr(last_proc, 'returncode', None), int) and last_proc.returncode != 0:
-        raise subprocess.CalledProcessError(last_proc.returncode, last_proc.args,
-                                            output=getattr(last_proc, 'stdout', b''), stderr=getattr(last_proc, 'stderr', b''))
-    return last_proc
 
 
 def _launch_agent():
