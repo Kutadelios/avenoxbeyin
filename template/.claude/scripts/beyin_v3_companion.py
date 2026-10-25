@@ -729,11 +729,15 @@ def context(store, budget, session, harness, query='', receipt='', warning='', p
         # Rules and the handoff get a floor first: an even split leaves the two continuity
         # sources the same share as a one-line style note. The rest water-fills, so small
         # identity files still return their unused share to long histories.
-        lengths = [min(len(body), int(available * FLOORS.get(name, 0))) for _, body, name in parts]
+        # A floor belongs to a category, not each source: global and project rules
+        # share the rules floor. Repeating it can reserve more than available.
+        counts = {name: sum(item[2] == name for item in parts) for _, _, name in parts}
+        lengths = [min(len(body), int(available * FLOORS.get(name, 0) / counts[name]))
+                   for _, body, name in parts]
         spare = available - sum(lengths)
-        while spare and any(lengths[i] < len(item[1]) for i, item in enumerate(parts)):
+        while spare > 0 and any(lengths[i] < len(item[1]) for i, item in enumerate(parts)):
             for i, (_, body, _) in enumerate(parts):
-                if spare and lengths[i] < len(body):
+                if spare > 0 and lengths[i] < len(body):
                     lengths[i] += 1
                     spare -= 1
         return lengths
