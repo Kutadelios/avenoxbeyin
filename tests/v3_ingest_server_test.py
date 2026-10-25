@@ -333,6 +333,26 @@ class IngestServerTest(unittest.TestCase):
         self.assertEqual(len(closed), len(accepted))
         self.assertEqual(errors, [])
 
+    def test_invalid_unicode_json_returns_400_and_server_remains_healthy(self):
+        server = ingest_server.create_server(self.vault, port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(2)))
+        base = f'http://127.0.0.1:{server.server_address[1]}'
+        request = urllib.request.Request(base + '/ingest', data=b'{"text":"\\ud800"}',
+                                         headers={'Content-Type': 'application/json'})
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request)
+        error = raised.exception
+        try:
+            self.assertEqual(error.code, 400)
+            self.assertEqual(json.loads(error.read())['error'], 'bad_request')
+        finally:
+            error.close()
+        self.assertEqual(list(self.vault.rglob('*.md')), [])
+        with urllib.request.urlopen(base + '/health') as response:
+            self.assertEqual(response.status, 200)
+
     def test_allow_reuse_address_is_enabled(self):
         server = ingest_server.create_server(self.vault, port=0)
         self.assertTrue(server.allow_reuse_address)

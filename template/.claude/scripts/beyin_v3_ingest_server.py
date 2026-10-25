@@ -133,7 +133,7 @@ class IngestHandler(BaseHTTPRequestHandler):
     def handle(self):
         try:
             super().handle()
-        except (ConnectionError, socket.timeout, ValueError, UnicodeError):
+        except (ConnectionError, socket.timeout):
             pass
 
     def _send_json(self, status_code: int, data: dict):
@@ -268,14 +268,11 @@ def create_server(vault: Path, host: str = "127.0.0.1", port: int = 8484, token:
     class BoundHandler(IngestHandler):
         pass
 
-    class ResilientServer(ThreadingHTTPServer):
-        allow_reuse_address = True
-
     BoundHandler.vault = Path(vault).resolve()
     BoundHandler.token = token
     if host not in ("127.0.0.1", "localhost", "::1") and not token:
         raise ValueError("Non-loopback ingest requires a Bearer token")
-    return ResilientServer((host, port), BoundHandler)
+    return ThreadingHTTPServer((host, port), BoundHandler)
 
 
 def run_server(vault: Path, host: str = "127.0.0.1", port: int = 8484, token: str | None = None):
