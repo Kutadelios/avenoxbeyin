@@ -145,10 +145,14 @@ def _marker(folder, harness, session, now):
 
 def hint(state, harness, payload):
     """Only called on UserPromptSubmit. Fail open; never return a Stop decision."""
-    if not settings(state)['enabled'] or not human_turn(harness, payload):
+    if not settings(state)['enabled']:
         return ''
     from beyin_v3_hook import _get_session_receipt, prompt_text
     from beyin_v3_sync import atomic
+    suppress = '[kaydetme]' in prompt_text(payload).casefold()
+    # Explicit refusal must survive even when the origin is ineligible for hints.
+    if not suppress and not human_turn(harness, payload):
+        return ''
     raw_session = payload.get('session_id')
     if not isinstance(raw_session, str) or raw_session in ('', 'unknown') or len(raw_session) > 512:
         return ''
@@ -159,7 +163,7 @@ def hint(state, harness, payload):
             path, value = _marker(folder, harness, session, now)
             if value['suppressed']:
                 return ''
-            if '[kaydetme]' in prompt_text(payload).casefold():
+            if suppress:
                 value['suppressed'] = True
                 atomic(path, json.dumps(value))
                 return ''

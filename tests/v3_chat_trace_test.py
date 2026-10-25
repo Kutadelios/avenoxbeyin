@@ -81,6 +81,22 @@ class TraceTest(unittest.TestCase):
         self.assertEqual(self.hint(1, prompt=''), '')
         self.assertFalse((self.state / self.trace.SESSIONS).exists())
 
+    def test_explicit_opt_out_survives_silent_origin_and_origin_change(self):
+        self.enable()
+        for entry in ('cli', 'sdk-cli', ''):
+            with self.subTest(entry=entry):
+                raw = 'silent-' + entry
+                session = hashlib.sha256(raw.encode()).hexdigest()[:24]
+                payload = self.payload(1, session_id=raw, prompt='Bu konuşma [kaydetme]')
+                with patch.dict(os.environ, {'CLAUDE_CODE_ENTRYPOINT': entry}):
+                    self.assertEqual(self.trace.hint(self.state, 'claude', payload), '')
+                with self.assertRaisesRegex(ValueError, 'suppressed'):
+                    self.trace.write(self.vault, self.state, 'claude', session, 'Sentetik özet')
+                for turn in range(2, 5):
+                    self.assertEqual(self.trace.hint(self.state, 'claude',
+                        self.payload(turn, session_id=raw)), '')
+        self.assertEqual(list(self.vault.iterdir()), [])
+
     def test_codex_reads_only_matching_first_metadata_record(self):
         self.enable()
         log = self.root / 'synthetic-rollout.jsonl'
