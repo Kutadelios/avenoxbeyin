@@ -453,5 +453,15 @@ class InstructionBlockTest(unittest.TestCase):
         router = (ROOT / 'template/CLAUDE.md').read_text(encoding='utf-8')
         self.assertIn('var olan insan notlarını `note-read` ile oku, `note-edit` ile düzenle', router)
 
+    def test_closing_protocol_indexes_concepts_before_final_receipt(self):
+        self.seed('CLAUDE.md', CLAUDE)
+        self.install()
+        texts = [self.block(name) for name in ('AGENTS.md', 'CLAUDE.md')]
+        texts.append((ROOT / 'template/CLAUDE.md').read_text(encoding='utf-8'))
+        for text in texts:
+            self.assertIn('Kavram yazınca `knowledge/index.md` kaydını tek satırla güncelle', text)
+            self.assertIn('gerçek ilişki varsa `knowledge/connections/`', text)
+            self.assertIn('receipt en son, kart ve Threads düzenlemelerinden sonra', text)
+
 if __name__ == '__main__':
     unittest.main()
