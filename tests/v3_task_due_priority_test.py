@@ -126,6 +126,33 @@ class TaskDuePriorityTest(unittest.TestCase):
         res_explicit = self.store.retrieve('special unique query keyword', statuses=['done'])
         self.assertEqual([r['id'] for r in res_explicit['records']], ['task-finished'])
 
+    def test_external_project_context_includes_due_inbox_task(self):
+        import beyin_v3_bridge as bridge
+        self.record('inbox', source='tasks/inbox.md', title='Inbox migration',
+                    kind='task', status='inbox', due_at='2020-01-01', project='Quartz')
+        result = bridge.project_context(self.vault, self.state, 'quartz-id', 'Quartz')
+        self.assertIn('Inbox migration', result)
+
+    def test_due_snapshot_does_not_revive_superseded_task(self):
+        self.record('old', source='tasks/old.md', kind='task', due_at='2020-01-01')
+        self.record('replacement', supersedes=['old'], visibility='private')
+        result = self.store.due_tasks_context()
+        self.assertEqual(result['records'], [])
+
+    def test_passage_context_prioritizes_due_and_open_tasks(self):
+        self.record('a-due', source='tasks/due.md', kind='task', due_at='2020-01-01',
+                    text='database migration instructions', updated_at='2026-01-01')
+        self.record('z-future', source='tasks/future.md', kind='task', due_at='2099-01-01',
+                    text='database migration instructions', updated_at='2026-10-01')
+        self.record('zz-done', source='tasks/done.md', kind='task', status='done',
+                    text='database migration instructions', updated_at='2026-10-02')
+        from beyin_v3_passage import context_for
+        # Direct call proves the passage path, rather than the silent fallback.
+        result = context_for(self.store, 'claude', 'database migration', limit=3)
+        self.assertEqual([r['id'] for r in result['records']], ['a-due', 'z-future', 'zz-done'])
+        result = context_for(self.store, 'claude', 'database migration', statuses=['done'])
+        self.assertEqual([r['id'] for r in result['records']], ['zz-done'])
+
     def test_companion_context_preserves_due_tasks_when_companion_clipped(self):
         today = '2026-10-21'
         companion_dir = self.vault / '🔮 850-Companion'

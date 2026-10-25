@@ -993,12 +993,11 @@ class MemoryStore:
 
     def due_tasks_context(self, audience="internal", budget_chars=1500, limit=5, project=None, today=None):
         """Bounded due task snapshot when ambient snapshot is skipped."""
-        with self._connect() as db:
-            rows = db.execute("SELECT payload FROM records WHERE payload LIKE '%\"due_at\"%' ORDER BY id")
-            records = [json.loads(row[0]) for row in rows]
+        records = self._records()
+        superseded = self._superseded_ids(records)
         eligible, stale_count = self._eligible(audience=audience, project=project, records=records)
         today_iso = str(today)[:10] if today else date.today().isoformat()
-        due_records = [r for r in eligible if is_due_task(r, today_iso)]
+        due_records = [r for r in eligible if r["id"] not in superseded and is_due_task(r, today_iso)]
         due_records.sort(key=lambda r: (str(r.get("due_at", ""))[:10], r.get("id", "")))
         return pack_context(due_records, limit, budget_chars, stale_count)
 
