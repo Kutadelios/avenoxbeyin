@@ -211,7 +211,8 @@ def has_candidates(state: Path, session: str | None = None, scope: str | None = 
     return len(list_candidates(state, session=session, status=status, scope=scope, since=since)) > 0
 
 
-def resolve_candidates(state: Path, session: str | None = None, target_status: str = "distilled") -> int:
+def resolve_candidates(state: Path, session: str | None = None, target_status: str = "distilled",
+                       sources: list[str] | None = None) -> int:
     """Mark all candidates of a session (or all sessions if session is None) as distilled or discarded."""
     ledger = Path(state) / LEARNING_STATE_FILE
     if not ledger.is_file():
@@ -219,6 +220,7 @@ def resolve_candidates(state: Path, session: str | None = None, target_status: s
     records = []
     count = 0
     target_session = _normalize_session(session) if session else None
+    source_keys = {_source_key(source) for source in sources} if sources is not None else None
     try:
         with _ledger_lock(ledger.parent):
             with open(ledger, "r", encoding="utf-8") as f:
@@ -229,7 +231,9 @@ def resolve_candidates(state: Path, session: str | None = None, target_status: s
                     try:
                         item = json.loads(line)
                         if item.get("status") == "candidate":
-                            matches = (target_session is None) or (item.get("session") in (target_session, "cli"))
+                            matches = (target_session is None) or (item.get("session") == target_session)
+                            if source_keys is not None:
+                                matches = matches and _source_key(item.get("source", "")) in source_keys
                             if matches:
                                 item["status"] = target_status
                                 item["resolved_at"] = datetime.now(timezone.utc).isoformat()

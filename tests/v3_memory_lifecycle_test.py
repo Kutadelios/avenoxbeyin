@@ -49,7 +49,7 @@ class MemoryLifecycleDoDTest(unittest.TestCase):
 
         # Stage candidates for session A and session B
         learning.stage_candidate(self.state, session_a, "Candidate A1", source="notes/a1.md")
-        learning.stage_candidate(self.state, session_a, "Candidate A2", source="notes/a2.md")
+        learning.stage_candidate(self.state, session_a, "Candidate A2", source="notes/a1.md")
         learning.stage_candidate(self.state, session_b, "Candidate B1", source="notes/b1.md")
 
         self.assertEqual(len(learning.list_candidates(self.state, session=session_a)), 2)
@@ -79,6 +79,19 @@ class MemoryLifecycleDoDTest(unittest.TestCase):
         self.assertTrue(learning.has_candidates(self.state, session=session_b))
         active_b = learning.list_candidates(self.state, session=session_b, status="candidate")
         self.assertEqual(len(active_b), 1)
+
+    def test_receipt_leaves_unrelated_and_later_candidates_pending(self):
+        (self.vault / 'notes/a.md').write_text('# A\n', encoding='utf-8')
+        learning.stage_candidate(self.state, 'cli', 'Unscoped candidate', source='notes/a.md')
+        learning.stage_candidate(self.state, 'session-a', 'Unreferenced candidate', source='notes/b.md')
+        learning.stage_candidate(self.state, 'session-a', 'Referenced candidate', source='notes/a.md')
+        result = self.engine.receipt('scoped-event', 'Saved A', ['notes/a.md'], 'claude', session='session-a')
+        self.assertEqual(result.get('candidates_resolved'), 1)
+        pending = learning.list_candidates(self.state)
+        self.assertEqual({p['candidate'] for p in pending}, {'Unscoped candidate', 'Unreferenced candidate'})
+        learning.stage_candidate(self.state, 'session-a', 'Later candidate', source='notes/a.md')
+        self.engine.receipt('scoped-event', 'Saved A', ['notes/a.md'], 'claude', session='session-a')
+        self.assertIn('Later candidate', {p['candidate'] for p in learning.list_candidates(self.state)})
 
     def test_cli_learn_resolve_command(self):
         session = "session-cli-resolve"
@@ -139,8 +152,8 @@ class MemoryLifecycleDoDTest(unittest.TestCase):
         self.assertEqual(len(discarded), 2)
 
     def test_receipt_resolves_candidates_from_environment_session(self):
-        env_sess = "session-env-auto-1234"
-        learning.stage_candidate(self.state, env_sess, "Env session candidate")
+        env_sess = "123e4567-e89b-12d3-a456-426614174000"
+        learning.stage_candidate(self.state, env_sess, "Env session candidate", source="notes/env-ref.md")
         self.assertEqual(len(learning.list_candidates(self.state, session=env_sess)), 1)
 
         (self.vault / 'notes' / 'env-ref.md').write_text('# Env test\n', encoding='utf-8')
@@ -156,6 +169,10 @@ class MemoryLifecycleDoDTest(unittest.TestCase):
         res_json = json.loads(res_cli.stdout)
         self.assertEqual(res_json.get("status"), "succeeded")
         self.assertEqual(res_json.get("candidates_resolved"), 1)
+
+        receipt_text = next((self.vault / 'receipts').glob('*.md')).read_text(encoding='utf-8')
+        self.assertIn(hashlib.sha256(env_sess.encode()).hexdigest()[:24], receipt_text)
+        self.assertNotIn(env_sess, receipt_text)
 
         # Candidate must now be distilled
         self.assertFalse(learning.has_candidates(self.state, session=env_sess))

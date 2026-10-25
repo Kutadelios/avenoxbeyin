@@ -1722,13 +1722,13 @@ def main(argv=None, return_result=False):
                 if args.session is not None:
                     payload["session"] = args.session
                 elif os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BEYIN_V3_SESSION_ID"):
-                    payload["session"] = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BEYIN_V3_SESSION_ID")
+                    payload["session"] = hashlib.sha256((os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BEYIN_V3_SESSION_ID")).encode("utf-8")).hexdigest()[:24]
                 if args.link:
                     payload["links"] = args.link
             else:
                 payload = read_json(args.file if args.file is not None else "-")
                 if "session" not in payload and (os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BEYIN_V3_SESSION_ID")):
-                    payload["session"] = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BEYIN_V3_SESSION_ID")
+                    payload["session"] = hashlib.sha256((os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BEYIN_V3_SESSION_ID")).encode("utf-8")).hexdigest()[:24]
             result = sync.receipt(payload["event_id"], payload["summary"],
                                           payload["refs"], args.harness, session=payload.get('session'),
                                           links=payload.get('links'))
@@ -1748,7 +1748,9 @@ def main(argv=None, return_result=False):
         elif args.command == "learn":
             _ensure_scripts_path()
             from beyin_v3_learning import stage_candidate, list_candidates, resolve_candidates
-            sess = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BEYIN_V3_SESSION_ID") or "cli"
+            env_session = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BEYIN_V3_SESSION_ID")
+            sess = args.session or (hashlib.sha256(env_session.encode("utf-8")).hexdigest()[:24]
+                                    if env_session else "cli")
             if getattr(args, "all", False):
                 target_sess = None
             else:
