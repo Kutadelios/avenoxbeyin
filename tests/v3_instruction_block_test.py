@@ -22,9 +22,9 @@ TURKISH = ('Kullanıcının doğrudan söylediği tercih, karar ve olgu çıkar�
            'istenmesini beklemeden kaydedilir.')
 # #375: "record it promptly" is about timing; the target of a correction is chosen first.
 SCOPE_ENGLISH = ('Promptly is about timing, not target: a correction that belongs to one project or area goes to '
-                 '`projects/<project>/Kurallar.md`, leaving at most a one-line pointer in Kurallar.md.')
+                 '`Kurallar.md` in the existing project folder (`🏰 300-Projects/<project>/` in the official template, or legacy `projects/<project>/`; do not create a second folder for the same project), leaving at most a one-line pointer in Kurallar.md.')
 SCOPE_TURKISH = ('Beklemeden kaydetmek hedefi değiştirmez: tek bir projeye ya da alana ait düzeltme '
-                 '`projects/<proje>/Kurallar.md` dosyasına gider, Kurallar.md\'de en çok bir satırlık işaretçi kalır; '
+                 '`mevcut-proje-klasörü/Kurallar.md` (resmî şablonda `🏰 300-Projects/<proje>/Kurallar.md`, eski kasalarda `projects/<proje>/Kurallar.md`; aynı proje için ikinci klasör açma) dosyasına gider, Kurallar.md\'de en çok bir satırlık işaretçi kalır; '
                  'yalnız her işte geçerli kural Kurallar.md\'ye tam metin girer.')
 CLAUSES = (ENGLISH, TURKISH, SCOPE_ENGLISH, SCOPE_TURKISH)
 NOTE = '\nKullanıcının kendi notu: bu paragraf blok dışında ve korunmalı.\n'
@@ -170,7 +170,7 @@ class InstructionBlockTest(unittest.TestCase):
         import beyin_v3_companion as companion
         skill = ' '.join((ROOT / 'template/.agents/skills/beyin/SKILL.md').read_text(encoding='utf-8').split())
         self.assertIn('ama önce hedefini seç', skill)
-        self.assertIn('`projects/<proje>/Kurallar.md` dosyasına yaz', skill)
+        self.assertIn('`mevcut-proje-klasörü/Kurallar.md` (resmî şablonda `🏰 300-Projects/<proje>/Kurallar.md`, eski kasalarda `projects/<proje>/Kurallar.md`; aynı proje için ikinci klasör açma) dosyasına yaz', skill)
         # Documented only as the hook implements it: the folders it scans, and that the filter
         # needs a client that sends the active project, which Claude Code does not (#288).
         source = (ROOT / 'template/.claude/scripts/beyin_v3_companion.py').read_text(encoding='utf-8')

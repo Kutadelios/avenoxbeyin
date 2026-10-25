@@ -326,7 +326,7 @@ def candidate_project_folders(vault_root=None) -> list[str]:
                         name = entry.name
                         lower = name.lower()
                         if (
-                            name.endswith(('-Projects', '-Projeler', '_Projects', '_Projeler')) or
+                            lower.endswith(('-projects', '-projeler', '_projects', '_projeler')) or
                             lower in ('projects', 'projeler')
                         ):
                             add(name)
