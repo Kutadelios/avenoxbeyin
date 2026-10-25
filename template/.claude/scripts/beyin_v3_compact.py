@@ -11,7 +11,7 @@ Decision lines (`**Karar:**`, `**Karar (Ad):**`, `**Decision:**`) in the moved t
 copied, verbatim and once each, to Kararlar.md beside the companion files with the heading of
 the card they came from, so a decision stays in plain sight after its card is archived.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from datetime import datetime, timezone
 import errno
 import os
@@ -23,6 +23,7 @@ import time
 import unicodedata
 
 from beyin_v3_companion import LIMITS, directory, read_limits
+from beyin_v3_notes import NoteConflict, vault_locked
 
 LINE = re.compile(r'[^\n]*\n|[^\n]+$')
 HEADING = re.compile(r'(#{1,6})[ \t]')
@@ -445,13 +446,23 @@ def compact(vault, state, dry_run=False, now=None):
     if not target.is_dir():
         return {'status': 'within_limit', 'directory': target.relative_to(vault).as_posix(), 'files': {},
                 'dry_run': False, 'limits_file': 'ok', 'deleted_chars': 0, 'model_calls': False}
-    try:
-        with _compact_lock(target):
-            return _compact_files(vault, target, configured, dry_run=False, now=now)
-    except TimeoutError as exc:
-        return {'status': 'conflict', 'reason': str(exc), 'files': {}}
-    except _LockError as exc:
-        return {'status': 'needs_attention', 'reason': str(exc), 'files': {}}
+    with ExitStack() as guard:
+        # Plan reads, archive append, decision ledger and live replacement are one
+        # critical section shared with note-edit/create and note journal recovery.
+        # Retain the inner lock for compatibility with already-running compactors.
+        try:
+            guard.enter_context(vault_locked(vault))
+        except NoteConflict as exc:
+            return {'status': 'conflict', 'reason': str(exc), 'files': {}}
+        except (OSError, ValueError) as exc:
+            return {'status': 'needs_attention', 'reason': 'cannot acquire note lock: ' + str(exc), 'files': {}}
+        try:
+            with _compact_lock(target):
+                return _compact_files(vault, target, configured, dry_run=False, now=now)
+        except TimeoutError as exc:
+            return {'status': 'conflict', 'reason': str(exc), 'files': {}}
+        except _LockError as exc:
+            return {'status': 'needs_attention', 'reason': str(exc), 'files': {}}
 
 
 def _compact_files(vault, target, configured, dry_run=False, now=None):
