@@ -173,6 +173,7 @@ def locked(engine, timeout=15):
     _unlinked(lock)
     deadline = time.monotonic() + timeout
     while True:
+        _unlinked(lock)
         with lock.open('a+b') as handle:
             # Windows can lock byte zero beyond EOF. Do not write a sentinel before
             # acquisition: another handle may already own that byte of an empty file.
@@ -196,6 +197,7 @@ def locked(engine, timeout=15):
             stale = False
             try:
                 st1 = os.fstat(handle.fileno())
+                _unlinked(lock)
                 st2 = os.stat(lock)
                 if st1.st_dev != st2.st_dev or st1.st_ino != st2.st_ino:
                     stale = True
