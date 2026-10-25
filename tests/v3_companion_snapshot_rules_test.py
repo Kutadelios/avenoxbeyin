@@ -132,14 +132,15 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(rules['chars'], len(rules_file(45600)[0]))
         share = rules['share']
         self.assertEqual(companion.rules_opening(self.store, 5000), rules)
-        # A rule file of exactly that size arrives whole; one character more is clipped.
+        # A rule file of exactly that size arrives whole. With priority allocation a
+        # shorter rule set can reclaim optional detail, so share is no fixed ceiling.
         whole, _ = rules_file(share, exact=True)
         self.assertEqual(len(whole), share)
         self.write('Kurallar.md', whole)
         self.assertFalse(companion.rules_opening(self.store, 5000)['clipped'])
         shown = section(companion.context(self.store, 5000, '0' * 24, 'claude'), 'Kurallar.md')
         self.assertEqual(shown, whole)
-        self.write('Kurallar.md', rules_file(share + 1, exact=True)[0])
+        self.write('Kurallar.md', rules_file(5000, exact=True)[0])
         self.assertTrue(companion.rules_opening(self.store, 5000)['clipped'])
 
 
