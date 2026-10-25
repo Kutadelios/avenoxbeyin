@@ -466,34 +466,28 @@ def context_for(store, harness, query, project=None, audience="internal", status
     terms = _strict_terms(_tokens(query) - ignored)
     if not terms:
         return pack_context([], limit, budget_chars, stale_count)
-    records, wider = [], {}
+    from beyin_v3_evidence import reference
+    records, wider, evidence = [], {}, {}
     for _rank, first, second in search(index, terms, limit, config["floor"], ignored=ignored, with_runner_up=True):
         record = first[0]
         # Only text and text_truncated change, so advisor signatures still match the index.
         records.append(dict(record, text=_excerpt(record, [first]), text_truncated=_partial(record, [first])))
+        evidence[record['id']] = reference(record, [(first[1], first[2], first[3])], 'strict')
         if second is not None:
             # A second passage may answer what the first one only names; it only takes room the
             # first passages of every source left over (pack_widened), at each later pack too.
             wider[record["id"]] = dict(record, text=_excerpt(record, [first, second]),
                                        text_truncated=_partial(record, [first, second]))
-    return pack_widened(records, wider, limit, budget_chars, stale_count)
+            evidence[record['id']]['variants'] += reference(record, [(p[1], p[2], p[3]) for p in (first, second)], 'strict')['variants']
+    packed = pack_widened(records, wider, limit, budget_chars, stale_count)
+    packed.evidence = {r['id']: evidence[r['id']] for r in packed['records']}
+    return packed
 
 
 def _excerpt(record, passages):
     """The passages of one record in note order, each under its heading, a gap marked between."""
-    parts, last_head, last_end = [], None, None
-    for _record, head, start, end, _tokens_ in sorted(passages, key=lambda p: p[2]):
-        if last_end is not None and start <= last_end:  # overlapping windows read as one span
-            parts[-1] += record["text"][last_end:max(end, last_end)]
-            last_end = max(end, last_end)
-            continue
-        if last_end is not None and record["text"][last_end:start].strip():
-            parts.append("[…]")
-        if head and head != last_head:
-            parts.append(head)
-        parts.append(record["text"][start:end])
-        last_head, last_end = head, end
-    return "\n\n".join(part for part in parts if part)
+    from beyin_v3_evidence import render_spans
+    return render_spans(record, [(p[1], p[2], p[3]) for p in passages])[0]
 
 
 def _partial(record, passages):

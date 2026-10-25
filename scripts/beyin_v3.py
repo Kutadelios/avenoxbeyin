@@ -317,9 +317,9 @@ def load_sync():
 JEV_FEATURES = ("context", "review", "answer", "auto_context")
 JEV_PROVIDERS = ("typesafe", "vercel", "laya")
 LAYA_MODELS = ("multilingual", "english")
-JEV_NOTICE = ("auto_context is on: every turn sends the prompt plus the title and first 600 characters of up to 8 "
+JEV_NOTICE = ("auto_context is on: every turn sends the prompt plus the title and up to 600 query-selected passage characters from each of up to 8 "
               "candidate internal/public notes to the provider. Private notes are never sent.")
-JEV_NOTICE_LAYA = ("auto_context is on: every turn sends the prompt plus the title and first 600 characters of up to 8 "
+JEV_NOTICE_LAYA = ("auto_context is on: every turn sends the prompt plus the title and up to 600 query-selected passage characters from each of up to 8 "
                    "candidate internal/public notes to the local Laya server, one request per note. Private notes are never sent. "
                    "Laya is shadow-only: its scores are only logged and never change the context.")
 JEV_WARNING = "TYPESAFE_API_KEY is not set; calls degrade to local results."

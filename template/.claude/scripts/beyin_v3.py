@@ -1502,6 +1502,7 @@ class PackedContext(dict):
     """
     sources = ()
     wider = {}
+    evidence = {}
 
 
 def _clip_to(record, citation, room):
@@ -1693,6 +1694,8 @@ def render_context(context, budget_chars, prefix="", suffix=""):
                 for r in packed["records"]])
             delivered.sources = tuple(full[s["id"]] for s in packed.sources)  # a re-render keeps identities
             delivered.wider = dict(wider)
+            delivered.evidence = {r['id']: getattr(context, 'evidence', {})[r['id']]
+                                  for r in delivered['records'] if r['id'] in getattr(context, 'evidence', {})}
             return prefix + text + tail, delivered
         if payload_budget == 0:
             # A nonsensically small budget cannot carry even an empty envelope.

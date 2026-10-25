@@ -249,6 +249,18 @@ def auto_context(store, harness, query, context, *, budget_chars, timeout_cap=2.
     remaining_slots = max(0, AUTO_POOL - len(evaluated_strict))
     evaluated_loose = loose_remote[:remaining_slots]
 
+    from beyin_v3_evidence import loose_passages, card_excerpt
+    wider = dict(getattr(context, 'wider', {}))
+    evidence = dict(getattr(context, 'evidence', {}))
+    selected_loose = []
+    for record in evaluated_loose:
+        narrow, broad, ref = loose_passages(record, query, project)
+        selected_loose.append(narrow)
+        evidence[record['id']] = ref
+        if broad is not None:
+            wider[record['id']] = broad
+    evaluated_loose = selected_loose
+
     remote_pool = evaluated_strict + evaluated_loose
     records = list(remote_pool)
     # Overflow or local-only strict records remain eligible locally without consuming remote slots.
@@ -259,7 +271,8 @@ def auto_context(store, harness, query, context, *, budget_chars, timeout_cap=2.
     if not keys:
         return context
     before = _signature(records)
-    cards = [dict(id=k, title=str(r.get('title', ''))[:160], excerpt=r['text'][:AUTO_EXCERPT],
+    cards = [dict(id=k, title=str(r.get('title', ''))[:160],
+                  excerpt=card_excerpt(query, r, wider.get(r['id']), evidence.get(r['id']), AUTO_EXCERPT),
                   project=str(r.get('project') or ''), status=str(r.get('status') or ''),
                   updated_at=str(r.get('updated_at') or '')) for k, r in keys.items()]
     sent_strict = sum(1 for r in keys.values() if r['id'] in known)
@@ -302,11 +315,12 @@ def auto_context(store, harness, query, context, *, budget_chars, timeout_cap=2.
     ranked_remote = sorted([r for r in keep if remote_allowed(r)],
                            key=lambda r: (-by_record.get(r['id'], 0), r['id']))
     ranked_local = [r for r in keep if not remote_allowed(r) and r['id'] in known]
-    packed = pack_widened(_interleave([ranked_remote, ranked_local]), getattr(context, 'wider', {}), AUTO_LIMIT, budget_chars)
+    packed = pack_widened(_interleave([ranked_remote, ranked_local]), wider, AUTO_LIMIT, budget_chars)
     selected_ids = {r['id'] for r in packed['records']}
     # Report delivered membership changes, not pre-budget model intentions.
     result = PackedContext(context, **packed)
     result.sources, result.wider = packed.sources, packed.wider  # the final envelope repacks from these
+    result.evidence = {ident: evidence[ident] for ident in selected_ids if ident in evidence}
     result['jev'] = dict(dropped=len(known - selected_ids), added=len(selected_ids - known))
     return result
 
