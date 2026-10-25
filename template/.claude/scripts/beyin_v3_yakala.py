@@ -8090,6 +8090,11 @@ def enqueue_agent(vault, state, card_id, request, delivery_id=None):
     if delivery_id is not None and not re.fullmatch(r'[a-f0-9]{32}', delivery_id):
         raise ValueError('Gecersiz teslim kimligi.')
     with _AgentFileLock(_agent_root(state) / 'queue.lock'):
+        config = agent_settings(vault, state)  # the off switch may have changed while waiting
+        if config['client'] == 'kapali':
+            raise ValueError('Ajan kapali; kart yalniz kaydedildi.')
+        with _WindowsCommitLock(vault):
+            card_id = find_card(vault, card_id, state)['id']  # KART_ID.md and KART_ID share one owner
         jobs = _agent_jobs(vault, state)
         if delivery_id:
             old = next((job for job in jobs if job.get('delivery_id') == delivery_id), None)
