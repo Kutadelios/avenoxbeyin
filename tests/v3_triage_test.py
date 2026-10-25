@@ -52,6 +52,21 @@ class TriageTest(unittest.TestCase):
         t = self.now - (days * 86400)
         os.utime(path, (t, t))
 
+    def test_yakala_recommendation_requires_skill_file(self):
+        inbox = self.vault / 'inbox'
+        inbox.mkdir()
+        (inbox / 'pending.md').write_text('# Pending\n', encoding='utf-8')
+        skill = self.vault / '.agents/skills/beyin-yakala'
+        skill.mkdir(parents=True)
+        report = triage_module.scan_inbox(self.vault, self.now, self.state)
+        self.assertFalse(report['has_yakala'])
+        recs = triage_module.generate_recommendations({'count': 1}, {}, {'digest_days': 7}, {}, vault=self.vault)
+        self.assertNotIn('beyin-yakala', ' '.join(recs))
+        (skill / 'SKILL.md').write_text('# Yakala\n', encoding='utf-8')
+        self.assertTrue(triage_module.scan_inbox(self.vault, self.now, self.state)['has_yakala'])
+        recs = triage_module.generate_recommendations({'count': 1}, {}, {'digest_days': 7}, {}, vault=self.vault)
+        self.assertIn('beyin-yakala', ' '.join(recs))
+
     def test_nested_sensitive_private_and_excluded_notes_are_not_reported(self):
         for folder in ('tasks', 'knowledge'):
             for suffix, front in (('Şifreler/hidden.md', ''), ('visible/private.md', 'visibility: private\n'), ('vendor/hidden.md', '')):

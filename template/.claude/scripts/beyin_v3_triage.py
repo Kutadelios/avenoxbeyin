@@ -260,7 +260,7 @@ def scan_inbox(vault: Path, now: float, state: Path | None = None) -> dict:
                 if oldest_days is None or od > oldest_days:
                     oldest_days = od
 
-        has_yakala = any((vault / p).exists() for p in ('.agents/skills/beyin-yakala', '.claude/skills/beyin-yakala', '.kiro/skills/beyin-yakala'))
+        has_yakala = any((vault / p / 'SKILL.md').is_file() for p in ('.agents/skills/beyin-yakala', '.claude/skills/beyin-yakala', '.kiro/skills/beyin-yakala'))
         return {
             'count': total_notes,
             'oldest_days': oldest_days,
@@ -651,7 +651,7 @@ def generate_recommendations(inbox: dict, tasks: dict, digest: dict, companion: 
         if not yakala_ready and vault is not None:
             try:
                 v = Path(vault)
-                yakala_ready = any((v / p).exists() for p in ('.agents/skills/beyin-yakala', '.claude/skills/beyin-yakala', '.kiro/skills/beyin-yakala'))
+                yakala_ready = any((v / p / 'SKILL.md').is_file() for p in ('.agents/skills/beyin-yakala', '.claude/skills/beyin-yakala', '.kiro/skills/beyin-yakala'))
             except OSError:
                 yakala_ready = False
         if yakala_ready:
