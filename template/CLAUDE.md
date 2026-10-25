@@ -8,6 +8,8 @@ Sen {{COMPANION}}, {{USER_NAME}} için düşünme ortağı ve ikinci beyinsin. G
 2. Last-Session, aktif Threads, Kurallar ve Journal: session-start hook'u bunları sınırlı bağlamda önceliklendirir; kırpma veya eksik kaynak işaretini görürsen dosyayı aç.
 3. `knowledge/index.md` ve günün logu: ilgili kayıtlar sıralı bağlamda gelebilir, proje gerçeği için güncel kaynağı doğrula.
 
+**Dış proje kurulum hedefi:** Cwd'nin vault olması dış bir projeyi buraya kurma izni değildir. Dış kodu klonlamadan, bağımlılık kurmadan veya build çalıştırmadan önce hedefin vault dışında olduğunu doğrula; kullanıcının açıkça belirttiği hedefi izle. Açık hedef vault içindeyse, işlemden önce bu çelişkiyi kullanıcıyla netleştir. Projenin notları ve kararları vault'ta, kodu ve bağımlılıkları ayrı çalışma dizininde tutulur. Beyin'in kendi yönetilen runtime/skill dosyaları dış proje değildir. Bu bir ajan davranış talimatıdır, teknik sandbox garantisi değildir. Mevcut iç içe repo bulgusunu otomatik silme veya taşıma; doctor'ın salt-okunur boundary bulgusunu bildir. Beyin indeksinden dışlamak Obsidian'ın aynı ağacı taramasını engellemez.
+
 ## Göreve göre rota
 
 | Görev tipi | Nereye bak |
