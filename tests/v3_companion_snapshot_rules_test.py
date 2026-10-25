@@ -131,7 +131,7 @@ class SnapshotTest(unittest.TestCase):
         self.assertTrue(rules['clipped'])
         self.assertEqual(rules['chars'], len(rules_file(45600)[0]))
         share = rules['share']
-        self.assertIn(f'Memory hygiene: Kurallar.md opens clipped (share {share} of {rules["chars"]} chars).', text)
+        self.assertIn(f'Memory hygiene: Kurallar.md opens clipped (fit ceiling {share} of {rules["chars"]} chars).', text)
         self.assertEqual(companion.rules_opening(self.store, 5000), rules)
         # A rule file of exactly that size arrives whole; one character more is clipped.
         whole, _ = rules_file(share, exact=True)
@@ -188,7 +188,7 @@ class InstalledOpeningTest(unittest.TestCase):
         self.rules(text)
         context = self.session_start()
         self.assertLessEqual(len(context.encode('utf-16-le')) // 2, 10000)
-        self.assertIn('Memory hygiene: Kurallar.md opens clipped (share ', context)
+        self.assertIn('Memory hygiene: Kurallar.md opens clipped (fit ceiling ', context)
         shown = section(context, 'Kurallar.md')
         self.assertTrue(shown.startswith(HEAD), shown[:160])
         marker = MARKER.search(shown)
@@ -210,7 +210,7 @@ class InstalledOpeningTest(unittest.TestCase):
         self.assertIn(f'Kurallar.md acilista kirpiliyor (bilgi): kural metni {report["chars"]} karakter; '
                       f'Claude Code acilisi bu ayarlarla (5000 karakter) en fazla {report["share"]} karakterini tam gosterir',
                       human)
-        self.assertIn(f'Memory hygiene: Kurallar.md opens clipped (share {report["share"]} of {report["chars"]} chars).',
+        self.assertIn(f'Memory hygiene: Kurallar.md opens clipped (fit ceiling {report["share"]} of {report["chars"]} chars).',
                       initial_context)
         # The number is the hook's own: a rule file of exactly that size arrives whole at SessionStart.
         whole, _ = rules_file(report['share'], exact=True)

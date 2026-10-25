@@ -1039,7 +1039,7 @@ class CompactionRaceTest(unittest.TestCase):
         notice_rules = companion_module.hygiene_notice(None, rules=rules_clipped)
         self.assertEqual(
             notice_rules,
-            'Memory hygiene: Kurallar.md opens clipped (share 3496 of 10303 chars). '
+            'Memory hygiene: Kurallar.md opens clipped (fit ceiling 3496 of 10303 chars). '
             'Shorten each rule to one line and move reasons to a detail note; '
             'move project rules to projects/<proje>/Kurallar.md.\n'
         )
@@ -1047,7 +1047,7 @@ class CompactionRaceTest(unittest.TestCase):
         notice_both = companion_module.hygiene_notice(report, rules=rules_clipped)
         self.assertIn('Memory hygiene: Last-Session.md is', notice_both)
         self.assertIn('companion-compact', notice_both)
-        self.assertIn('Memory hygiene: Kurallar.md opens clipped (share 3496 of 10303 chars).', notice_both)
+        self.assertIn('Memory hygiene: Kurallar.md opens clipped (fit ceiling 3496 of 10303 chars).', notice_both)
         self.assertEqual(notice_both.count('Memory hygiene: '), 2)
         # 3. Rules not clipped
         rules_ok = {'chars': 2928, 'share': 3496, 'clipped': False}

@@ -264,7 +264,7 @@ def hygiene_notice(report, rules=None):
     if rules and rules.get('clipped'):
         share = rules.get('share', 0)
         chars = rules.get('chars', 0)
-        lines.append(f'Memory hygiene: Kurallar.md opens clipped (share {share} of {chars} chars). '
+        lines.append(f'Memory hygiene: Kurallar.md opens clipped (fit ceiling {share} of {chars} chars). '
                      'Shorten each rule to one line and move reasons to a detail note; '
                      'move project rules to projects/<proje>/Kurallar.md.\n')
     return ''.join(lines)
