@@ -6,7 +6,7 @@ import time
 
 import beyin_v3_jev_client as client
 from beyin_v3_secrets import redact
-from beyin_v3 import pack_context
+from beyin_v3 import PackedContext, pack_context, pack_widened
 
 
 def _strings(value):
@@ -302,10 +302,11 @@ def auto_context(store, harness, query, context, *, budget_chars, timeout_cap=2.
     ranked_remote = sorted([r for r in keep if remote_allowed(r)],
                            key=lambda r: (-by_record.get(r['id'], 0), r['id']))
     ranked_local = [r for r in keep if not remote_allowed(r) and r['id'] in known]
-    packed = pack_context(_interleave([ranked_remote, ranked_local]), AUTO_LIMIT, budget_chars)
+    packed = pack_widened(_interleave([ranked_remote, ranked_local]), getattr(context, 'wider', {}), AUTO_LIMIT, budget_chars)
     selected_ids = {r['id'] for r in packed['records']}
     # Report delivered membership changes, not pre-budget model intentions.
-    result = dict(context, **packed)
+    result = PackedContext(context, **packed)
+    result.sources, result.wider = packed.sources, packed.wider  # the final envelope repacks from these
     result['jev'] = dict(dropped=len(known - selected_ids), added=len(selected_ids - known))
     return result
 

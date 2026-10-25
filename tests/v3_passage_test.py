@@ -108,9 +108,43 @@ class PassageContextTest(Vault):
                 '## Kayıtlar\n\n' + filler + '\n\n'
                 '## Amaç\n\nZirkon takvimi kredi planı için tutulur: aylık sınır kırk kredi.\n')
         self.ingest('takvim', text, 'notes/zirkon-takvimi.md', title='Zirkon Takvimi ve Kredi Planı')
-        records = self.strict('zirkon takvimi kredi planı', budget_chars=5000)['records']
+        # The passage route itself: MemoryStore.context_for would fall back to notes on an error.
+        records = passage.context_for(self.store, 'claude', 'zirkon takvimi kredi planı', budget_chars=5000)['records']
         self.assertEqual([r['source'] for r in records], ['notes/zirkon-takvimi.md'])
         self.assertIn('aylık sınır kırk kredi', records[0]['text'])
+        self.assertIn('[…]', records[0]['text'])
+        self.assertTrue(records[0]['text_truncated'])
+
+    def test_a_second_passage_never_cuts_a_lower_source_short(self):
+        filler = 'Satır satır kayıt tutulur, sütunlar sabit kalır. ' * 12
+        for index in range(5):
+            name = 'Zirkon Takvimi Kredi %d' % index
+            self.ingest('t%d' % index, '# %s\n\n## Özet\n\nZirkon takvimi kredi özeti %d.\n\n## Kayıtlar\n\n%s\n\n'
+                        '## Amaç\n\nZirkon takvimi kredi planı: sınır %d.\n' % (name, index, filler, index),
+                        'notes/t%d.md' % index, title=name)
+        query = 'zirkon takvimi kredi planı'
+        for budget in (1500, 2500, 5000):
+            with self.subTest(budget=budget):
+                with patch.object(passage, '_runner_up', lambda *args: None):
+                    alone = {r['id']: r['text'] for r in passage.context_for(self.store, 'claude', query,
+                                                                             budget_chars=budget)['records']}
+                both = passage.context_for(self.store, 'claude', query, budget_chars=budget)
+                self.assertLessEqual(both['used_chars'], budget)
+                self.assertEqual(sorted(alone), sorted(r['id'] for r in both['records']))
+                for record in both['records']:
+                    # Each source keeps whole the passage it had without second passages.
+                    self.assertIn(alone[record['id']].split('\n\n', 1)[-1], record['text'])
+                    self.assertGreaterEqual(len(record['text']), len(alone[record['id']]))
+
+    def test_excerpt_joins_overlapping_windows_and_marks_gaps(self):
+        record = {'text': 'aaaa bbbb cccc dddd eeee'}
+        span = lambda head, start, end: (record, head, start, end, '')
+        self.assertEqual(passage._excerpt(record, [span('H', 10, 24), span('H', 0, 9)]),
+                         'H\n\naaaa bbbb\n\ncccc dddd eeee')  # only whitespace between: no gap
+        self.assertFalse(passage._partial(record, [span('H', 10, 24), span('H', 0, 9)]))
+        self.assertEqual(passage._excerpt(record, [span('H', 0, 14), span('H', 10, 24)]), 'H\n\naaaa bbbb cccc dddd eeee')
+        self.assertEqual(passage._excerpt(record, [span('H', 0, 4), span('H', 15, 24)]), 'H\n\naaaa\n\n[…]\n\ndddd eeee')
+        self.assertTrue(passage._partial(record, [span('H', 0, 4), span('H', 15, 24)]))
 
     def test_status_gate_and_human_supersedes_references_apply_to_note_and_passage_reads(self):
         self.ingest('old', 'Zirkon kovası eski karar.', 'knowledge/route-v1.md', status='superseded')
@@ -332,8 +366,9 @@ class ConfigAndCacheTest(Vault):
         cache = self.store.state_dir / passage.CACHE_NAME
         blob = json.loads(cache.read_text(encoding='utf-8'))
         blob['params'] = old_params
-        blob['records'] = {key: [[head, start, end, ' '.join('kurulmas' if t == 'kurul' else t for t in tokens.split())]
-                                 for head, start, end, tokens in entries]
+        blob['records'] = {key: [[head, start, end, ' '.join('kurulmas' if t == 'kurul' else t for t in tokens.split()),
+                                  head_only]
+                                 for head, start, end, tokens, head_only in entries]
                            for key, entries in blob['records'].items()}
         blob.pop('pool', None)
         cache.write_text(json.dumps(blob), encoding='utf-8')
