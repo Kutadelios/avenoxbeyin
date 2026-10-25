@@ -422,24 +422,29 @@ class MemoryAuditorTest(unittest.TestCase):
 
         or status contradiction from stray prose words (#466).
         """
-        # Note A: Large document with 800 words, including passing mention of "tamamlandi"
-        words = [
-            f"kavram_{i} mimari servis yapilandirma sistem altyapi parametre analiz model veri akis test"
-            for i in range(50)
-        ]
-        large_body = " ".join(words) + " Proje asamasi tamamlandi ve arsivlendi."
-        (self.knowledge / 'buyuk-not.md').write_text(
-            f"---\ntitle: Buyuk Sistem Raporu\nupdated_at: 2026-08-01\n---\n# Sistem\n{large_body}\n",
-            encoding='utf-8'
-        )
-
-        # Note B: Short scratch note of 15 words whose vocabulary is contained in Note A,
-        # but with stray word "bekliyor". Jaccard is low, vocab ratio is > 10.
-        short_body = "servis yapilandirma altyapi test akis dogrulama bekliyor."
-        (self.knowledge / 'kucuk-not.md').write_text(
-            f"---\ntitle: Kisa Not\nupdated_at: 2026-10-01\n---\n# Kisa\n{short_body}\n",
-            encoding='utf-8'
-        )
+        vocabulary = ("architecture service configuration system infrastructure parameter analysis "
+                      "model data pipeline testing database transaction concurrency reliability durability "
+                      "latency throughput partition sharding replication consistency consensus protocol "
+                      "transport network router gateway address subnet packet buffer socket process thread "
+                      "scheduler memory storage volume filesystem directory permission ownership encryption "
+                      "authentication authorization credential certificate signature checksum compression "
+                      "serialization validation migration rollback deployment release version package "
+                      "dependency registry container orchestration cluster monitoring tracing logging metrics "
+                      "alert incident recovery backup restore snapshot retention archive inventory catalog "
+                      "document record entity relation index query filter ranking relevance retrieval "
+                      "precision recall benchmark evaluation experiment hypothesis evidence research "
+                      "discovery inference reasoning context continuity session receipt capture synthesis").split()
+        large_body = " ".join(vocabulary) + " tamamlandi"
+        short_body = " ".join(vocabulary[:8]) + " bekliyor"
+        for name, body, date in [('buyuk-not.md', large_body, '2026-08-01'),
+                                 ('kucuk-not.md', short_body, '2026-10-01')]:
+            (self.knowledge / name).write_text(
+                f"---\ntitle: Shared Topic\nupdated_at: {date}\n---\n{body}\n", encoding='utf-8')
+        first, second = audit_module.scan_audit_candidates(self.vault, self.state)
+        shared = len(first['tokens'] & second['tokens'])
+        # Ensure this reaches the changed gate; repeated numbered filler does not.
+        self.assertGreaterEqual(shared / min(len(first['tokens']), len(second['tokens'])), 0.80)
+        self.assertLess(shared / len(first['tokens'] | second['tokens']), 0.20)
 
         report = audit_module.audit_memory(self.vault, state=self.state, threshold=0.60, min_shared=5)
         # Must not report near_duplicate or status_contradiction for asymmetric pair
