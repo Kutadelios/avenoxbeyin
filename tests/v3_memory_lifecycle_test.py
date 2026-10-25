@@ -322,36 +322,55 @@ class MemoryLifecycleDoDTest(unittest.TestCase):
         sess6_id = "sess-06-fresh-start-dod-query"
         sess6_hash = hashlib.sha256(sess6_id.encode('utf-8')).hexdigest()[:24]
 
-        # Fresh sync engine and memory store instance
+        (self.vault / '.beyin-projects.json').write_text(json.dumps({
+            'folders': {'projects/sentinel': 'sentinel'}, 'shared_unscoped': True}), encoding='utf-8')
+        (self.vault / 'notes/private-canary.md').write_text(
+            '---\nvisibility: private\n---\n# PRIVATE_LIFECYCLE_CANARY SQLite WAL telemetri', encoding='utf-8')
         fresh_engine = SyncEngine(self.vault, self.state)
-        fresh_store = fresh_engine.store
+        fresh_engine.sync()
+
+        # Every query runs in a new interpreter; no parent memory/store object survives.
+        def retrieve(query, project=None):
+            code = ("import json,sys;sys.path.insert(0,sys.argv[1]);"
+                    "from beyin_v3 import MemoryStore;"
+                    "print(json.dumps(MemoryStore(sys.argv[2],sys.argv[3],read_only=True)"
+                    ".retrieve(sys.argv[4],project=sys.argv[5] or None)))")
+            result = subprocess.run([sys.executable, '-c', code, str(ROOT / 'template/.claude/scripts'),
+                                     str(self.state), str(self.vault), query, project or ''],
+                                    capture_output=True, text=True, check=True, env=self.env, timeout=30)
+            self.assertNotIn('PRIVATE_LIFECYCLE_CANARY', result.stdout)
+            return json.loads(result.stdout)
 
         # 1. Architectural Decision Recall:
-        arch_results = fresh_store.retrieve("SQLite WAL mode synchronous").get("records", [])
+        arch_results = retrieve("SQLite WAL mode synchronous").get("records", [])
         self.assertTrue(len(arch_results) > 0, "Architecture decision must be retrieved")
         arch_doc = next(r for r in arch_results if "architecture.md" in r.get("source", ""))
         self.assertIn("SQLite WAL mode with synchronous=NORMAL", arch_doc.get("text", ""))
 
         # 2. User Coding Preference Recall:
-        pref_results = fresh_store.retrieve("keyword arguments tip doğrulaması").get("records", [])
+        pref_results = retrieve("keyword arguments tip doğrulaması").get("records", [])
         self.assertTrue(len(pref_results) > 0, "Coding preference must be retrieved")
         pref_doc = next(r for r in pref_results if "Kurallar.md" in r.get("source", ""))
         self.assertIn("keyword arguments", pref_doc.get("text", ""))
 
         # 3. User Correction Recall (Superseded value is NOT the current value):
-        corr_results = fresh_store.retrieve("timeout Windows network shares").get("records", [])
+        corr_results = retrieve("timeout Windows network shares").get("records", [])
         self.assertTrue(len(corr_results) > 0, "Corrected timeout must be retrieved")
         corr_doc = next(r for r in corr_results if "architecture.md" in r.get("source", ""))
         self.assertIn("15 seconds on Windows network shares", corr_doc.get("text", ""))
+        self.assertNotIn("Initial Timeout: 5 seconds", corr_doc.get("text", ""))
 
         # 4. Workspace Scoped Rule Recall:
-        scope_results = fresh_store.retrieve("telemetri uyarıları tekilleştirilmelidir").get("records", [])
+        scope_results = retrieve("telemetri uyarıları tekilleştirilmelidir", project="sentinel").get("records", [])
         self.assertTrue(len(scope_results) > 0, "Sentinel rule must be retrieved")
         scope_doc = next(r for r in scope_results if "sentinel/Kurallar.md" in r.get("source", ""))
         self.assertIn("60 saniye", scope_doc.get("text", ""))
+        unrelated = retrieve('telemetri uyarıları tekilleştirilmelidir', project='unrelated')
+        self.assertFalse(any('sentinel/Kurallar.md' in record.get('source', '')
+                             for record in unrelated.get('records', [])))
 
         # 5. Task Completion Recall:
-        task_results = fresh_store.retrieve("task-db-migration Connection Pool").get("records", [])
+        task_results = retrieve("task-db-migration Connection Pool").get("records", [])
         self.assertTrue(len(task_results) > 0, "Task record must be retrieved")
         task_doc = next(r for r in task_results if "db-migration.md" in r.get("source", ""))
         self.assertIn("done", task_doc.get("text", "").lower())
