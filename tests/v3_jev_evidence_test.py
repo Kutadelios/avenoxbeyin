@@ -3,6 +3,14 @@ from v3_evidence_helpers import EvidenceFixture, rt, client, jev, os, patch
 
 
 class JevEvidenceTest(EvidenceFixture):
+    def test_short_matching_sentence_keeps_surrounding_card_context(self):
+        from beyin_v3_evidence import card_excerpt
+        text = 'Background detail. ' * 40 + 'Quartz rollback switch. ' + 'Adjacent explanation. ' * 30
+        excerpt = card_excerpt('quartz rollback switch', dict(text=text), limit=600)
+        self.assertIn('Quartz rollback switch.', excerpt)
+        self.assertEqual(len(excerpt), 600)
+        self.assertIn(excerpt, text)
+
     def test_loose_tail_is_judged_and_the_same_passage_is_delivered(self):
         marker = 'Rollback uses the amber switch.'
         self.note('guide', '# Overview\n\n' + ('Unrelated background material. ' * 90) + '\n\n## Recovery\n\n' + marker)

@@ -134,14 +134,12 @@ def card_excerpt(query, record, broader=None, ref=None, limit=600):
         if len(chunk) <= budget:
             excerpts.append(chunk)
             continue
-        # Smaller sentence/word windows expose matches late in a long block.
-        # Keep the heading within the same fixed share, when there is one.
-        blocks = split_blocks(chunk, target=max(40, budget - 80), overlap=0)
+        # Locate a relevant block, then spend its whole share on surrounding
+        # context. A short matching sentence must not leave most of the card empty.
+        blocks = split_blocks(chunk, target=max(40, budget // 2), overlap=0)
         candidates = []
-        for head, start, end in blocks:
-            body = chunk[start:end]
-            prefix = head[:80] + '\n' if head else ''
-            text = prefix + body[:max(0, budget - len(prefix))]
-            candidates.append(text)
+        for _head, start, end in blocks:
+            left = max(0, min(start - max(0, budget - (end - start)) // 2, len(chunk) - budget))
+            candidates.append(chunk[left:left + budget])
         excerpts.append(max(candidates, key=lambda text: _score(text, terms), default=chunk[:budget]))
     return separator.join(excerpts)[:limit]
