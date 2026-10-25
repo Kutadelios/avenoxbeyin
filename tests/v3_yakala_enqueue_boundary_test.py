@@ -17,10 +17,13 @@ class EnqueueBoundaryTest(base.AgentFiles):
         original_lock = y._AgentFileLock
 
         @contextlib.contextmanager
-        def changed_lock(path):
+        def changed_queue_lock(path):
             with original_lock(path):
                 y.configure_agent(self.vault, self.state, 'kapali')
                 yield
+
+        def changed_lock(path):
+            return changed_queue_lock(path) if path.name == 'queue.lock' else original_lock(path)
 
         with patch.object(y, '_AgentFileLock', side_effect=changed_lock):
             with self.assertRaisesRegex(ValueError, 'Ajan kapali'):
