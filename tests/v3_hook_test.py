@@ -562,6 +562,23 @@ class HookInstallerTest(unittest.TestCase):
         note.unlink()
         self.assertFalse(self.hook._has_knowledge_update(self.vault, receipt, 20))
 
+    def test_knowledge_update_rejects_symlink_and_nonknowledge_target(self):
+        self.seed()
+        folder = self.vault / 'knowledge/concepts'
+        folder.mkdir(parents=True)
+        alias = folder / 'alias.md'
+        try:
+            alias.symlink_to(self.vault / 'notes/task.md')
+        except OSError:
+            self.skipTest('symlinks unavailable')
+        receipt = {'refs': ['knowledge/concepts/alias.md']}
+        self.assertFalse(self.hook._has_knowledge_update(self.vault, receipt, 0))
+        alias.unlink()
+        folder.rmdir()
+        folder.symlink_to(self.vault / 'notes', target_is_directory=True)
+        receipt = {'refs': ['knowledge/concepts/task.md']}
+        self.assertFalse(self.hook._has_knowledge_update(self.vault, receipt, 0))
+
     def test_stop_knowledge_reminder_passes_when_learning_is_declared_none(self):
         engine = self.seed()
         def session(name):

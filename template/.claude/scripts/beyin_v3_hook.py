@@ -280,10 +280,13 @@ def _has_knowledge_update(vault, receipt, since):
             rel = ref.strip().replace('\\', '/')
             if not is_distilled_note(rel):
                 continue
-            path = (root / rel).resolve()
-            if path.is_symlink() or not path.is_file():
+            lexical = root / rel
+            if lexical.is_symlink():
                 continue
-            path.relative_to(root)
+            path = lexical.resolve()
+            resolved_rel = path.relative_to(root).as_posix()
+            if not path.is_file() or not is_distilled_note(resolved_rel):
+                continue
             if path.stat().st_mtime >= since:
                 return True
         except (ValueError, OSError):
