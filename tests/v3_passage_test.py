@@ -100,6 +100,18 @@ class SplitTest(unittest.TestCase):
 
 
 class PassageContextTest(Vault):
+    def test_a_question_naming_the_note_gets_the_section_that_answers_it(self):
+        # Every passage carries the title, so a question in the title's words matches all of
+        # them alike; the short update section used to win on size alone.
+        filler = 'Satır satır kayıt tutulur, sütunlar sabit kalır. ' * 20
+        text = ('# Zirkon Takvimi ve Kredi Planı\n\n## Güncelleme\n\nTabloya satır ekle.\n\n'
+                '## Kayıtlar\n\n' + filler + '\n\n'
+                '## Amaç\n\nZirkon takvimi kredi planı için tutulur: aylık sınır kırk kredi.\n')
+        self.ingest('takvim', text, 'notes/zirkon-takvimi.md', title='Zirkon Takvimi ve Kredi Planı')
+        records = self.strict('zirkon takvimi kredi planı', budget_chars=5000)['records']
+        self.assertEqual([r['source'] for r in records], ['notes/zirkon-takvimi.md'])
+        self.assertIn('aylık sınır kırk kredi', records[0]['text'])
+
     def test_status_gate_and_human_supersedes_references_apply_to_note_and_passage_reads(self):
         self.ingest('old', 'Zirkon kovası eski karar.', 'knowledge/route-v1.md', status='superseded')
         self.ingest('current', 'Zirkon kovası güncel karar.', 'knowledge/route-v2.md',

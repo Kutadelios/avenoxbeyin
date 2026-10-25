@@ -1540,11 +1540,26 @@ def optional_provider(enabled=False, factory=None):
     return factory()
 
 
+# Index bookkeeping the reader cannot use: source hashes and revisions verify freshness, the
+# dates repeat updated_at, and the rest are defaults. Each costs every delivered record its
+# share of the budget, so the envelope leaves them out and the note text keeps that room.
+_BOOKKEEPING = ("source_sha256", "revision", "created", "modified", "visibility", "supersedes")
+_DEFAULTS = {"kind": "note", "facts": {}, "project": None}
+
+
+def _delivery_view(record):
+    """The part of a record the reader is shown; identity, citation and text stay whole."""
+    return {k: v for k, v in record.items()
+            if k not in _BOOKKEEPING and not (k in _DEFAULTS and v == _DEFAULTS[k])}
+
+
 def render_context(context, budget_chars, prefix="", suffix=""):
     """Serialize a complete context within the delivery budget; never slice JSON.
 
     Return the delivered projection as well so continuity cannot remember an omitted
     source. Auxiliary receipt text yields to complete source identities and citations.
+    The envelope carries _delivery_view records; the projection keeps the full records
+    (clipped like the envelope), since continuity and dedupe identify sources by revision.
     """
     if type(budget_chars) is not int or budget_chars < 0:
         raise ValueError("invalid budget")
@@ -1552,6 +1567,8 @@ def render_context(context, budget_chars, prefix="", suffix=""):
     sources = getattr(context, "sources", ())
     if len(sources) == len(records) and all(s["id"] == r["id"] for s, r in zip(sources, records)):
         records = list(sources)  # re-clip the envelope from the originals, not from a clip
+    full = {r["id"]: r for r in records}
+    records = [_delivery_view(r) for r in records]
     extra = {k: v for k, v in context.items() if k not in
              {"records", "citations", "used_chars", "budget_chars", "omitted_count", "truncated", "abstained", "stale_count"}}
     available = max(0, budget_chars - len(prefix))
@@ -1565,7 +1582,11 @@ def render_context(context, budget_chars, prefix="", suffix=""):
         overflow = len(text) - available
         if overflow <= 0:
             tail = suffix if len(prefix) + len(text) + len(suffix) <= budget_chars else ""
-            return prefix + text + tail, packed
+            delivered = PackedContext(packed, records=[
+                dict(full[r["id"]], **{k: r[k] for k in ("text", "text_truncated") if k in r})
+                for r in packed["records"]])
+            delivered.sources = packed.sources
+            return prefix + text + tail, delivered
         if payload_budget == 0:
             # A nonsensically small budget cannot carry even an empty envelope.
             return "", dict(packed, records=[], citations=[], abstained=True, used_chars=0)

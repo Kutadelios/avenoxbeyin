@@ -337,10 +337,11 @@ def _weight(shared, frequency, total, size):
     return weight / idf_max / math.log(10 + size)
 
 
-def search(index, terms, limit=5, floor=FLOOR, min_shared=MIN_SHARED, ignored=STOPWORDS):
+def search(index, terms, limit=5, floor=FLOOR, min_shared=MIN_SHARED, ignored=STOPWORDS, with_runner_up=False):
     """Best admitted passage per source, ranked. Returns [(rank weight, passage), ...].
 
     ignored: stems a query root may not become (the caller's stopwords and project words).
+    with_runner_up: [(rank weight, passage, second passage or None), ...] instead.
     """
     terms = _strict_terms(terms)
     if not terms:
@@ -355,7 +356,9 @@ def search(index, terms, limit=5, floor=FLOOR, min_shared=MIN_SHARED, ignored=ST
     roots = [(" " + term + " ", root, " " + root + " ") for term, root in
              sorted(_query_roots(terms, lambda token: index.source_df.get(token, 0), ignored).items())]
     best = {}
+    by_source = {}
     for passage in index.passages:
+        by_source.setdefault(passage[0]["id"], []).append(passage)
         tokens = passage[4]
         shared = [term for term, probe in probes if probe in tokens]
         shared += [root for term_probe, root, probe in roots if term_probe not in tokens and probe in tokens]
@@ -376,7 +379,36 @@ def search(index, terms, limit=5, floor=FLOOR, min_shared=MIN_SHARED, ignored=ST
     ranked = list(best.values())
     ranked.sort(key=lambda item: (item[1][0].get("updated_at", ""), item[1][0]["id"]), reverse=True)
     ranked.sort(key=lambda item: -item[0])
-    return ranked[:limit]
+    chosen = [(rank, _body_choice(passage, by_source[passage[0]["id"]], probes, roots, index.block_df, passages_total))
+              for rank, passage in ranked[:limit]]
+    if with_runner_up:
+        return [(rank, passages[0], passages[1] if len(passages) > 1 else None) for rank, passages in chosen]
+    return [(rank, passages[0]) for rank, passages in chosen]
+
+
+def _body_choice(admitted, passages, probes, roots, frequency, total):
+    """The admitted passage, then the passage of the same source whose own text matches best.
+
+    Every passage of a note carries the note's title, heading and tags, so a question that names
+    the note matches all of them alike: the size factor then admits and ranks the short sections
+    and a long section holding the answer never passes the floor. The admitted passage keeps the
+    lead (it answers most questions); the one with the most query words in its body (then the
+    rarer words) follows it. Without any body match the admitted passage stands alone.
+    """
+    def body_score(passage):
+        record, _head, start, end = passage[:4]
+        tokens = " " + " ".join(_tokens(record["text"][start:end])) + " "
+        shared = [term for term, probe in probes if probe in tokens]
+        shared += [root for term_probe, root, probe in roots if term_probe not in tokens and probe in tokens]
+        idf = sum(math.log((total + 1) / (frequency.get(token, 0) + 1)) + 1 for token in shared)
+        return (len(shared), idf, passage is admitted)
+    scored = sorted(((body_score(p), p) for p in passages), key=lambda item: item[0], reverse=True)
+    matched = [p for score, p in scored if score[0]]
+    if not matched:
+        return [admitted]
+    if matched[0] is admitted:
+        return matched[:2]
+    return [admitted, matched[0]]
 
 
 def pool(store, eligible, statuses=None, exclude=DEFAULT_EXCLUDE, superseded=None):
@@ -421,9 +453,22 @@ def context_for(store, harness, query, project=None, audience="internal", status
     if not terms:
         return pack_context([], limit, budget_chars, stale_count)
     records = []
-    for _rank, (record, head, start, end, _tokens_) in search(index, terms, limit, config["floor"], ignored=ignored):
+    for _rank, (record, head, start, end, _tokens_), second in search(index, terms, limit, config["floor"],
+                                                                      ignored=ignored, with_runner_up=True):
         body = record["text"][start:end]
         excerpt = head + "\n\n" + body if head else body
+        if second is not None:
+            # The next matching passage of the same note rides along: it is clipped first when
+            # the budget is short, and it answers the question when the best one only names it.
+            _record, head2, start2, end2, _tokens2 = second
+            if start2 < end and start < end2:  # overlapping windows read as one span
+                start, end = min(start, start2), max(end, end2)
+                body = record["text"][start:end]
+                excerpt = head + "\n\n" + body if head else body
+            else:
+                body2 = record["text"][start2:end2]
+                excerpt += "\n\n[…]\n\n" + (head2 + "\n\n" + body2 if head2 else body2)
+                body += body2
         # Only text and text_truncated change, so advisor signatures still match the index.
         records.append(dict(record, text=excerpt, text_truncated=body != record["text"]))
     return pack_context(records, limit, budget_chars, stale_count)
