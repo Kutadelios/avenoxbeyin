@@ -237,7 +237,7 @@ class WarmWindowTest(unittest.TestCase):
         ready_line = child.stdout.readline()
         self.assertIn(b'"type":"READY"', ready_line)
         # Broker sends STOP when window is dismissed or replaced
-        child.stdin.write(json.dumps({'v': 2, 'type': 'STOP', 'instance': instance}).encode('ascii') + b'\n')
+        child.stdin.write(json.dumps(yakala._protocol_message('STOP', instance)).encode('ascii') + b'\n')
         child.stdin.flush()
         self.assertEqual(child.wait(10), 0)
         stderr_output = child.stderr.read()
