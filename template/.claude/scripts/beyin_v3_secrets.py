@@ -4,6 +4,8 @@ from __future__ import annotations
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+import base64
+import binascii
 import re
 import sqlite3
 
@@ -40,7 +42,6 @@ BUILTIN_PATTERNS = (
     # a 6 character timestamp and an HMAC of at least 27 characters. Like SendGrid it
     # must stand alone: a segment of a longer dotted name is not a token.
     re.compile(r"(?<![A-Za-z0-9_.-])[MNO][A-Za-z0-9_-]{22,27}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,40}(?![A-Za-z0-9_-]|\.[A-Za-z0-9_-])"),
-    re.compile(r"(?i)\bbasic\s+[A-Za-z0-9._~+/=-]{10,}"),
 )
 
 
@@ -64,6 +65,9 @@ def _custom_literals(state):
     return values
 
 
+_BASIC_AUTH = re.compile(r"(?i)\bbasic[ \t]+([A-Za-z0-9+/]+={0,2})(?![A-Za-z0-9+/=])")
+
+
 def redact(text, state):
     if not isinstance(text, str):
         raise ValueError('secret filter input must be text')
@@ -71,6 +75,18 @@ def redact(text, state):
     for pattern in BUILTIN_PATTERNS:
         result, matches = pattern.subn('[REDACTED]', result)
         count += matches
+    def redact_basic(match):
+        nonlocal count
+        try:
+            decoded = base64.b64decode(match[1], validate=True)
+        except (ValueError, binascii.Error):
+            return match[0]
+        if b':' not in decoded:
+            return match[0]
+        count += 1
+        return '[REDACTED]'
+
+    result = _BASIC_AUTH.sub(redact_basic, result)
     for literal in _custom_literals(state):
         matches = result.count(literal)
         if matches:

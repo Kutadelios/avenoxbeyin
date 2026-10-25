@@ -33,6 +33,13 @@ class LearningCandidateLedgerTest(unittest.TestCase):
         from v3_package_helpers import inherited_env
         self.env = inherited_env(PYTHONIOENCODING='utf-8')
 
+    def test_resolution_preserves_malformed_lines_verbatim(self):
+        ledger = self.state / 'learning-state.jsonl'
+        raw = b'  {broken JSON   \r\n\r\n  [1,2]  \n  "literal"  '
+        ledger.write_bytes(raw)
+        self.assertEqual(learning.resolve_candidates(self.state, 'session'), 0)
+        self.assertEqual(ledger.read_bytes(), raw)
+
     def test_stage_and_list_candidates(self):
         session = "session-1234567890abcdef"
         rec = learning.stage_candidate(self.state, session, "WAL timeout must be at least 5s",
