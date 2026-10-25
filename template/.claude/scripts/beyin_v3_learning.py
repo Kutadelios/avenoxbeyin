@@ -223,29 +223,31 @@ def resolve_candidates(state: Path, session: str | None = None, target_status: s
     source_keys = {_source_key(source) for source in sources} if sources is not None else None
     try:
         with _ledger_lock(ledger.parent):
-            with open(ledger, "r", encoding="utf-8") as f:
+            with open(ledger, "r", encoding="utf-8", newline="") as f:
                 for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
                     try:
                         item = json.loads(line)
-                        if item.get("status") == "candidate":
-                            matches = (target_session is None) or (item.get("session") == target_session)
-                            if source_keys is not None:
-                                matches = matches and _source_key(item.get("source", "")) in source_keys
-                            if matches:
-                                item["status"] = target_status
-                                item["resolved_at"] = datetime.now(timezone.utc).isoformat()
-                                count += 1
-                        records.append(item)
-                    except Exception:
-                        continue
-            # Atomic rewrite
+                        if not isinstance(item, dict):
+                            records.append(line)
+                            continue
+                        matches = item.get("status") == "candidate" and (
+                            target_session is None or item.get("session") == target_session)
+                        if source_keys is not None:
+                            source = item.get("source")
+                            matches = matches and isinstance(source, str) and _source_key(source) in source_keys
+                        if matches:
+                            item["status"] = target_status
+                            item["resolved_at"] = datetime.now(timezone.utc).isoformat()
+                            count += 1
+                            records.append(json.dumps(item, ensure_ascii=False) + "\n")
+                        else:
+                            records.append(line)
+                    except (ValueError, TypeError):
+                        records.append(line)
+            # Same byte-preserving resolver contract as the independent #493 fix.
             temp = ledger.parent / (ledger.name + ".tmp")
-            with open(temp, "w", encoding="utf-8") as out:
-                for rec in records:
-                    out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            with open(temp, "w", encoding="utf-8", newline="") as out:
+                out.writelines(records)
                 out.flush()
                 os.fsync(out.fileno())
             os.replace(temp, ledger)
