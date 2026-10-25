@@ -326,19 +326,17 @@ def resolve_active_project(vault, cwd):
             cand_names.append(p.name)
             if len(cand_names) >= 4:
                 break
-        if scopes and "folders" in scopes:
-            for cand in cand_names:
-                cand_key = _scope_key(cand)
-                for folder, project in scopes.get("folders", []):
-                    if cand_key == _scope_key(project) or cand_key == _scope_key(folder.split("/")[-1]):
-                        return project
-        for folder in ("projects", "Projeler", "projeler"):
-            p_dir = vault_root / folder
-            if p_dir.is_dir():
-                for cand in cand_names:
-                    target = p_dir / cand
-                    if target.is_dir() and not target.is_symlink():
-                        return cand
+        # Consider all discovery sources at each depth before walking outward.
+        for cand in cand_names:
+            cand_key = _scope_key(cand)
+            mapped = {project for folder, project in (scopes or {}).get("folders", [])
+                      if cand_key in (_scope_key(project), _scope_key(folder.split("/")[-1]))}
+            if mapped:
+                return next(iter(mapped)) if len(mapped) == 1 else None
+            for folder in ("projects", "Projeler", "projeler"):
+                target = vault_root / folder / cand
+                if target.is_dir() and not target.is_symlink():
+                    return cand
         return None
 
     try:
@@ -379,10 +377,10 @@ def resolve_project_from_query(vault, query):
     known = {}
     if scopes and "folders" in scopes:
         for folder, proj in scopes.get("folders", []):
-            known[_scope_key(proj)] = proj
+            known.setdefault(_scope_key(proj), set()).add(proj)
             base = folder.split("/")[-1]
             if base:
-                known[_scope_key(base)] = proj
+                known.setdefault(_scope_key(base), set()).add(proj)
 
     for folder in ("projects", "Projeler", "projeler"):
         p_dir = vault_root / folder
@@ -390,7 +388,7 @@ def resolve_project_from_query(vault, query):
             try:
                 for cand in p_dir.iterdir():
                     if cand.is_dir() and not cand.is_symlink():
-                        known[_scope_key(cand.name)] = cand.name
+                        known.setdefault(_scope_key(cand.name), {cand.name})
             except OSError:
                 pass
 
@@ -402,9 +400,9 @@ def resolve_project_from_query(vault, query):
     for key, canon in known.items():
         if len(key) < 3:
             continue
-        pattern = r'(?<![a-z0-9_\-])' + re.escape(key) + r'(?![a-z0-9_\-])'
+        pattern = r'(?<![\w\-])' + re.escape(key) + r'(?![\w\-])'
         if re.search(pattern, q_folded):
-            matches.add(canon)
+            matches.update(canon)
 
     if len(matches) == 1:
         return next(iter(matches))

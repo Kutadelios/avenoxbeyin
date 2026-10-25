@@ -1319,6 +1319,18 @@ runpy.run_path({str(HOOK)!r}, run_name='__main__')
         self.assertIn('ALPHA_ONLY_RULE', context)
         self.assertIn('Synthetic Reviewer', context)
 
+    def test_query_alias_loads_canonical_scoped_rules(self):
+        engine = self.seed()
+        folder = self.vault / 'projects/client'
+        folder.mkdir(parents=True)
+        (folder / 'Kurallar.md').write_text('# Rules\n- [kapsam: alpha] SCOPED_ALPHA_ALIAS_CANARY\n', encoding='utf-8')
+        (self.vault / '.beyin-projects.json').write_text(json.dumps({'folders': {'projects/client': 'alpha'}}), encoding='utf-8')
+        engine.sync()
+        payload = dict(self.payload, hook_event_name='SessionStart', cwd=str(self.vault), prompt='client projesinde kurallar')
+        payload.pop('project', None)
+        context = self.invoke(payload, 'claude').get('hookSpecificOutput', {}).get('additionalContext', '')
+        self.assertIn('SCOPED_ALPHA_ALIAS_CANARY', context)
+
     def test_hook_resolves_project_from_query_and_sibling_cwd(self):
         """Hook resolves active project from query at vault root and from sibling directory (#288, #403)."""
         engine = self.seed()

@@ -456,6 +456,26 @@ class TestResolveActiveProject(unittest.TestCase):
         cwd.mkdir(parents=True)
         self.assertEqual(beyin_v3_projects.resolve_active_project(self.vault, cwd), 'mapped-project')
 
+    def test_query_alias_preserves_mapping_and_rejects_ambiguity(self):
+        from beyin_v3_projects import resolve_project_from_query
+        (self.vault / 'projects/client').mkdir(parents=True)
+        (self.vault / '.beyin-projects.json').write_text(json.dumps({'folders': {'projects/client': 'alpha'}}))
+        self.assertEqual(resolve_project_from_query(self.vault, 'client projesi'), 'alpha')
+        (self.vault / 'other/client').mkdir(parents=True)
+        (self.vault / '.beyin-projects.json').write_text(json.dumps({'folders': {'projects/client': 'alpha', 'other/client': 'beta'}}))
+        self.assertIsNone(resolve_project_from_query(self.vault, 'client projesi'))
+        self.assertIsNone(resolve_project_from_query(self.vault, 'alphaş sözcüğü'))
+        self.assertIsNone(resolve_project_from_query(self.vault, 'alpha ve beta'))
+
+    def test_external_project_uses_nearest_known_folder(self):
+        from beyin_v3_projects import resolve_active_project
+        (self.vault / 'teams/alpha').mkdir(parents=True)
+        (self.vault / 'projects/beta').mkdir(parents=True)
+        (self.vault / '.beyin-projects.json').write_text(json.dumps({'folders': {'teams/alpha': 'alpha'}}))
+        outside = Path(self.tmp.name) / 'alpha/beta'
+        outside.mkdir(parents=True)
+        self.assertEqual(resolve_active_project(self.vault, outside), 'beta')
+
     def test_resolve_active_project_missing_json(self):
         import beyin_v3_projects
         cwd = self.vault / 'other' / 'folder'
