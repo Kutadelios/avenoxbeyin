@@ -8094,6 +8094,13 @@ def enqueue_agent(vault, state, card_id, request, delivery_id=None, *, music=Non
     if music and music['extract'] and not _agent_open_network(config):
         raise ValueError('Ses isleme icin ajan ag ayari acik olmali; bu ayar servis yukleme izni vermez.')
     with _AgentFileLock(_agent_root(state) / 'queue.lock'):
+        config = agent_settings(vault, state)  # the off switch may have changed while waiting
+        if config['client'] == 'kapali':
+            raise ValueError('Ajan kapali; kart yalniz kaydedildi.')
+        if music and music['extract'] and not _agent_open_network(config):
+            raise ValueError('Ses isleme icin ajan ag ayari acik olmali; bu ayar servis yukleme izni vermez.')
+        with _WindowsCommitLock(vault):
+            card_id = find_card(vault, card_id, state)['id']  # KART_ID.md and KART_ID share one owner
         jobs = _agent_jobs(vault, state)
         if delivery_id:
             old = next((job for job in jobs if job.get('delivery_id') == delivery_id), None)
