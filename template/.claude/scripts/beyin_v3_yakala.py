@@ -3254,12 +3254,12 @@ def windows_sources(context, clip, fresh, image=None, shot=None):
     """Pure source decisions. All alternatives survive, even when another is initially selected."""
     sources = []
 
-    def add(kind, value, label, on, key, title=None, picture=None):
+    def add(kind, value, label, on, key, title=None, picture=None, clipboard=False):
         if kind == 'url' and value and any(source['kind'] == 'url' and canonical(source['value']) == canonical(value)
                                           for source in sources):
             return
         if value:
-            sources.append(dict(kind=kind, value=value, label=label, on=bool(on), key=key, title=title, image=picture))
+            sources.append(dict(kind=kind, value=value, label=label, on=bool(on), key=key, title=title, image=picture, clipboard=clipboard))
     copied_url = tab_url(clip) if re.match(r'^https?://', clip, re.I) else None
     hovered, page = context.get('url_imlec'), context.get('url')
     # A link read from the browser is what the key was pressed for: it wins over anything on the
@@ -3287,10 +3287,10 @@ def windows_sources(context, clip, fresh, image=None, shot=None):
     clipboard_files = bool(context.get('dosyalar_pano'))
     files_on = clipboard_leads if clipboard_files else True
     for index, path in enumerate(context.get('dosyalar') or []):
-        add('file', path, Path(path).name, files_on, str(index + 1) if index < 9 else '')
+        add('file', path, Path(path).name, files_on, str(index + 1) if index < 9 else '',
+            clipboard=clipboard_files)
     for source in sources:
-        source['clipboard'] = (source.get('clipboard', False) or source['key'] in ('p', 'm', 'g')
-                               or (clipboard_files and source['kind'] == 'file'))
+        source['clipboard'] = source.get('clipboard', False) or source['key'] in ('p', 'm', 'g')
     return sources
 
 

@@ -43,6 +43,15 @@ def wait_for(check, seconds=3):
 
 
 class WindowsPolicyTest(unittest.TestCase):
+    def test_screenshot_only_does_not_consume_copied_files(self):
+        sources = y.windows_sources({'url': 'https://example.org/', 'dosyalar': ['copied.txt'],
+                                     'dosyalar_pano': True}, '', True, shot={'path': 'window.png'})
+        for source in sources:
+            source['on'] = source['key'] == 'w'
+        self.assertFalse(any(source['clipboard'] for source in sources if source['on']))
+        self.assertTrue(next(source for source in sources if source['key'] == '1')['clipboard'])
+        self.assertEqual(y._source_arguments(sources)['files'], ['window.png'])
+
     def test_hovered_link_is_the_default_and_the_page_stays_selectable(self):
         context = {'url': 'https://www.youtube.com/', 'baslik': 'YouTube',
                    'url_imlec': 'https://www.youtube.com/watch?v=RgvsbigEylQ', 'baslik_imlec': 'Fragman'}
