@@ -99,6 +99,38 @@ def loose_passages(record, query, project=None):
     return narrow, wide, ref
 
 
+def loose_delivery(record, selected, query):
+    """Keep the opening; add the match whole or card-sized only from spare room.
+
+    Three standard passage windows protect the opening without making an entire
+    long note the minimum delivery. Prefer the full source when it fits. Every
+    alternative contains the same opening, so widening cannot replace its text.
+    """
+    from beyin_v3 import TOP_CONTEXT_TEXT
+    from beyin_v3_passage import split_blocks, _partial
+    opening = ('', 0, min(len(record['text']), 3 * TOP_CONTEXT_TEXT))
+    ref = reference(record, [opening], 'loose')
+    partial = lambda spans: _partial(record, [(record, h, s, e, '') for h, s, e in spans])
+    narrow = dict(record, text=ref['variants'][0]['text'], text_truncated=partial([opening]))
+    headings = {(s, e): h for h, s, e in split_blocks(record['text'])}
+    matched = [(headings.get((s, e), ''), s, e) for s, e, _ in selected['variants'][0]['spans']]
+    windows = []
+    for head, start, end in matched:
+        body = record['text'][start:end]
+        excerpt = card_excerpt(query, dict(text=body))
+        offset = body.index(excerpt)
+        windows.append((head, start + offset, start + offset + len(excerpt)))
+    alternatives, seen = [], {narrow['text']}
+    for spans in [[('', 0, len(record['text']))], [opening] + matched, [opening] + windows]:
+        variant = reference(record, spans, 'loose')['variants'][0]
+        if variant['text'] in seen:
+            continue
+        seen.add(variant['text'])
+        alternatives.append(dict(record, text=variant['text'], text_truncated=partial(spans)))
+        ref['variants'].append(variant)
+    return narrow, alternatives or None, ref
+
+
 def card_excerpt(query, record, broader=None, ref=None, limit=600):
     """Bounded query windows, with a share for each selected passage, not a note prefix."""
     from beyin_v3_passage import split_blocks

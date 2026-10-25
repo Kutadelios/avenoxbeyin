@@ -1,7 +1,8 @@
 # Seçilen kanıtın taşınması
 
 `PackedContext.sources` kırpılmamış dar pasajları, `wider` varsa ikinci pasajla
-genişletilmiş görünümü taşır. `evidence` aynı kaynakların kimliğini, SHA-256 ve
+genişletilmiş görünümü veya tercih sırasındaki alternatiflerin listesini taşır.
+`evidence` aynı kaynakların kimliğini, SHA-256 ve
 revizyonunu, geldiği kanalı ve seçilen kaynak aralıklarını taşır. Aralıklar ham
 Markdown baytlarına değil indekslenmiş `record.text` karakterlerine göredir.
 Her görünüm, kopyalanan kaynak aralığının çıktıdaki yerini de tutar; böylece
@@ -10,7 +11,18 @@ Bu üçü Python nesnesinin attribute'larıdır; zarf JSON'una eklenmez.
 
 Strict arama seçimini değiştirmez. Jev kartı dar ve varsa geniş seçimin her
 pasajına yer ayırır; uzun parçada sorguya uyan pencereyi kullanır. Gevşek adayın
-ilgili pasajı karttan önce yerelde seçilir, kurtarıldığında aynı seçim paketlenir.
+ilgili pasajı karttan önce yerelde seçilir. Kurtarıldığında dar görünüm notun
+ilk üç `TOP_CONTEXT_TEXT` penceresidir (en fazla 3.300 karakter). Yerel teslim
+önce notun tamamını, sonra açılışla birincil eşleşen pasajı, sonra açılışla
+bu pasajın sorguya göre seçilen en fazla 600 karakterlik penceresini taşıyan
+`wider` alternatiflerini dener. `pack_widened` yalnız bütün dar kayıtlar teslim
+edildikten sonra kalan bütçeye tam sığan ilk alternatifi kullanır. Hiçbiri
+sığmazsa açılış kalır; dar görünüm normal zarf kotasıyla kırpılabilir.
+Son zarf kendi bütçesiyle bu kararı yeniden verir; ikinci pencere başka kaynağı
+veya açılışı kırpamaz. Örtüşen aralıklar yinelenmez. Bütün görünümlerin kaynak
+aralıkları saklanır; continuity yalnız gerçekten teslim edilen görünümü
+hatırlar. Bu yerel açılış rezervi
+Jev kartına eklenmez; kartlar sorguyla ilgili seçimi göstermeye devam eder.
 Kartın toplam excerpt sınırı 600 karakterdir; başlık ve aralık işaretleri bu
 sınıra dahildir. Tam metne ihtiyaç duyan bir semantik kararı bu görünüm garanti
 etmez. Sağlayıcı eşikleri değiştirilmemiştir; yeni görünüm canlı ölçülmelidir.

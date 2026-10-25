@@ -1598,9 +1598,10 @@ def pack_widened(records, wider, limit=5, budget_chars=8000, stale_count=0):
     from the room every record left over, in rank order.
 
     A wider version (a second passage of the same note) never cuts another record short: it is
-    used whole or not at all, and only once each record's own text fits. The result's sources
-    stay the narrow originals and .wider is kept, so every later pack (the advisor's, the final
-    envelope's) decides again at its own budget.
+    used whole or not at all, and only once each record's own text fits. A value may also be
+    a list of alternatives, in preference order; only the first whole one that fits is used.
+    The result's sources stay the narrow originals and .wider is kept, so every later pack
+    (the advisor's or the final envelope's) decides again at its own budget.
     """
     packed = pack_context(records, limit, budget_chars, stale_count)
     widened, spare, chosen = False, budget_chars - packed["used_chars"], list(records)
@@ -1609,9 +1610,12 @@ def pack_widened(records, wider, limit=5, budget_chars=8000, stale_count=0):
         broader = wider.get(record["id"])
         if broader is None or record["id"] not in whole:
             continue
-        extra = len(_json(broader)) - len(_json(record))
-        if extra <= spare:
-            chosen[position], spare, widened = broader, spare - extra, True
+        alternatives = broader if isinstance(broader, (list, tuple)) else [broader]
+        for alternative in alternatives:
+            extra = len(_json(alternative)) - len(_json(record))
+            if extra <= spare:
+                chosen[position], spare, widened = alternative, spare - extra, True
+                break
     if widened:
         packed = pack_context(chosen, limit, budget_chars, stale_count)
     by_id = {r["id"]: r for r in records}
@@ -1675,7 +1679,8 @@ def render_context(context, budget_chars, prefix="", suffix=""):
     full = {r["id"]: r for r in records}
     wider = getattr(context, "wider", {})
     records = [_delivery_view(r) for r in records]
-    wider_views = {key: _delivery_view(record) for key, record in wider.items()}
+    wider_views = {key: ([_delivery_view(r) for r in record] if isinstance(record, (list, tuple))
+                         else _delivery_view(record)) for key, record in wider.items()}
     extra = {k: v for k, v in context.items() if k not in
              {"records", "citations", "used_chars", "budget_chars", "omitted_count", "truncated", "abstained", "stale_count"}}
     available = max(0, budget_chars - len(prefix))

@@ -249,7 +249,7 @@ def auto_context(store, harness, query, context, *, budget_chars, timeout_cap=2.
     remaining_slots = max(0, AUTO_POOL - len(evaluated_strict))
     evaluated_loose = loose_remote[:remaining_slots]
 
-    from beyin_v3_evidence import loose_passages, card_excerpt
+    from beyin_v3_evidence import loose_passages, loose_delivery, card_excerpt
     wider = dict(getattr(context, 'wider', {}))
     evidence = dict(getattr(context, 'evidence', {}))
     selected_loose = []
@@ -312,6 +312,18 @@ def auto_context(store, harness, query, context, *, budget_chars, timeout_cap=2.
         return context
     if not _fresh(store, records) or client.inspect_config(store.state_dir) != mode:
         return context
+    # Cards keep query-selected evidence. Delivery reserves the source's opening
+    # and adds the primary match only from genuinely spare envelope room.
+    for i, record in enumerate(keep):
+        ident = record['id']
+        if ident in known:
+            continue
+        narrow, broad, ref = loose_delivery(current[ident], evidence[ident], query)
+        keep[i] = narrow
+        evidence[ident] = ref
+        wider.pop(ident, None)
+        if broad is not None:
+            wider[ident] = broad
     ranked_remote = sorted([r for r in keep if remote_allowed(r)],
                            key=lambda r: (-by_record.get(r['id'], 0), r['id']))
     ranked_local = [r for r in keep if not remote_allowed(r) and r['id'] in known]
