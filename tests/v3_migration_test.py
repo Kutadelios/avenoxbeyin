@@ -134,12 +134,18 @@ class MigrationTest(unittest.TestCase):
                                   cwd=self.root, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                   stderr=subprocess.DEVNULL, start_new_session=True)
 
+        stopped = False
+
         def stop():
+            nonlocal stopped
+            if stopped:
+                return
             try:
                 os.killpg(writer.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             writer.wait(timeout=60)
+            stopped = True
         self.addCleanup(stop)
         sentinels = []
         deadline = time.monotonic() + 120
@@ -154,7 +160,15 @@ class MigrationTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'legacy writer lock is active'):
             with self.m.migration_guard(self.root, self.state):
                 pass
+        from unittest import mock
+        # A failed first signal must remain visible and leave cleanup retryable.
+        with mock.patch.object(os, 'killpg', side_effect=PermissionError('synthetic denial')):
+            with self.assertRaisesRegex(PermissionError, 'synthetic denial'):
+                stop()
         stop()
+        # The reaped leader's PID may now belong to another process group.
+        with mock.patch.object(os, 'killpg', side_effect=AssertionError('signalled a reaped writer')):
+            stop()
         left = sentinel.read_bytes()
         self.assertEqual(json.loads(left)['status'], 'inflight')
         with self.m.migration_guard(self.root, self.state) as plan:

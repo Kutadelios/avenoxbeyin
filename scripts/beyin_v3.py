@@ -1015,6 +1015,13 @@ def parser(note_namespace=None, is_json=False):
                           help="Reset Hermes platform overrides to defaults")
     compact = sub.add_parser("companion-compact", help="Move older Last-Session/Threads entries verbatim into a private archive; deletes nothing")
     compact.add_argument("--dry-run", action="store_true", help="Report what would move without writing")
+    trace = sub.add_parser("chat-trace", help="Opt-in short conversation checkpoints; never saves transcripts")
+    trace.add_argument("action", choices=("status", "on", "off", "write"))
+    trace.add_argument("--harness", choices=("claude", "codex"))
+    trace.add_argument("--session", help="The 24-character Receipt session value shown by the hook")
+    trace_text = trace.add_mutually_exclusive_group()
+    trace_text.add_argument("--text", help="Explicit short summary; dated paragraph must fit 450 characters")
+    trace_text.add_argument("--file", help="UTF-8 summary file, or - for stdin")
     skill = sub.add_parser("skill-import", help="Import one explicitly chosen skill directory")
     skill.add_argument("--source", type=Path, required=True)
     skill.add_argument("--name")
@@ -1095,6 +1102,9 @@ def parser(note_namespace=None, is_json=False):
     learn.add_argument("--scope", default=None, help="Scope of the learning: global or project name")
     learn.add_argument("--session", default="", help="Session ID associated with candidate")
     learn.add_argument("--list", action="store_true", help="List active candidate learnings")
+    learn.add_argument("--resolve", choices=("distilled", "discarded"), default=None,
+                       help="Resolve candidates for session as distilled or discarded")
+    learn.add_argument("--all", action="store_true", help="When resolving or listing, apply across all sessions")
     return root
 
 
@@ -1155,7 +1165,7 @@ def main(argv=None, return_result=False):
         if read_only_context and args.jev:
             raise ValueError("context --no-sync cannot be combined with --jev")
         # The advisor switch reads and writes one small file; it needs no index or sync engine.
-        engine = load_engine() if args.command not in ("jev", "project-scope", "ingest-server", "bridge") else None
+        engine = load_engine() if args.command not in ("jev", "project-scope", "ingest-server", "bridge", "chat-trace") else None
         store = engine.MemoryStore(state, vault, read_only=read_only_context) if engine else None
         sync = load_sync()(vault, state) if args.command in ("sync", "recover-views", "recap", "receipt", "task-update", "note-create", "note-read", "note-edit", "task-create", "context", "jev-review", "jev-answer", "jev-memory", "history") and not read_only_context else None
         if args.command == "bridge":
@@ -1624,6 +1634,25 @@ def main(argv=None, return_result=False):
             if any(entry['status'] == 'compacted' for entry in result['files'].values()):
                 # Index the shorter sources and the private archive before anyone reads them.
                 result['sync'] = {'status': load_sync()(vault, state).sync().get('status')}
+        elif args.command == "chat-trace":
+            _ensure_scripts_path()
+            import beyin_v3_chat_trace as chat_trace
+            if args.action == 'write':
+                if not args.harness or not args.session or (args.text is None and args.file is None):
+                    raise ValueError('write requires --harness, --session and --text or --file')
+                text = args.text
+                if args.file is not None:
+                    if args.file == '-':
+                        text = sys.stdin.read(4097)
+                    else:
+                        with Path(args.file).open(encoding='utf-8') as handle:
+                            text = handle.read(4097)
+                result = chat_trace.write(vault, state, args.harness, args.session, text)
+            elif args.harness or args.session or args.text is not None or args.file is not None:
+                raise ValueError('summary arguments are only valid with chat-trace write')
+            else:
+                result = (chat_trace.settings(state) if args.action == 'status' else
+                          chat_trace.configure(state, args.action == 'on'))
         elif args.command in ("sync", "recover-views"):
             recover = getattr(args, "recover_views", False) or args.command == "recover-views"
             result = sync.sync(full=getattr(args, "full", False), recover_views=recover)
@@ -1744,10 +1773,14 @@ def main(argv=None, return_result=False):
                 payload = {"event_id": args.event_id, "summary": summary, "refs": args.ref}
                 if args.session is not None:
                     payload["session"] = args.session
+                elif os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BEYIN_V3_SESSION_ID"):
+                    payload["session"] = hashlib.sha256((os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BEYIN_V3_SESSION_ID")).encode("utf-8")).hexdigest()[:24]
                 if args.link:
                     payload["links"] = args.link
             else:
                 payload = read_json(args.file if args.file is not None else "-")
+                if "session" not in payload and (os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BEYIN_V3_SESSION_ID")):
+                    payload["session"] = hashlib.sha256((os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BEYIN_V3_SESSION_ID")).encode("utf-8")).hexdigest()[:24]
             result = sync.receipt(payload["event_id"], payload["summary"],
                                           payload["refs"], args.harness, session=payload.get('session'),
                                           links=payload.get('links'))
@@ -1766,14 +1799,24 @@ def main(argv=None, return_result=False):
                                  ensure_ascii=True), file=sys.stderr)
         elif args.command == "learn":
             _ensure_scripts_path()
-            from beyin_v3_learning import stage_candidate, list_candidates
-            sess = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BEYIN_V3_SESSION_ID") or "cli"
-            if args.candidate:
+            from beyin_v3_learning import stage_candidate, list_candidates, resolve_candidates
+            env_session = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BEYIN_V3_SESSION_ID")
+            sess = args.session or (hashlib.sha256(env_session.encode("utf-8")).hexdigest()[:24]
+                                    if env_session else "cli")
+            if getattr(args, "all", False):
+                target_sess = None
+            else:
+                target_sess = sess
+            if args.resolve:
+                count = resolve_candidates(state, session=target_sess, target_status=args.resolve)
+                result = {"status": "succeeded", "resolved_count": count, "session": target_sess, "target_status": args.resolve}
+            elif args.candidate:
                 result = stage_candidate(state, sess, args.candidate, source=args.source, scope=args.scope or "global")
             elif args.list:
-                result = {"candidates": list_candidates(state, session=args.session or None, scope=args.scope)}
+                list_sess = None if getattr(args, "all", False) else (args.session or None)
+                result = {"candidates": list_candidates(state, session=list_sess, scope=args.scope)}
             else:
-                raise ValueError("either --candidate or --list is required")
+                raise ValueError("one of --candidate, --list, or --resolve is required")
         else:
             payload = read_json(args.file)
             result = sync.update_task(payload["id"], payload["expected_revision"], payload["changes"])

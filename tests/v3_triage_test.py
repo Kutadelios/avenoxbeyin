@@ -52,6 +52,21 @@ class TriageTest(unittest.TestCase):
         t = self.now - (days * 86400)
         os.utime(path, (t, t))
 
+    def test_yakala_recommendation_requires_skill_file(self):
+        inbox = self.vault / 'inbox'
+        inbox.mkdir()
+        (inbox / 'pending.md').write_text('# Pending\n', encoding='utf-8')
+        skill = self.vault / '.agents/skills/beyin-yakala'
+        skill.mkdir(parents=True)
+        report = triage_module.scan_inbox(self.vault, self.now, self.state)
+        self.assertFalse(report['has_yakala'])
+        recs = triage_module.generate_recommendations({'count': 1}, {}, {'digest_days': 7}, {}, vault=self.vault)
+        self.assertNotIn('beyin-yakala', ' '.join(recs))
+        (skill / 'SKILL.md').write_text('# Yakala\n', encoding='utf-8')
+        self.assertTrue(triage_module.scan_inbox(self.vault, self.now, self.state)['has_yakala'])
+        recs = triage_module.generate_recommendations({'count': 1}, {}, {'digest_days': 7}, {}, vault=self.vault)
+        self.assertIn('beyin-yakala', ' '.join(recs))
+
     def test_nested_sensitive_private_and_excluded_notes_are_not_reported(self):
         for folder in ('tasks', 'knowledge'):
             for suffix, front in (('Şifreler/hidden.md', ''), ('visible/private.md', 'visibility: private\n'), ('vendor/hidden.md', '')):
@@ -265,6 +280,79 @@ class TriageTest(unittest.TestCase):
         result = subprocess.run(cmd, cwd=str(self.vault), env=env, capture_output=True, text=True, encoding='utf-8', errors='replace')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("=== Ikinci Beyin Sindirim ve Durum Raporu (Triage) ===", result.stdout)
+
+
+    def test_inbox_index_file_not_counted_as_pending_capture(self):
+        """Inbox index note ('type: index' / Inbox.md) must not be counted as a pending capture note (#469)."""
+        inbox = self.vault / '📥 000-Inbox'
+        inbox.mkdir(parents=True, exist_ok=True)
+        # Entrance index note
+        index_note = inbox / 'Inbox.md'
+        index_note.write_text('---\ntype: index\ncreated: 2026-09-01\n---\n# Gelen Kutusu Giris\n', encoding='utf-8')
+        self.set_age(index_note, 30)
+
+        # Empty Dump directory or valid captures
+        report = triage_module.scan_inbox(self.vault, self.now, state=self.state)
+        self.assertEqual(report['count'], 0)
+
+        # When an actual capture note is present
+        dump = inbox / 'Dump'
+        dump.mkdir(exist_ok=True)
+        capture = dump / 'kaynak.md'
+        capture.write_text('---\ncreated: 2026-10-10\n---\nKaynak\n', encoding='utf-8')
+        self.set_age(capture, 2)
+
+        report2 = triage_module.scan_inbox(self.vault, self.now, state=self.state)
+        self.assertEqual(report2['count'], 1)
+
+    def test_triage_recommendations_skill_presence_branching(self):
+        """When beyin-yakala is not installed, recommendation suggests note-create (#469)."""
+        # 1. Without yakala installed
+        recs_no_yakala = triage_module.generate_recommendations(
+            inbox={'count': 2, 'has_yakala': False}, tasks={}, digest={'count': 1, 'digest_days': 7}, companion={}
+        )
+        self.assertIn("note-create", recs_no_yakala[0])
+        self.assertNotIn("'beyin-yakala'", recs_no_yakala[0])
+
+        # 2. With yakala installed
+        recs_yakala = triage_module.generate_recommendations(
+            inbox={'count': 2, 'has_yakala': True}, tasks={}, digest={'count': 1, 'digest_days': 7}, companion={}
+        )
+        self.assertIn("beyin-yakala", recs_yakala[0])
+
+    def test_knowledge_digest_prioritizes_created_date_over_fresh_mtime(self):
+        """Knowledge digest prioritizes frontmatter created date over rewritten mtime (#469)."""
+        knowledge = self.vault / 'knowledge'
+        knowledge.mkdir(parents=True, exist_ok=True)
+
+        # Old note with created 100 days ago, but refreshed mtime (e.g. bulk ID addition or folder move)
+        old_note = knowledge / 'eski-bilgi.md'
+        old_note.write_text('---\ntitle: Eski Bilgi\ncreated: 2026-07-01\nupdated: 2026-10-11\n---\n# Eski\n', encoding='utf-8')
+        self.set_age(old_note, 1)  # mtime is 1 day ago
+
+        # Truly new note created 2 days ago
+        new_note = knowledge / 'yeni-bilgi.md'
+        new_note.write_text('---\ntitle: Yeni Bilgi\ncreated: 2026-10-10\n---\n# Yeni\n', encoding='utf-8')
+        self.set_age(new_note, 2)
+
+        # Undated note with fresh mtime
+        undated_note = knowledge / 'tarihsiz.md'
+        undated_note.write_text('# Tarihsiz\nNot\n', encoding='utf-8')
+        self.set_age(undated_note, 2)
+
+        digest = triage_module.scan_knowledge_digest(self.vault, self.now, digest_days=7)
+        # Old note with created 2026-07-01 must NOT be in 7-day digest!
+        paths = [item['path'] for item in digest['items']]
+        self.assertNotIn('knowledge/eski-bilgi.md', paths)
+        self.assertIn('knowledge/yeni-bilgi.md', paths)
+        self.assertIn('knowledge/tarihsiz.md', paths)
+        self.assertEqual(digest['mtime_count'], 1)
+        report = triage_module.triage(self.vault, now=self.now)
+        human = triage_module.format_human(report)
+        self.assertIn('Tarih onceligi: created, yoksa updated, yoksa mtime', human)
+        self.assertNotIn('Uretilen/guncellenen', human)
+        self.assertFalse(any('uretildi/guncellendi' in item for item in report['recommendations']))
+
 
 
 if __name__ == '__main__':

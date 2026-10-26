@@ -259,29 +259,38 @@ def _has_staged_candidates(state, session, since):
     """Candidates staged in this edit window; an older entry must not answer for a new session."""
     try:
         from beyin_v3_learning import has_candidates
-        return has_candidates(state, session, since=since)
+        return has_candidates(state, session, since=since, status=None)
     except Exception:
         return False
 
 
 def _has_knowledge_update(vault, receipt, since):
-    """A knowledge ref is a citation, not evidence of a write in this edit window."""
-    if not receipt:
+    """A distilled note cited by this receipt with a recent mtime."""
+    if not receipt or not vault:
         return False
-    from beyin_v3_projections import DISTILLATION_ROOTS, is_distilled_note
-    if not vault:
+    from beyin_v3_projections import is_distilled_note
+    root = Path(vault).resolve()
+    refs = receipt.get("refs")
+    if not isinstance(refs, (list, tuple)):
         return False
-    for root in DISTILLATION_ROOTS:
-        k_dir = Path(vault) / root
-        if not k_dir.is_dir():
+    for ref in refs:
+        if not isinstance(ref, str) or not ref.strip():
             continue
-        for path in k_dir.rglob("*.md"):
-            try:
-                if (path.is_file() and not path.is_symlink() and path.stat().st_mtime >= since and
-                        is_distilled_note(path.relative_to(vault).as_posix())):
-                    return True
-            except (ValueError, OSError):
+        try:
+            rel = ref.strip().replace('\\', '/')
+            if not is_distilled_note(rel):
                 continue
+            lexical = root / rel
+            if lexical.is_symlink():
+                continue
+            path = lexical.resolve()
+            resolved_rel = path.relative_to(root).as_posix()
+            if not path.is_file() or not is_distilled_note(resolved_rel):
+                continue
+            if path.stat().st_mtime >= since:
+                return True
+        except (ValueError, OSError):
+            continue
     return False
 
 
@@ -294,7 +303,7 @@ def _edits_knowledge(vault, payload):
     from beyin_v3_hygiene import edited_paths
     from beyin_v3_projections import is_distilled_note
     root = Path(vault).resolve()
-    for path in edited_paths(payload):
+    for path in edited_paths(payload, limit=None):
         try:
             if path.is_symlink():
                 continue
@@ -429,9 +438,10 @@ def drain_queue(vault, state):
         if gap_path.exists():
             gaps = json.loads(gap_path.read_text(encoding='utf-8'))
             result['potential_missing_receipts'] = gaps['potential_missing_receipts']
-            # The prompt warning names only the last 7 days, already counted by this sync (#373).
+            # The prompt warning names only the last 7 days, already counted by this sync (#373, #462).
             recent = (gaps.get('receipt_coverage') or {}).get('last_7d') or {}
             result['recent_missing_receipts'] = recent.get('missing', 0)
+            result['recent_no_observed_edit'] = recent.get('missing_no_observed_edit', recent.get('no_observed_edit', 0))
         from beyin_v3_skills import sync_skills
         skills = sync_skills(vault, state)
         # Skill mirroring owns no queued event, so its outcome is reported for
@@ -615,6 +625,12 @@ def main():
         # After enqueue, so reminder bookkeeping can never cost the queued checkpoint.
         # The global bridge (--metadata-only) discards stdout, so it keeps no reminder state.
         reminder = None if args.metadata_only else receipt_reminder(payload, state, args.harness, event, vault=vault)
+        if not args.metadata_only and event == 'UserPromptSubmit' and (state / 'chat-trace.json').is_file():
+            try:
+                from beyin_v3_chat_trace import hint
+                notice += hint(state, args.harness, payload)
+            except Exception:
+                pass  # Optional conversation hints cannot cost a turn or replace its context.
         inject = settings['context_mode'] == 'turn' or (settings['context_mode'] == 'session' and event == 'SessionStart')
         if not inject or args.metadata_only or (event == 'UserPromptSubmit' and is_synthetic_prompt(payload)):
             print(json.dumps(reminder) if reminder else (json.dumps(output_context(args.harness, event, notice)) if notice else ('{"decision":"stop"}' if args.harness == 'antigravity' else '{}')))
@@ -674,9 +690,15 @@ def main():
                 if sync.get('skill_conflicts'):
                     warning += 'Shared skills differ between harnesses; both versions are preserved. Run doctor before trusting skill text.\n'
                 # Only recent gaps reach the prompt; the all-time count never clears and stays in doctor (#373).
+                # Checkpoints without observed edits are reported separately (#462).
                 recent = sync.get('recent_missing_receipts')
+                no_edits = sync.get('recent_no_observed_edit', 0)
                 if isinstance(recent, int) and recent > 0:
-                    warning += (f'Prior checkpoints may lack structured receipts ({recent} in the last 7 days); '
+                    if isinstance(no_edits, int) and no_edits > 0:
+                        detail = f'{recent} in the last 7 days ({no_edits} without observed edits)'
+                    else:
+                        detail = f'{recent} in the last 7 days'
+                    warning += (f'Prior checkpoints may lack structured receipts ({detail}); '
                                 'check Last-Session/Threads and current sources for unfinished work.\n')
             from beyin_v3_companion import (context as companion_context, relevant, opening_budget, client_budget,
                                             client_rebudget, fit_client)
@@ -691,11 +713,16 @@ def main():
                 rules_project = project
                 if rules_project is None:
                     from beyin_v3_bridge import working_directory
-                    from beyin_v3_projects import resolve_active_project
+                    from beyin_v3_projects import resolve_active_project, resolve_project_from_query
                     try:
                         rules_project = resolve_active_project(vault, working_directory(payload, args.harness))
                     except Exception:
                         rules_project = None
+                    if rules_project is None and query:
+                        try:
+                            rules_project = resolve_project_from_query(vault, query)
+                        except Exception:
+                            rules_project = None
                 # The opening may carry its own machine-local budget (#140); never a vault preference.
                 limit = client_budget(args.harness, opening_budget(state, settings['context_chars']))
                 text = companion_context(store, limit, session, args.harness, query, receipt, warning, project=project,

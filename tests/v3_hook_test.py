@@ -517,6 +517,34 @@ class HookInstallerTest(unittest.TestCase):
                 engine.receipt(name, 'İş tamamlandı.\nÖğrenilen: Onay kuralı.', [relative], harness, session=session)
                 self.assertEqual(self.lifecycle('Stop', name, harness), {})
 
+    def test_stop_knowledge_reminder_accepts_knowledge_edit_beyond_five_paths_in_patch(self):
+        # Issue #509: apply_patch editing 6+ files with distilled note as 6th or later path.
+        engine = self.seed()
+        name = 'multi-patch-knowledge'
+        relative = 'knowledge/concepts/sqlite-wal.md'
+        note = self.vault / relative
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text('# SQLite WAL\nTimeout 5s.\n', encoding='utf-8')
+        before = time.time() - 10
+        os.utime(note, (before, before))
+
+        patch_lines = ['*** Begin Patch\n']
+        for i in range(1, 6):
+            f_rel = f'notes/file{i}.md'
+            f_path = self.vault / f_rel
+            f_path.parent.mkdir(parents=True, exist_ok=True)
+            f_path.write_text(f'# File {i}\n', encoding='utf-8')
+            patch_lines.append(f'*** Update File: {f_rel}\n+change {i}\n')
+        patch_lines.append(f'*** Update File: {relative}\n+WAL timeout rule\n*** End Patch\n')
+        command = ''.join(patch_lines)
+
+        tool_input = {'command': command}
+        self.lifecycle('PostToolUse', name, 'codex', tool_input=tool_input, cwd=str(self.vault))
+        session = hashlib.sha256(name.encode()).hexdigest()[:24]
+        engine.receipt(name, 'İş tamamlandı.\nÖğrenilen: WAL timeout en az 5 sn.', [relative], 'codex', session=session)
+        # Must pass without block: knowledge was edited in the 6th path
+        self.assertEqual(self.lifecycle('Stop', name, 'codex'), {})
+
     def test_knowledge_update_requires_a_recent_file_not_a_ref_alone(self):
         receipt = {'refs': ['knowledge/concepts/existing.md']}
         note = self.vault / receipt['refs'][0]
@@ -529,10 +557,27 @@ class HookInstallerTest(unittest.TestCase):
         note.write_text('# Updated\nNew knowledge.\n', encoding='utf-8')
         os.utime(note, (30, 30))
         self.assertTrue(self.hook._has_knowledge_update(self.vault, receipt, 20))
-        # A recent note still counts even when the receipt cites another source.
-        self.assertTrue(self.hook._has_knowledge_update(self.vault, {'refs': ['notes/task.md']}, 20))
+        # A parallel session's recent note does not count when this receipt does not cite it (#509).
+        self.assertFalse(self.hook._has_knowledge_update(self.vault, {'refs': ['notes/task.md']}, 20))
         note.unlink()
         self.assertFalse(self.hook._has_knowledge_update(self.vault, receipt, 20))
+
+    def test_knowledge_update_rejects_symlink_and_nonknowledge_target(self):
+        self.seed()
+        folder = self.vault / 'knowledge/concepts'
+        folder.mkdir(parents=True)
+        alias = folder / 'alias.md'
+        try:
+            alias.symlink_to(self.vault / 'notes/task.md')
+        except OSError:
+            self.skipTest('symlinks unavailable')
+        receipt = {'refs': ['knowledge/concepts/alias.md']}
+        self.assertFalse(self.hook._has_knowledge_update(self.vault, receipt, 0))
+        alias.unlink()
+        folder.rmdir()
+        folder.symlink_to(self.vault / 'notes', target_is_directory=True)
+        receipt = {'refs': ['knowledge/concepts/task.md']}
+        self.assertFalse(self.hook._has_knowledge_update(self.vault, receipt, 0))
 
     def test_stop_knowledge_reminder_passes_when_learning_is_declared_none(self):
         engine = self.seed()
@@ -597,13 +642,16 @@ class HookInstallerTest(unittest.TestCase):
                 with self.subTest(root=root, via_ref=via_ref):
                     name = f'human-root-{index}-{via_ref}'
                     session = hashlib.sha256(name.encode()).hexdigest()[:24]
-                    self.lifecycle('PostToolUse', name, 'claude')
                     note = self.vault / root / 'Ajanlar' / f'wal-{name}.md'
                     note.parent.mkdir(parents=True, exist_ok=True)
-                    note.write_text('# WAL\n', encoding='utf-8')
-                    refs = ['notes/task.md']
                     if via_ref:
-                        refs.append(note.relative_to(self.vault).as_posix())
+                        self.lifecycle('PostToolUse', name, 'claude')
+                        note.write_text('# WAL\n', encoding='utf-8')
+                        refs = ['notes/task.md', note.relative_to(self.vault).as_posix()]
+                    else:
+                        note.write_text('# WAL\n', encoding='utf-8')
+                        self.lifecycle('PostToolUse', name, 'claude', tool_input={'file_path': str(note)})
+                        refs = ['notes/task.md']
                     engine.receipt(f'{name}-1', summary, refs, 'claude', session=session)
                     self.assertEqual(self.lifecycle('Stop', name, 'claude'), {})
                     os.utime(note, (0, 0))  # keep the folder scan of the next case honest
@@ -752,13 +800,13 @@ class HookInstallerTest(unittest.TestCase):
         first = [p.read_bytes() for p in paths]
         self.install()
         self.assertEqual([p.read_bytes() for p in paths], first)
-        claude = json.loads(paths[0].read_text())
+        claude = json.loads(paths[0].read_text(encoding='utf-8'))
         self.assertEqual(claude['permissions'], originals['.claude/settings.local.json']['permissions'])
         self.assertIn(originals['.claude/settings.local.json']['hooks']['SessionStart'][0], claude['hooks']['SessionStart'])
-        self.assertEqual(json.loads(paths[1].read_text())['trust'], {'synthetic-trust': 'unchanged'})
-        self.assertIn('synthetic-other-agent', json.loads(paths[2].read_text()))
-        self.assertIn('Keep this user content.', (self.vault / 'AGENTS.md').read_text())
-        agent_config = json.loads(paths[2].read_text())
+        self.assertEqual(json.loads(paths[1].read_text(encoding='utf-8'))['trust'], {'synthetic-trust': 'unchanged'})
+        self.assertIn('synthetic-other-agent', json.loads(paths[2].read_text(encoding='utf-8')))
+        self.assertIn('Keep this user content.', (self.vault / 'AGENTS.md').read_text(encoding='utf-8'))
+        agent_config = json.loads(paths[2].read_text(encoding='utf-8'))
         def commands(value):
             if isinstance(value, dict):
                 for key, item in value.items():
@@ -1318,6 +1366,42 @@ runpy.run_path({str(HOOK)!r}, run_name='__main__')
         context = opening.get('hookSpecificOutput', {}).get('additionalContext', '')
         self.assertIn('ALPHA_ONLY_RULE', context)
         self.assertIn('Synthetic Reviewer', context)
+
+    def test_query_alias_loads_canonical_scoped_rules(self):
+        engine = self.seed()
+        folder = self.vault / 'projects/client'
+        folder.mkdir(parents=True)
+        (folder / 'Kurallar.md').write_text('# Rules\n- [kapsam: alpha] SCOPED_ALPHA_ALIAS_CANARY\n', encoding='utf-8')
+        (self.vault / '.beyin-projects.json').write_text(json.dumps({'folders': {'projects/client': 'alpha'}}), encoding='utf-8')
+        engine.sync()
+        payload = dict(self.payload, hook_event_name='SessionStart', cwd=str(self.vault), prompt='client projesinde kurallar')
+        payload.pop('project', None)
+        context = self.invoke(payload, 'claude').get('hookSpecificOutput', {}).get('additionalContext', '')
+        self.assertIn('SCOPED_ALPHA_ALIAS_CANARY', context)
+
+    def test_hook_resolves_project_from_query_and_sibling_cwd(self):
+        """Hook resolves active project from query at vault root and from sibling directory (#288, #403)."""
+        engine = self.seed()
+        proj_dir = self.vault / 'projects/alpha'
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        (proj_dir / 'Kurallar.md').write_text('# Alpha Kurallari\n- **kural:** ALPHA_HOOK_QUERY_RULE\n', encoding='utf-8')
+        engine.sync()
+
+        # 1. At vault root, prompt explicitly mentions 'alpha'
+        payload = dict(self.payload, hook_event_name='SessionStart', cwd=str(self.vault), prompt='alpha projesinde kural ve testler')
+        payload.pop('project', None)
+        response = self.invoke(payload, 'claude')
+        context = response.get('hookSpecificOutput', {}).get('additionalContext', '')
+        self.assertIn('ALPHA_HOOK_QUERY_RULE', context)
+
+        # 2. Sibling directory outside vault named 'alpha'
+        sibling = Path(self.tmp.name) / 'alpha' / 'sub'
+        sibling.mkdir(parents=True)
+        sibling_payload = dict(self.payload, hook_event_name='SessionStart', cwd=str(sibling), prompt='unscoped prompt')
+        sibling_payload.pop('project', None)
+        sibling_response = self.invoke(sibling_payload, 'claude')
+        sibling_context = sibling_response.get('hookSpecificOutput', {}).get('additionalContext', '')
+        self.assertIn('ALPHA_HOOK_QUERY_RULE', sibling_context)
 
 
 
