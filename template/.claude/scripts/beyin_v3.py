@@ -1408,7 +1408,10 @@ class MemoryStore:
             # Unrelated/generic stems must not widen candidates or dilute BM25 lengths.
             source_stem = (Path(record.get("source", "")).stem.replace("-", " ").replace("_", " ")
                            if name_score else "")
-            counts = _token_counts(record["text"] + " " + _json(record["facts"]) + " " + str(record.get("title", "")) + " " + alias_text + " " + source_stem)
+            # Without a query term no count can score or reorder a record (snapshots, scoped
+            # listings, the advisor's eligibility pass), so the note text is not tokenised.
+            counts = (_token_counts(record["text"] + " " + _json(record["facts"]) + " " + str(record.get("title", "")) + " " + alias_text + " " + source_stem)
+                      if terms else Counter())
             for stopword in STOPWORDS & counts.keys():
                 del counts[stopword]
             term_counts[record["id"]] = counts
