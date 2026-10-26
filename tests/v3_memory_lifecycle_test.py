@@ -331,13 +331,13 @@ class MemoryLifecycleDoDTest(unittest.TestCase):
 
         # Every query runs in a new interpreter; no parent memory/store object survives.
         def retrieve(query, project=None):
-            code = ("import json,sys;sys.path.insert(0,sys.argv[1]);"
-                    "from beyin_v3 import MemoryStore;"
-                    "print(json.dumps(MemoryStore(sys.argv[2],sys.argv[3],read_only=True)"
-                    ".retrieve(sys.argv[4],project=sys.argv[5] or None)))")
-            result = subprocess.run([sys.executable, '-c', code, str(ROOT / 'template/.claude/scripts'),
-                                     str(self.state), str(self.vault), query, project or ''],
-                                    capture_output=True, text=True, check=True, env=self.env, timeout=30)
+            command = [sys.executable, str(ROOT / 'scripts/beyin_v3.py'),
+                       '--vault', str(self.vault), '--state', str(self.state),
+                       'context', query, '--harness', 'codex']
+            if project is not None:
+                command.extend(['--project', project])
+            result = subprocess.run(command, capture_output=True, text=True,
+                                    check=True, env=self.env, timeout=30)
             self.assertNotIn('PRIVATE_LIFECYCLE_CANARY', result.stdout)
             return json.loads(result.stdout)
 
