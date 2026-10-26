@@ -3268,12 +3268,12 @@ def windows_sources(context, clip, fresh, image=None, shot=None):
     """Pure source decisions. All alternatives survive, even when another is initially selected."""
     sources = []
 
-    def add(kind, value, label, on, key, title=None, picture=None):
+    def add(kind, value, label, on, key, title=None, picture=None, clipboard=False):
         if kind == 'url' and value and any(source['kind'] == 'url' and canonical(source['value']) == canonical(value)
                                           for source in sources):
             return
         if value:
-            sources.append(dict(kind=kind, value=value, label=label, on=bool(on), key=key, title=title, image=picture))
+            sources.append(dict(kind=kind, value=value, label=label, on=bool(on), key=key, title=title, image=picture, clipboard=clipboard))
     copied_url = tab_url(clip) if re.match(r'^https?://', clip, re.I) else None
     hovered, page = context.get('url_imlec'), context.get('url')
     # A link read from the browser is what the key was pressed for: it wins over anything on the
@@ -3298,8 +3298,11 @@ def windows_sources(context, clip, fresh, image=None, shot=None):
                                     (shot, 'Pencere görüntüsü', False, 'w')):
         if picture:
             add('file', picture['path'], label, on, key, picture=picture)
+    clipboard_files = bool(context.get('dosyalar_pano'))
+    files_on = clipboard_leads if clipboard_files else True
     for index, path in enumerate(context.get('dosyalar') or []):
-        add('file', path, Path(path).name, True, str(index + 1) if index < 9 else '')
+        add('file', path, Path(path).name, files_on, str(index + 1) if index < 9 else '',
+            clipboard=clipboard_files)
     for source in sources:
         source['clipboard'] = source.get('clipboard', False) or source['key'] in ('p', 'm', 'g')
     return sources
@@ -4415,6 +4418,25 @@ def _win_clipboard_payload(limit=IMAGE_LIMIT, tries=6, snapshot=False):
             before = _clipboard_sequence()
             raw = take(13)
             found['text'] = raw.decode('utf-16le', 'replace').split('\0', 1)[0] if raw else ''
+            if user32.IsClipboardFormatAvailable(15):  # CF_HDROP
+                handle = user32.GetClipboardData(15)
+                if handle:
+                    shell32 = ctypes.WinDLL('shell32')
+                    shell32.DragQueryFileW.argtypes = [wintypes.HANDLE, wintypes.UINT, wintypes.LPWSTR, wintypes.UINT]
+                    shell32.DragQueryFileW.restype = wintypes.UINT
+                    count = shell32.DragQueryFileW(handle, 0xFFFFFFFF, None, 0)
+                    files = []
+                    for i in range(min(count, 20)):
+                        length = shell32.DragQueryFileW(handle, i, None, 0)
+                        buf = ctypes.create_unicode_buffer(length + 1)
+                        shell32.DragQueryFileW(handle, i, buf, length + 1)
+                        try:
+                            if buf.value and Path(buf.value).is_file():
+                                files.append(buf.value)
+                        except (OSError, ValueError):
+                            pass
+                    if files:
+                        found['dosyalar'] = files
         for name in ('PNG', 'image/png'):  # what the Snipping Tool, browsers and Office put next to the bitmap
             found['png'] = found['png'] or take(user32.RegisterClipboardFormatW(name))
         if not (found['png'] and png_info(found['png'])):
@@ -6603,6 +6625,10 @@ def _collect_windows(context, vault, state, cancel=None):
         context = windows_enrich(context, cancel)
         if cancel and cancel.is_set():
             return None
+        copied_files = [p for p in payload.get('dosyalar', []) if not (image and snip_path(p))]
+        if copied_files and not context.get('dosyalar'):
+            context['dosyalar'] = copied_files
+            context['dosyalar_pano'] = True
         shot = window_image(context, cancel=cancel)
         sources = windows_sources(context, clip, fresh, image, shot)
         success = True
