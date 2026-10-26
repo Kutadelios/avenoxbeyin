@@ -391,6 +391,77 @@ with locked(engine):
         self.assertEqual((self.vault / 'Threads.md').read_bytes(), b'ALPHA\nBETA\n')
         self.assertEqual(len(list((self.vault / LOCAL_DIRECTORY / 'backups').glob('*.json'))), 2)
 
+    @unittest.skipIf(os.name == 'nt', 'POSIX permits unlinking an open lock file')
+    def test_replaced_lock_reopens_and_locks_current_inode(self):
+        import fcntl
+        lock = self.vault / LOCAL_DIRECTORY / 'writer.lock'
+        original = os.fstat
+        calls = []
+        def replace_first(fd):
+            info = original(fd)
+            calls.append(info.st_ino)
+            if len(calls) == 1:
+                lock.unlink()
+                lock.touch()
+            return info
+        with patch('os.fstat', side_effect=replace_first):
+            with locked(self.engine):
+                self.assertGreaterEqual(len(calls), 2)
+                self.assertNotEqual(calls[0], calls[-1])
+                with lock.open('a+b') as contender:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(contender.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_repeated_stale_inode_respects_deadline(self):
+        from types import SimpleNamespace
+        original = os.fstat
+        def stale(fd):
+            info = original(fd)
+            return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino + 1)
+        with patch('os.fstat', side_effect=stale):
+            with self.assertRaises(NoteConflict):
+                with locked(self.engine, timeout=0.01):
+                    self.fail('stale lock must not enter critical section')
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX permits unlinking an open lock file')
+    def test_lock_replaced_by_symlink_is_rejected_on_retry(self):
+        lock = self.vault / LOCAL_DIRECTORY / 'writer.lock'
+        outside = self.vault.parent / 'outside.lock'
+        outside.write_bytes(b'preserve')
+        original = os.fstat
+        calls = []
+        def replace_first(fd):
+            info = original(fd)
+            calls.append(info.st_ino)
+            if len(calls) == 1:
+                lock.unlink()
+                lock.symlink_to(outside)
+            return info
+        with patch('os.fstat', side_effect=replace_first):
+            with self.assertRaises(ValueError):
+                with locked(self.engine):
+                    self.fail('symlink lock must be rejected')
+        self.assertEqual(outside.read_bytes(), b'preserve')
+
+    def test_writer_lock_toctou_staleness_retries_on_inode_mismatch(self):
+        orig_fstat = os.fstat
+        calls = []
+
+        def mock_fstat(fd):
+            real_st = orig_fstat(fd)
+            if not calls:
+                calls.append(True)
+                class MockStat:
+                    st_dev = real_st.st_dev
+                    st_ino = real_st.st_ino + 999999
+                return MockStat()
+            return real_st
+
+        with patch('os.fstat', side_effect=mock_fstat):
+            with locked(self.engine):
+                self.assertTrue((self.vault / LOCAL_DIRECTORY / 'writer.lock').exists())
+        self.assertEqual(len(calls), 1)
+
 
 if __name__ == '__main__':
     unittest.main()
