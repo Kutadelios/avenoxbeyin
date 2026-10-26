@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -1924,6 +1925,112 @@ class YakalaWindowsCommandUnitTest(unittest.TestCase):
         self.assertIsNone(result)
 
 
+def _cleanup_windows_fixture(directory, timeout=5.0):
+    # The child has exited before cleanup. Another Windows handle can briefly keep
+    # its copied image shared; retain a hard failure for a persistent lock.
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            directory.cleanup()
+            return
+        except PermissionError as error:
+            if getattr(error, 'winerror', None) != 32:
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(0.05, remaining))
+
+
+class WindowsFixtureCleanupTest(unittest.TestCase):
+    @staticmethod
+    def sharing_error():
+        error = PermissionError('fixture executable is still shared')
+        error.winerror = 32
+        return error
+
+    def test_transient_sharing_lock_eventually_removes_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = tempfile.TemporaryDirectory(dir=root)
+            path = Path(directory.name)
+            (path / 'node.exe').write_bytes(b'fixture')
+            cleanup = directory.cleanup
+            def cleanup_after_release():
+                if directory.cleanup.call_count == 1:
+                    raise self.sharing_error()
+                cleanup()
+            # The second attempt performs actual deletion, not just a mocked success.
+            directory.cleanup = Mock(side_effect=cleanup_after_release)
+            with patch.object(time, 'sleep') as sleep:
+                _cleanup_windows_fixture(directory)
+            self.assertEqual(directory.cleanup.call_count, 2)
+            sleep.assert_called_once()
+            self.assertFalse(path.exists())
+
+    def test_persistent_sharing_lock_raises_at_deadline(self):
+        error = self.sharing_error()
+        directory = Mock()
+        directory.cleanup.side_effect = error
+        with patch.object(time, 'monotonic', side_effect=[0, 0, 5]), patch.object(time, 'sleep'):
+            with self.assertRaises(PermissionError) as caught:
+                _cleanup_windows_fixture(directory)
+        self.assertIs(caught.exception, error)
+        self.assertEqual(directory.cleanup.call_count, 2)
+
+    def test_other_permission_errors_are_never_retried(self):
+        for code in (None, 5):
+            with self.subTest(winerror=code):
+                error = PermissionError('access denied')
+                if code is not None:
+                    error.winerror = code
+                directory = Mock()
+                directory.cleanup.side_effect = error
+                with patch.object(time, 'sleep') as sleep:
+                    with self.assertRaises(PermissionError) as caught:
+                        _cleanup_windows_fixture(directory)
+                self.assertIs(caught.exception, error)
+                directory.cleanup.assert_called_once()
+                sleep.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'nt', 'native Windows sharing handle')
+    def test_real_sharing_handle_is_released_before_successful_cleanup(self):
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                        wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        with tempfile.TemporaryDirectory() as root:
+            directory = tempfile.TemporaryDirectory(dir=root)
+            path = Path(directory.name)
+            executable = path / 'node.exe'
+            executable.write_bytes(b'fixture')
+            # Share reads/writes, but deny deletion while this handle is open.
+            handle = kernel32.CreateFileW(str(executable), 0x80000000, 3, None, 3, 0, None)
+            self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
+            released = []
+            wait = time.sleep
+            def release(_delay):
+                nonlocal handle
+                if handle is not None:
+                    self.assertTrue(kernel32.CloseHandle(handle))
+                    released.append(handle)
+                    handle = None
+                wait(_delay)
+            try:
+                with patch.object(time, 'sleep', side_effect=release) as sleep:
+                    _cleanup_windows_fixture(directory)
+                self.assertGreaterEqual(sleep.call_count, 1)
+                self.assertEqual(len(released), 1)
+                self.assertFalse(path.exists())
+            finally:
+                if handle is not None:
+                    kernel32.CloseHandle(handle)
+                directory.cleanup()
+
+
 @unittest.skipUnless(os.name == 'nt', 'Windows cmd.exe argument handling')
 class YakalaWindowsRunTest(unittest.TestCase):
     """Real child processes on Windows. On 3.9.0 these fail: the marker command runs and the URL
@@ -1932,7 +2039,7 @@ class YakalaWindowsRunTest(unittest.TestCase):
     def setUp(self):
         public_dns_fixture(self)
         self.tmp = tempfile.TemporaryDirectory(prefix='v3-winrun-')
-        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(_cleanup_windows_fixture, self.tmp)
         self.work = Path(self.tmp.name)
         self.marker = self.work / MARKER
         old = os.getcwd()
