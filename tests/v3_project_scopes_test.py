@@ -468,6 +468,26 @@ class TestResolveActiveProject(unittest.TestCase):
         cwd.mkdir(parents=True)
         self.assertEqual(beyin_v3_projects.resolve_active_project(self.vault, cwd), 'mapped-project')
 
+    def test_query_alias_preserves_mapping_and_rejects_ambiguity(self):
+        from beyin_v3_projects import resolve_project_from_query
+        (self.vault / 'projects/client').mkdir(parents=True)
+        (self.vault / '.beyin-projects.json').write_text(json.dumps({'folders': {'projects/client': 'alpha'}}))
+        self.assertEqual(resolve_project_from_query(self.vault, 'client projesi'), 'alpha')
+        (self.vault / 'other/client').mkdir(parents=True)
+        (self.vault / '.beyin-projects.json').write_text(json.dumps({'folders': {'projects/client': 'alpha', 'other/client': 'beta'}}))
+        self.assertIsNone(resolve_project_from_query(self.vault, 'client projesi'))
+        self.assertIsNone(resolve_project_from_query(self.vault, 'alphaş sözcüğü'))
+        self.assertIsNone(resolve_project_from_query(self.vault, 'alpha ve beta'))
+
+    def test_external_project_uses_nearest_known_folder(self):
+        from beyin_v3_projects import resolve_active_project
+        (self.vault / 'teams/alpha').mkdir(parents=True)
+        (self.vault / 'projects/beta').mkdir(parents=True)
+        (self.vault / '.beyin-projects.json').write_text(json.dumps({'folders': {'teams/alpha': 'alpha'}}))
+        outside = Path(self.tmp.name) / 'alpha/beta'
+        outside.mkdir(parents=True)
+        self.assertEqual(resolve_active_project(self.vault, outside), 'beta')
+
     def test_resolve_active_project_missing_json(self):
         import beyin_v3_projects
         cwd = self.vault / 'other' / 'folder'
@@ -534,6 +554,40 @@ class TestResolveActiveProject(unittest.TestCase):
         # The cwd still points to a deleted directory, resolving should handle gracefully
         # Using the string path since the Path object might fail to resolve
         self.assertIsNone(beyin_v3_projects.resolve_active_project(self.vault, cwd_path))
+
+    def test_resolve_active_project_sibling_directory(self):
+        import beyin_v3_projects
+        # Project exists in vault
+        (self.vault / 'projects' / 'sibling-proj').mkdir(parents=True)
+        # Sibling directory outside vault
+        sibling_dir = Path(self.tmp.name) / 'sibling-proj'
+        sibling_dir.mkdir()
+        sub_dir = sibling_dir / 'tests' / 'unit'
+        sub_dir.mkdir(parents=True)
+
+        self.assertEqual(beyin_v3_projects.resolve_active_project(self.vault, sibling_dir), 'sibling-proj')
+        self.assertEqual(beyin_v3_projects.resolve_active_project(self.vault, sub_dir), 'sibling-proj')
+
+        unrelated = Path(self.tmp.name) / 'unrelated-dir'
+        unrelated.mkdir()
+        self.assertIsNone(beyin_v3_projects.resolve_active_project(self.vault, unrelated))
+
+    def test_resolve_project_from_query(self):
+        import beyin_v3_projects
+        (self.vault / 'projects' / 'alpha-service').mkdir(parents=True)
+        (self.vault / 'projects' / 'beta-service').mkdir(parents=True)
+
+        # Single match with punctuation / suffixes
+        self.assertEqual(beyin_v3_projects.resolve_project_from_query(self.vault, "alpha-service'de test yapalım"), "alpha-service")
+        self.assertEqual(beyin_v3_projects.resolve_project_from_query(self.vault, "ALPHA-SERVICE üzerinde çalışıyoruz."), "alpha-service")
+
+        # Ambiguous: multiple matches
+        self.assertIsNone(beyin_v3_projects.resolve_project_from_query(self.vault, "alpha-service ve beta-service entegrasyonu"))
+
+        # No match or substring not matching boundary
+        self.assertIsNone(beyin_v3_projects.resolve_project_from_query(self.vault, "alpha-services paketi"))
+        self.assertIsNone(beyin_v3_projects.resolve_project_from_query(self.vault, "genel bir soru bu"))
+        self.assertIsNone(beyin_v3_projects.resolve_project_from_query(self.vault, ""))
 
 
 if __name__ == '__main__':

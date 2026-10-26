@@ -305,7 +305,8 @@ def manage(vault_root, action, folder=None, project=None, shared_unscoped=None):
 def resolve_active_project(vault, cwd):
     """Resolve the active project name from the current working directory.
     Matches against .beyin-projects.json rules or standard folder names
-    ('projects', 'Projeler', 'projeler'). Returns None if unscoped.
+    ('projects', 'Projeler', 'projeler'). Also handles sibling/external project
+    repositories outside the vault. Returns None if unscoped.
     """
     if vault is None or cwd is None:
         return None
@@ -317,16 +318,35 @@ def resolve_active_project(vault, cwd):
         return None
 
     try:
-        if not current.is_relative_to(vault_root):
-            return None
-        rel_path = current.relative_to(vault_root).as_posix()
-    except (ValueError, TypeError):
-        return None
-
-    try:
         scopes = read_project_scopes(vault_root)
     except ValueError:
         scopes = None
+
+    if not current.is_relative_to(vault_root):
+        cand_names = [current.name]
+        for p in current.parents:
+            if p == p.parent:
+                break
+            cand_names.append(p.name)
+            if len(cand_names) >= 4:
+                break
+        # Consider all discovery sources at each depth before walking outward.
+        for cand in cand_names:
+            cand_key = _scope_key(cand)
+            mapped = {project for folder, project in (scopes or {}).get("folders", [])
+                      if cand_key in (_scope_key(project), _scope_key(folder.split("/")[-1]))}
+            if mapped:
+                return next(iter(mapped)) if len(mapped) == 1 else None
+            for folder in ("projects", "Projeler", "projeler"):
+                target = vault_root / folder / cand
+                if target.is_dir() and not target.is_symlink():
+                    return cand
+        return None
+
+    try:
+        rel_path = current.relative_to(vault_root).as_posix()
+    except (ValueError, TypeError):
+        return None
 
     if scopes and "folders" in scopes:
         target = _scope_key(rel_path)
@@ -338,4 +358,56 @@ def resolve_active_project(vault, cwd):
     if len(parts) >= 2 and parts[0] in ("projects", "Projeler", "projeler"):
         return parts[1]
 
+    return None
+
+
+def resolve_project_from_query(vault, query):
+    """Detect if the query explicitly mentions a known project scope from the vault.
+    Returns the canonical project name if exactly one known project is mentioned,
+    or None if ambiguous (multiple mentioned) or none mentioned.
+    """
+    if not vault or not query or not isinstance(query, str) or not query.strip():
+        return None
+    try:
+        vault_root = Path(vault).resolve(strict=True)
+    except (RuntimeError, OSError, TypeError, ValueError):
+        return None
+
+    try:
+        scopes = read_project_scopes(vault_root)
+    except ValueError:
+        scopes = None
+
+    known = {}
+    if scopes and "folders" in scopes:
+        for folder, proj in scopes.get("folders", []):
+            known.setdefault(_scope_key(proj), set()).add(proj)
+            base = folder.split("/")[-1]
+            if base:
+                known.setdefault(_scope_key(base), set()).add(proj)
+
+    for folder in ("projects", "Projeler", "projeler"):
+        p_dir = vault_root / folder
+        if p_dir.is_dir():
+            try:
+                for cand in p_dir.iterdir():
+                    if cand.is_dir() and not cand.is_symlink():
+                        known.setdefault(_scope_key(cand.name), {cand.name})
+            except OSError:
+                pass
+
+    if not known:
+        return None
+
+    q_folded = _scope_key(query)
+    matches = set()
+    for key, canon in known.items():
+        if len(key) < 3:
+            continue
+        pattern = r'(?<![\w\-])' + re.escape(key) + r'(?![\w\-])'
+        if re.search(pattern, q_folded):
+            matches.update(canon)
+
+    if len(matches) == 1:
+        return next(iter(matches))
     return None
