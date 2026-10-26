@@ -686,7 +686,7 @@ def generate_recommendations(inbox: dict, tasks: dict, digest: dict, companion: 
         mtime_count = digest.get('mtime_count', 0)
         mtime_note = f" ({mtime_count} notta mtime'a dayandi)" if mtime_count > 0 else ""
         recs.append(
-            f"Son {digest['digest_days']} gunde {digest['count']} bilgi notu uretildi/guncellendi{mtime_note}; ritim saglikli."
+            f"Son {digest['digest_days']} gunde {digest['count']} bilgi notu tarih onceligine gore yeni sayildi{mtime_note}; ritim saglikli."
         )
     return recs
 
@@ -767,10 +767,11 @@ def format_human(report: dict) -> str:
     digest_count = digest.get('count', 0)
     mtime_count = digest.get('mtime_count', 0)
     lines.append(f"[Bilgi ve Karar Ozeti] (son {digest_days} gun)")
+    lines.append("  Tarih onceligi: created, yoksa updated, yoksa mtime; eski created varsa yeni updated sayilmaz.")
     if mtime_count > 0:
-        lines.append(f"  Uretilen/guncellenen not: {digest_count} ({mtime_count} notta mtime'a dayanildi)")
+        lines.append(f"  Tarih onceligine gore yeni sayilan not: {digest_count} ({mtime_count} notta mtime'a dayanildi)")
     else:
-        lines.append(f"  Uretilen/guncellenen not: {digest_count}")
+        lines.append(f"  Tarih onceligine gore yeni sayilan not: {digest_count}")
     for k in digest.get('items', [])[:5]:
         title = _strip_terminal_controls(k.get('title', ''))
         lines.append(f"  - {k.get('path')}: {title}")

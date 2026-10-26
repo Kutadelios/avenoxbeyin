@@ -327,7 +327,7 @@ class TriageTest(unittest.TestCase):
 
         # Old note with created 100 days ago, but refreshed mtime (e.g. bulk ID addition or folder move)
         old_note = knowledge / 'eski-bilgi.md'
-        old_note.write_text('---\ntitle: Eski Bilgi\ncreated: 2026-07-01\n---\n# Eski\n', encoding='utf-8')
+        old_note.write_text('---\ntitle: Eski Bilgi\ncreated: 2026-07-01\nupdated: 2026-10-11\n---\n# Eski\n', encoding='utf-8')
         self.set_age(old_note, 1)  # mtime is 1 day ago
 
         # Truly new note created 2 days ago
@@ -347,6 +347,12 @@ class TriageTest(unittest.TestCase):
         self.assertIn('knowledge/yeni-bilgi.md', paths)
         self.assertIn('knowledge/tarihsiz.md', paths)
         self.assertEqual(digest['mtime_count'], 1)
+        report = triage_module.triage(self.vault, now=self.now)
+        human = triage_module.format_human(report)
+        self.assertIn('Tarih onceligi: created, yoksa updated, yoksa mtime', human)
+        self.assertNotIn('Uretilen/guncellenen', human)
+        self.assertFalse(any('uretildi/guncellendi' in item for item in report['recommendations']))
+
 
 
 if __name__ == '__main__':
