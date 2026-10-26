@@ -1088,7 +1088,32 @@ def read_shortcut(link, scratch):
                yakala._ps_quote(link.name) + ').GetLink\n'
                '$o = @{ target = $l.Path; arguments = $l.Arguments; hotkey = [int]$l.Hotkey }\n'
                '[IO.File]::WriteAllText(' + yakala._ps_quote(out) + ', (ConvertTo-Json $o), (New-Object Text.UTF8Encoding $false))')
-    return json.loads(out.read_text(encoding='utf-8'))
+    result = json.loads(out.read_text(encoding='utf-8'))
+    # ShellLinkObject.Arguments silently returns at most 259 UTF-16 units,
+    # although the persisted Unicode StringData contains the entire argument
+    # vector. Long workspace-local TMP paths can cross that limit. Read the
+    # persisted arguments independently; keep Shell's target/hotkey assertions.
+    import struct
+    data = link.read_bytes()
+    flags = struct.unpack_from('<I', data, 20)[0]
+    cursor = 76
+    if flags & 1:  # LinkTargetIDList
+        cursor += 2 + struct.unpack_from('<H', data, cursor)[0]
+    if flags & 2:  # LinkInfo
+        cursor += struct.unpack_from('<I', data, cursor)[0]
+    assert flags & 0x80, 'writer must persist Unicode StringData'
+    arguments = ''
+    for flag in (4, 8, 16, 32, 64):  # name, relative path, working dir, arguments, icon
+        if flags & flag:
+            count = struct.unpack_from('<H', data, cursor)[0]
+            cursor += 2
+            value = data[cursor:cursor + 2 * count].decode('utf-16-le')
+            cursor += 2 * count
+            if flag == 32:
+                arguments = value
+    assert arguments.startswith(result['arguments']), 'Shell and persisted arguments must agree'
+    result['arguments'] = arguments
+    return result
 
 
 def split_arguments(line):
