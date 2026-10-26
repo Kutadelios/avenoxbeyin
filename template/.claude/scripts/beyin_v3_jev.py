@@ -6,7 +6,7 @@ import time
 
 import beyin_v3_jev_client as client
 from beyin_v3_secrets import redact
-from beyin_v3 import pack_context
+from beyin_v3 import PackedContext, pack_context
 
 
 def _strings(value):
@@ -193,6 +193,19 @@ def limits(mode):
     return client.thresholds(mode.get('provider'), mode.get('model'))
 
 
+def _unclipped(context):
+    """The strict records as retrieved, before packing clipped them to the budget.
+
+    The advisor's pool is packed again below; packing a clip a second time would lose the text
+    the first pass cut, so a source keeps its whole excerpt until the final pack.
+    """
+    records = context.get('records') or []
+    sources = getattr(context, 'sources', ())
+    if len(sources) == len(records) and all(s['id'] == r['id'] for s, r in zip(sources, records)):
+        return list(sources)
+    return records
+
+
 def auto_context(store, harness, query, context, *, budget_chars, timeout_cap=2.0, transport=None, project=None):
     """Per-turn hook path: strict local matches plus a loose lexical pool, judged in one call.
 
@@ -206,14 +219,14 @@ def auto_context(store, harness, query, context, *, budget_chars, timeout_cap=2.
     if (not mode['valid'] or mode['mode'] == 'off' or 'auto_context' not in mode['features']
             or not isinstance(query, str) or len(query.strip()) < AUTO_MIN_CHARS):
         return context
-    strict = context.get('records') or []
+    strict = _unclipped(context)
     if any(r.get('visibility') == 'private' for r in strict):
         return context
     eligible = _eligible(store, project)
     valid_strict = [eligible[r['id']] for r in strict if r['id'] in eligible]
     if _signature(strict) != _signature(valid_strict):
         context = store.context_for(harness, query, project=project, strict=True, budget_chars=budget_chars)
-        strict = context['records']
+        strict = _unclipped(context)
     known = {r['id'] for r in strict}
     try:
         from beyin_v3_passage import settings as passage_settings, _path_key
@@ -292,7 +305,8 @@ def auto_context(store, harness, query, context, *, budget_chars, timeout_cap=2.
     packed = pack_context(_interleave([ranked_remote, ranked_local]), AUTO_LIMIT, budget_chars)
     selected_ids = {r['id'] for r in packed['records']}
     # Report delivered membership changes, not pre-budget model intentions.
-    result = dict(context, **packed)
+    result = PackedContext(context, **packed)
+    result.sources = packed.sources  # render_context repacks the final envelope from these
     result['jev'] = dict(dropped=len(known - selected_ids), added=len(selected_ids - known))
     return result
 
