@@ -21,7 +21,26 @@ class JevEvidenceTest(EvidenceFixture):
         record = delivered['records'][0]
         ranges = delivered_ranges(delivered.evidence[record['id']], record)
         self.assertEqual(len(ranges), 2)
-        self.assertEqual(ranges[1][1] - ranges[1][0], 600)
+        self.assertEqual(ranges[1][1] - ranges[1][0], 500)
+
+    def test_rescue_reserves_primary_evidence_before_the_opening_fills_the_envelope(self):
+        opening = 'Restore mode uses the amber profile.'
+        marker = 'Rollback uses the copper switch.'
+        condition = 'This is temporary; do not publish.'
+        self.note('guide', opening + '\n\n' + 'Unrelated background. ' * 300
+                  + '\n\n## Recovery\n\n' + condition + ' ' + marker + ' Adjacent explanation. ' * 30)
+        query = 'explain rollback restoration mechanism'
+        local = self.local(query)
+        self.assertFalse(local['records'])
+        result = self.judge(query, local, marker)
+        text, delivered = rt.render_context(result, 4100)
+        self.assertLessEqual(len(text), 4100)
+        self.assertIn(opening, text)
+        self.assertIn(marker, text)
+        self.assertIn(condition, text)
+        from beyin_v3_evidence import delivered_ranges
+        ranges = delivered_ranges(delivered.evidence['guide'], delivered['records'][0])
+        self.assertEqual(len(ranges), 2)
 
     def test_rescued_loose_source_keeps_opening_and_matching_tail(self):
         from beyin_v3_evidence import delivered_ranges

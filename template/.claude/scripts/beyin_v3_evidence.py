@@ -100,28 +100,30 @@ def loose_passages(record, query, project=None):
 
 
 def loose_delivery(record, selected, query):
-    """Keep the opening; add the match whole or card-sized only from spare room.
+    """Reserve primary evidence alongside the opening after a source is rescued.
 
     Three standard passage windows protect the opening without making an entire
-    long note the minimum delivery. Prefer the full source when it fits. Every
-    alternative contains the same opening, so widening cannot replace its text.
+    long note the minimum delivery. Reserve 500 characters of that allowance
+    for the primary matching passage. Wider alternatives keep both parts.
     """
     from beyin_v3 import TOP_CONTEXT_TEXT
     from beyin_v3_passage import split_blocks, _partial
-    opening = ('', 0, min(len(record['text']), 3 * TOP_CONTEXT_TEXT))
-    ref = reference(record, [opening], 'loose')
+    evidence_chars = 500
+    opening = ('', 0, min(len(record['text']), 3 * TOP_CONTEXT_TEXT - evidence_chars))
+    broad_opening = ('', 0, min(len(record['text']), 3 * TOP_CONTEXT_TEXT))
     partial = lambda spans: _partial(record, [(record, h, s, e, '') for h, s, e in spans])
-    narrow = dict(record, text=ref['variants'][0]['text'], text_truncated=partial([opening]))
     headings = {(s, e): h for h, s, e in split_blocks(record['text'])}
     matched = [(headings.get((s, e), ''), s, e) for s, e, _ in selected['variants'][0]['spans']]
     windows = []
     for head, start, end in matched:
         body = record['text'][start:end]
-        excerpt = card_excerpt(query, dict(text=body))
+        excerpt = card_excerpt(query, dict(text=body), limit=evidence_chars)
         offset = body.index(excerpt)
         windows.append((head, start + offset, start + offset + len(excerpt)))
+    ref = reference(record, [opening] + windows, 'loose')
+    narrow = dict(record, text=ref['variants'][0]['text'], text_truncated=partial([opening] + windows))
     alternatives, seen = [], {narrow['text']}
-    for spans in [[('', 0, len(record['text']))], [opening] + matched, [opening] + windows]:
+    for spans in [[('', 0, len(record['text']))], [broad_opening] + matched, [broad_opening] + windows]:
         variant = reference(record, spans, 'loose')['variants'][0]
         if variant['text'] in seen:
             continue
