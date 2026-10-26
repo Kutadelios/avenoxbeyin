@@ -153,6 +153,23 @@ class CandidateCountsTest(unittest.TestCase):
             self.assertEqual(self.store.candidates('quartz mirror'), expected)
         self.assertFalse(list(self.store.state_dir.glob('.token-counts-*')))
 
+    def test_deep_json_cache_is_a_miss_and_rebuilds_correctly(self):
+        path = self.store.state_dir / 'token-counts.json'
+        text = 'Quartz mirror calibration calibration.'
+        expected_counts = runtime._token_counts(text)
+        expected = self.reader().candidates('quartz mirror')
+        for blob in ('', '{', '[' * 10000 + '0' + ']' * 10000):
+            with self.subTest(depth=blob.count('[')):
+                path.write_text(blob, encoding='utf-8')
+                cache = runtime._CountCache(self.store.state_dir)
+                self.assertEqual(cache.counts(text), expected_counts)
+                actual, misses = self.cached_notes(lambda: self.reader().candidates('quartz mirror'))
+                self.assertEqual(actual, expected)
+                self.assertGreater(misses, 0)
+                self.assertEqual(path.read_text(encoding='utf-8'), blob)
+                self.assertEqual(self.store.candidates('quartz mirror'), expected)
+                self.assertIsInstance(json.loads(path.read_text(encoding='utf-8')), dict)
+
 
 if __name__ == '__main__':
     unittest.main()
