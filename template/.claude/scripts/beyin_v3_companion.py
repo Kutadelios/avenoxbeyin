@@ -48,6 +48,16 @@ def initialize(vault, state):
     installation must survive updates and uninstall. Exclusive creation preserves
     existing notes and makes interrupted/repeated bootstrap safe to retry.
     """
+    if (Path(state) / 'companion-bootstrap.json').exists():
+        return {'status': 'existing'}
+    from beyin_v3_notes import vault_locked
+    # Exclusive creation alone can race with a note-edit that already observed
+    # a missing starter. Join the protocol before reading or creating any notes.
+    with vault_locked(vault):
+        return _initialize(vault, state)
+
+
+def _initialize(vault, state):
     state = Path(state)
     marker = state / 'companion-bootstrap.json'
     if marker.exists():

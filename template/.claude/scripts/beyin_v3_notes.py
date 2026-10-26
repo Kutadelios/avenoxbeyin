@@ -151,16 +151,29 @@ def _bytes(path):
 
 @contextmanager
 def locked(engine, timeout=15):
+    """Engine entry point; all human-note writers share the vault protocol."""
+    with vault_locked(engine.root, timeout=timeout) as folder:
+        yield folder
+
+
+@contextmanager
+def vault_locked(vault, timeout=15):
+    """Persistent vault-wide OS lock, also usable without a database/SyncEngine.
+
+    Order: note lock -> optional companion lock -> database transaction.
+    Recovery already holding the DB may only try this lock with timeout=0.
+    """
+    vault = Path(vault).resolve()
     # Recovery can run inside note-create/note-edit's sync. Reuse only this
     # thread's lock; a forked child and other threads still need their own OS lock.
     held = getattr(_HELD_LOCKS, 'held', None)
     if held is None:
         held = _HELD_LOCKS.held = {}
-    key = (os.getpid(), os.path.normcase(str(engine.root)))
+    key = (os.getpid(), os.path.normcase(str(vault)))
     if key in held:
         yield held[key]
         return
-    folder = engine.root / LOCAL_DIRECTORY
+    folder = vault / LOCAL_DIRECTORY
     _unlinked(folder)
     folder.mkdir(exist_ok=True, mode=0o700)
     # Also protects existing installs whose top-level .gitignore is user-owned.
