@@ -402,11 +402,11 @@ def search(index, terms, limit=5, floor=FLOOR, min_shared=MIN_SHARED, ignored=ST
         if passage[0]["id"] in chosen and passage is not chosen[passage[0]["id"]]:
             siblings.setdefault(passage[0]["id"], []).append((passage, head_only))
     return [(rank, passage, _runner_up(siblings.get(passage[0]["id"], ()), probes, index.block_df,
-                                       passages_total))
+                                       passages_total, roots))
             for rank, passage in ranked]
 
 
-def _runner_up(siblings, probes, frequency, total):
+def _runner_up(siblings, probes, frequency, total, roots=()):
     """The other passage of a delivered source whose own text matches the query best, or None.
 
     Every passage of a note carries the note's title, heading and tags, so a question that names
@@ -418,6 +418,10 @@ def _runner_up(siblings, probes, frequency, total):
     for passage, head_only in siblings:
         tokens = passage[4]
         body = [term for term, probe in probes if probe in tokens and probe not in head_only]
+        # Use the same query-only root expansion as admission, while still requiring
+        # the matched root in the body rather than title/heading metadata.
+        body += [root for term_probe, root, probe in roots
+                 if term_probe not in tokens and probe in tokens and probe not in head_only]
         if not body:
             continue
         score = (len(body), sum(math.log((total + 1) / (frequency.get(token, 0) + 1)) + 1 for token in body))

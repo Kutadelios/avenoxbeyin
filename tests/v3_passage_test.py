@@ -115,6 +115,19 @@ class PassageContextTest(Vault):
         self.assertIn('[…]', records[0]['text'])
         self.assertTrue(records[0]['text_truncated'])
 
+    def test_short_root_second_passage_preserves_due_ranking(self):
+        text = ('# Zirkon\n\n## Özet\n\nZirkon boy kısa.\n\n'
+                '## Ölçüm\n\nBoy: 180 cm; güncel ölçüm. ' + 'Ayrıntılı kayıt. ' * 30 + '\n')
+        for ident, due, updated in [('a-due', '2020-01-01', '2026-01-01'),
+                                    ('z-future', '2099-01-01', '2026-10-01')]:
+            self.ingest(ident, text, 'tasks/' + ident + '.md', kind='task', status='active',
+                        title='Zirkon', due_at=due, updated_at=updated)
+        context = passage.context_for(self.store, 'claude', 'zirkon boyum', limit=1, budget_chars=5000)
+        self.assertEqual([r['id'] for r in context['records']], ['a-due'])
+        self.assertIn('180 cm', context['records'][0]['text'])
+        self.assertIn('a-due', context.wider)
+        self.assertLessEqual(context['used_chars'], 5000)
+
     def test_a_second_passage_never_cuts_a_lower_source_short(self):
         filler = 'Satır satır kayıt tutulur, sütunlar sabit kalır. ' * 12
         for index in range(5):
