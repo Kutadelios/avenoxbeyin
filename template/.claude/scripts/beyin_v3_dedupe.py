@@ -190,6 +190,7 @@ def drop_delivered(state, harness, session, context, now=None):
     ids = {r['id'] for r in novel}
     if hasattr(context, 'wider'):
         kept.wider = {key: r for key, r in context.wider.items() if key in ids}
+        kept.extensions = {key: r for key, r in getattr(context, 'extensions', {}).items() if key in ids}
     if hasattr(context, 'evidence'):
         kept.evidence = {key: ref for key, ref in context.evidence.items() if key in ids}
     return kept, duplicates

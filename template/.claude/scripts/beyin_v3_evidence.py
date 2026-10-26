@@ -131,6 +131,41 @@ def loose_delivery(record, selected, query):
     return narrow, alternatives or None, ref
 
 
+def strict_extensions(record, selected, budget):
+    """Whole-source/section alternatives, after all existing passage reservations.
+
+    They include every selected body span. They do not choose candidates or
+    change the evidence excerpt shown to the advisor.
+    """
+    from beyin_v3_passage import split_blocks, _partial
+    blocks = split_blocks(record['text'])
+    sections = []
+    for head, start, end in selected:
+        pos = next((i for i, block in enumerate(blocks) if block == (head, start, end)), None)
+        if pos is None:
+            return [], []
+        low = high = pos
+        while low and blocks[low - 1][0] == head:
+            low -= 1
+        while high + 1 < len(blocks) and blocks[high + 1][0] == head:
+            high += 1
+        sections.append((head, blocks[low][1], blocks[high][2]))
+    sections = list(dict.fromkeys(sections))
+    alternatives, variants, seen = [], [], {render_spans(record, selected)[0]}
+    for spans in [[('', 0, len(record['text']))], sections]:
+        # A source text larger than the entire envelope can never fit whole.
+        if sum(end - start for _, start, end in spans) > budget:
+            continue
+        variant = reference(record, spans, 'strict')['variants'][0]
+        if variant['text'] in seen:
+            continue
+        seen.add(variant['text'])
+        partial = _partial(record, [(record, h, s, e, '') for h, s, e in spans])
+        alternatives.append(dict(record, text=variant['text'], text_truncated=partial))
+        variants.append(variant)
+    return alternatives, variants
+
+
 def card_excerpt(query, record, broader=None, ref=None, limit=600):
     """Bounded query windows, with a share for each selected passage, not a note prefix."""
     from beyin_v3_passage import split_blocks

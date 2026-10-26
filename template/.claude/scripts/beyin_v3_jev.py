@@ -219,6 +219,10 @@ def auto_context(store, harness, query, context, *, budget_chars, timeout_cap=2.
     if (not mode['valid'] or mode['mode'] == 'off' or 'auto_context' not in mode['features']
             or not isinstance(query, str) or len(query.strip()) < AUTO_MIN_CHARS):
         return context
+    # Projection-level privacy still applies when packing chose an extension
+    # and the unclipped source excerpt is a separate object.
+    if any(r.get('visibility') == 'private' for r in context.get('records') or []):
+        return context
     strict = _unclipped(context)
     if any(r.get('visibility') == 'private' for r in strict):
         return context
@@ -251,6 +255,7 @@ def auto_context(store, harness, query, context, *, budget_chars, timeout_cap=2.
 
     from beyin_v3_evidence import loose_passages, loose_delivery, card_excerpt
     wider = dict(getattr(context, 'wider', {}))
+    extensions = dict(getattr(context, 'extensions', {}))
     evidence = dict(getattr(context, 'evidence', {}))
     selected_loose = []
     for record in evaluated_loose:
@@ -327,11 +332,13 @@ def auto_context(store, harness, query, context, *, budget_chars, timeout_cap=2.
     ranked_remote = sorted([r for r in keep if remote_allowed(r)],
                            key=lambda r: (-by_record.get(r['id'], 0), r['id']))
     ranked_local = [r for r in keep if not remote_allowed(r) and r['id'] in known]
-    packed = pack_widened(_interleave([ranked_remote, ranked_local]), wider, AUTO_LIMIT, budget_chars)
+    packed = pack_widened(_interleave([ranked_remote, ranked_local]), wider, AUTO_LIMIT, budget_chars,
+                          extensions=extensions)
     selected_ids = {r['id'] for r in packed['records']}
     # Report delivered membership changes, not pre-budget model intentions.
     result = PackedContext(context, **packed)
     result.sources, result.wider = packed.sources, packed.wider  # the final envelope repacks from these
+    result.extensions = packed.extensions
     result.evidence = {ident: evidence[ident] for ident in selected_ids if ident in evidence}
     result['jev'] = dict(dropped=len(known - selected_ids), added=len(selected_ids - known))
     return result

@@ -466,8 +466,8 @@ def context_for(store, harness, query, project=None, audience="internal", status
     terms = _strict_terms(_tokens(query) - ignored)
     if not terms:
         return pack_context([], limit, budget_chars, stale_count)
-    from beyin_v3_evidence import reference
-    records, wider, evidence = [], {}, {}
+    from beyin_v3_evidence import reference, strict_extensions
+    records, wider, evidence, extensions = [], {}, {}, {}
     for _rank, first, second in search(index, terms, limit, config["floor"], ignored=ignored, with_runner_up=True):
         record = first[0]
         # Only text and text_truncated change, so advisor signatures still match the index.
@@ -479,7 +479,13 @@ def context_for(store, harness, query, project=None, audience="internal", status
             wider[record["id"]] = dict(record, text=_excerpt(record, [first, second]),
                                        text_truncated=_partial(record, [first, second]))
             evidence[record['id']]['variants'] += reference(record, [(p[1], p[2], p[3]) for p in (first, second)], 'strict')['variants']
-    packed = pack_widened(records, wider, limit, budget_chars, stale_count)
+        selected = [first] + ([second] if second is not None else [])
+        choices, variants = strict_extensions(record, [(p[1], p[2], p[3]) for p in selected], budget_chars)
+        if choices:
+            extensions[record['id']] = choices
+            # The last variant remains the original advisor card selection.
+            evidence[record['id']]['variants'][0:0] = variants
+    packed = pack_widened(records, wider, limit, budget_chars, stale_count, extensions=extensions)
     packed.evidence = {r['id']: evidence[r['id']] for r in packed['records']}
     return packed
 

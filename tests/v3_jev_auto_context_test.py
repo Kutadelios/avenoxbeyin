@@ -341,7 +341,8 @@ class HookWiringTest(unittest.TestCase):
                 follow = self.run_hook(vault, state, 'bunu detaylandır')
             remote.assert_not_called()
             self.assertIn(marker, follow['hookSpecificOutput']['additionalContext'])
-            self.assertNotIn('Unrelated background.', follow['hookSpecificOutput']['additionalContext'])
+            self.assertEqual('Unrelated background.' in first['hookSpecificOutput']['additionalContext'],
+                             'Unrelated background.' in follow['hookSpecificOutput']['additionalContext'])
 
 
 if __name__ == '__main__':
