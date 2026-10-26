@@ -337,7 +337,7 @@ def _weight(shared, frequency, total, size):
     return weight / idf_max / math.log(10 + size)
 
 
-def search(index, terms, limit=5, floor=FLOOR, min_shared=MIN_SHARED):
+def search(index, terms, limit=5, floor=FLOOR, min_shared=MIN_SHARED, rank_adjustments=None):
     """Best admitted passage per source, ranked. Returns [(rank weight, passage), ...]."""
     terms = _strict_terms(terms)
     if not terms:
@@ -363,6 +363,8 @@ def search(index, terms, limit=5, floor=FLOOR, min_shared=MIN_SHARED):
         name_score = _name_match_score(record, terms)
         if name_score > 0:
             rank += 10.0 * name_score
+        if rank_adjustments:
+            rank += rank_adjustments.get(record["id"], 0.0)
         current = best.get(record["id"])
         if current is None or rank > current[0]:
             best[record["id"]] = (rank, passage)
@@ -389,7 +391,7 @@ def pool(store, eligible, statuses=None, exclude=DEFAULT_EXCLUDE, superseded=Non
 
 
 def context_for(store, harness, query, project=None, audience="internal", statuses=None, limit=5,
-                budget_chars=8000, strict=True):
+                budget_chars=8000, strict=True, today=None):
     """Strict per-turn context from passages. Same result shape as MemoryStore.retrieve."""
     if harness not in HARNESSES:
         raise ValueError("unsupported harness")
@@ -412,8 +414,13 @@ def context_for(store, harness, query, project=None, audience="internal", status
     terms = _strict_terms(_tokens(query) - STOPWORDS - _tokens(project or ""))
     if not terms:
         return pack_context([], limit, budget_chars, stale_count)
+    from beyin_v3 import is_due_task, _is_closed_task
+    adjustments = {r["id"]: (store.DUE_STRICT_BONUS if is_due_task(r, today) else
+                   -store.CLOSED_TASK_PENALTY if statuses is None and _is_closed_task(r) else 0.0)
+                   for r in candidates}
     records = []
-    for _rank, (record, head, start, end, _tokens_) in search(index, terms, limit, config["floor"]):
+    for _rank, (record, head, start, end, _tokens_) in search(
+            index, terms, limit, config["floor"], rank_adjustments=adjustments):
         body = record["text"][start:end]
         excerpt = head + "\n\n" + body if head else body
         # Only text and text_truncated change, so advisor signatures still match the index.
