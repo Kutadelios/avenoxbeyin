@@ -128,11 +128,6 @@ def resolve(store, harness, session, query, local, *, budget_chars, project=None
         return local, False
     if not records:
         return local, False
-    vocabulary = set().union(*(_tokens(r.get('title', '') + ' ' + r['text']) for r in records))
-    familiar = vocabulary | ACTIONS | DEICTIC | GENERIC
-    # A command with a deictic, or an action referring only to the active subject.
-    if terms - familiar:
-        return local, False
     selected, evidence = [], {}
     for record, ref in zip(records, saved['refs']):
         restored = _restore(record, ref)
@@ -141,6 +136,13 @@ def resolve(store, harness, session, query, local, *, budget_chars, project=None
         excerpt, proof = restored
         selected.append(excerpt)
         evidence[record['id']] = proof
+    # A source may cover several subjects. Only the delivered ranges establish
+    # the active topic; words from an unseen section must not replace a current
+    # query's local evidence with the previous passage.
+    vocabulary = set().union(*(_tokens(r.get('title', '') + ' ' + r['text']) for r in selected))
+    familiar = vocabulary | ACTIONS | DEICTIC | GENERIC
+    if terms - familiar:
+        return local, False
     context = pack_context(selected, MAX_REFS, budget_chars)
     context['continuity'] = 'local_source_refs'
     context.evidence = {r['id']: evidence[r['id']] for r in context['records']}

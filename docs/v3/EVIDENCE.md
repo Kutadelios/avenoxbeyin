@@ -35,6 +35,14 @@ Kaynak değişince eski aralıklar kullanılmaz. Her devam turunda görünürlü
 güven, proje, supersession, durum, hash ve güncel strict dışlamalar yeniden
 denetlenir. Başlık yolu güncel ve hash'i doğrulanmış kaynaktan yeniden üretilir.
 Yalnız gösterilen metin korunur; daha büyük devam bütçesi görünmemiş metni açmaz.
+Belirsiz devamın konu sözlüğü kaydın başlığından ve doğrulanıp geri kurulan
+teslim aralıklarından çıkarılır; notun gösterilmemiş gövdesi bu sözlüğe katılmaz.
+`ACTIONS`, `DEICTIC` ve `GENERIC` kümelerindeki genel eylem ve devam sözcükleri
+de tanıdık kabul edilir. İstekte bu birleşik sözlük dışında yeni bir konu terimi
+varsa o turun yerel arama sonucu korunur. Kontrol, yalnız başlıkta, gösterilmiş
+pasajda veya genel komut sözlüğünde bulunan terimlerle ifade edilen farklı bir
+konuyu ayrıca ayırt etmez. "Bunu detaylandır" gibi kısa devamlar ve gösterilmiş
+pasajın sözcüklerini kullanan devamlar mevcut devam koşullarıyla çalışır.
 
 Kimlikten ibaret eski (sürüm 1) continuity dosyaları aralık bilinmediği için
 kullanılmaz. Bir sonraki somut, başarılı teslim bunları sürüm 2 olarak yeniler.
