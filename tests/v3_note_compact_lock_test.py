@@ -77,7 +77,7 @@ class NoteCompactLockTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.vault, self.state = self.root / 'vault', self.root / 'state'
         self.vault.mkdir()
         self.state.mkdir()
