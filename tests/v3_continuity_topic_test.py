@@ -21,6 +21,9 @@ class ContinuityTopicTest(unittest.TestCase):
         self.rollback = 'Quartz rollback switch uses amber profile.'
         self.deployment = 'Copper deployment restart uses indigo protocol.'
         body = ('# Manual\n\n## Rollback\n\n' + self.rollback
+                # Whole-source spare-room delivery is valid. Keep this fixture
+                # larger than its envelope so it tests an actually unseen section.
+                + '\n\n## Background\n\n' + 'Unrelated furniture records. ' * 240
                 + '\n\n## Deployment\n\n' + self.deployment + '\n')
         (self.vault / 'guide.md').write_text(body, encoding='utf-8')
         self.store.ingest(dict(id='guide', title='Manual', source='guide.md', text=body))
