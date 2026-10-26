@@ -228,12 +228,12 @@ def card_excerpt(record, query='', project=None):
             head_limit = AUTO_EXCERPT // 3 - 2
             if len(head) > head_limit:
                 # A long parent heading must not hide the matching subsection.
-                # Consider word-aligned windows and score what is actually sent.
+                # Keep matched words whole and score what is actually sent.
                 windows = [head[:head_limit]]
                 for match in re.finditer(r'\S+', head):
                     if terms & _tokens(match.group()):
-                        start = max(0, match.end() - head_limit)
-                        windows.append(head[start:start + head_limit])
+                        heading_start = max(0, match.end() - head_limit)
+                        windows.append(head[heading_start:heading_start + head_limit])
                 head = max(windows, key=lambda value: len(terms & _tokens(value)))
             body = text[start:end]
             passage = (head + '\n\n' + body if head else body)[:AUTO_EXCERPT]
