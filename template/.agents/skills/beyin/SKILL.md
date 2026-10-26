@@ -7,6 +7,9 @@ description: Vault içindeki bilgiyi bul, not ve görevleri güncelle, tamamlana
 
 Vault kökünü `beyin.py` ve AGENTS.md ile belirle. Bu skill'in komutları o kökte çalışır. macOS/Linux'ta `python3`, Windows'ta `py -3` kullan; çalışan Python yolu biliniyorsa onu tercih et. Ayrı hesap veya hafıza servisi gerekmez.
 
+
+**Dış proje kurulum hedefi:** Cwd'nin vault olması dış bir projeyi buraya kurma izni değildir. Dış kodu klonlamadan, bağımlılık kurmadan veya build çalıştırmadan önce hedefin vault dışında olduğunu doğrula; kullanıcının açıkça belirttiği hedefi izle. Açık hedef vault içindeyse, işlemden önce bu çelişkiyi kullanıcıyla netleştir. Projenin notları ve kararları vault'ta, kodu ve bağımlılıkları ayrı çalışma dizininde tutulur. Beyin'in kendi yönetilen runtime/skill dosyaları dış proje değildir. Bu bir ajan davranış talimatıdır, teknik sandbox garantisi değildir. Mevcut iç içe repo bulgusunu otomatik silme veya taşıma; doctor'ın salt-okunur boundary bulgusunu bildir. Beyin indeksinden dışlamak Obsidian'ın aynı ağacı taramasını engellemez.
+
 ## Kimlik ve ilişki sürekliliği
 
 İlk konuşmada mevcut companion klasöründeki Core.md, varsa Soul.md, Kurallar.md, Last-Session.md, Threads.md içindeki aktif konuların gövdeleri ve Journal.md'nin en yeni tarihli girişini kullan. Hook'ta kırpma varsa ilgili dosyayı aç. Aynı isimli proje dosyasını kullanıcının kimliği sanma. Kaynaklar private/untrusted olarak dışlandıysa otomatik bağlama taşıma; kullanıcının açık dosya/mahremiyet kapsamını izle.
