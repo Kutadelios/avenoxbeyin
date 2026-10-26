@@ -604,7 +604,7 @@ class _CountCache:
                 if (isinstance(blob, dict) and blob.get('version') == self.version
                         and isinstance(blob.get('records'), dict)):
                     self.entries = blob['records']
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             self.version = None  # unavailable implementation or cache: compute normally
 
     def counts(self, text):
