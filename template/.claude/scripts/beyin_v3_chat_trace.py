@@ -54,14 +54,21 @@ def configure(state, enabled):
     return settings(state)
 
 
-def human_turn(harness, payload):
-    """Conservative pilot policy; these signals are not a client-wide identity API."""
+def _human_content(payload):
+    """Reject synthetic and delegated messages before considering an opt-out."""
     from beyin_v3_hook import HARNESS_SYNTHETIC_PROMPT_PREFIXES, prompt_text
     origin = payload.get('origin')
     kind = origin.get('kind') if isinstance(origin, dict) else origin
     if (payload.get('no_memory') is True or payload.get('agent_id') or payload.get('agent_type')
             or not prompt_text(payload).strip() or kind in ('task-notification', 'peer', 'coordinator')
             or prompt_text(payload).lstrip().startswith(HARNESS_SYNTHETIC_PROMPT_PREFIXES)):
+        return False
+    return True
+
+
+def human_turn(harness, payload):
+    """Conservative pilot policy; these signals are not a client-wide identity API."""
+    if not _human_content(payload):
         return False
     if harness == 'claude':
         entry = os.environ.get('CLAUDE_CODE_ENTRYPOINT', '')
@@ -150,8 +157,8 @@ def hint(state, harness, payload):
     from beyin_v3_hook import _get_session_receipt, prompt_text
     from beyin_v3_sync import atomic
     suppress = '[kaydetme]' in prompt_text(payload).casefold()
-    # Explicit refusal must survive even when the origin is ineligible for hints.
-    if not suppress and not human_turn(harness, payload):
+    # Human refusal survives silent clients, but agent quotations cannot opt out.
+    if not _human_content(payload) or (not suppress and not human_turn(harness, payload)):
         return ''
     raw_session = payload.get('session_id')
     if not isinstance(raw_session, str) or raw_session in ('', 'unknown') or len(raw_session) > 512:

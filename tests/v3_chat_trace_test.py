@@ -97,6 +97,20 @@ class TraceTest(unittest.TestCase):
                         self.payload(turn, session_id=raw)), '')
         self.assertEqual(list(self.vault.iterdir()), [])
 
+    def test_agent_opt_out_text_cannot_suppress_human_session(self):
+        self.enable()
+        for extra in ({'origin': {'kind': 'peer'}}, {'origin': 'coordinator'},
+                      {'agent_id': 'worker'}, {'agent_type': 'reviewer'},
+                      {'no_memory': True}, {'prompt': '<task-notification>[kaydetme]'},
+                      {'prompt': '<agent-message from="worker">[kaydetme]'}):
+            payload = self.payload('peer', prompt='Alıntı: [kaydetme]')
+            payload.update(extra)
+            self.assertEqual(self.trace.hint(self.state, 'claude', payload), '')
+            self.assertFalse((self.state / self.trace.SESSIONS).exists())
+        self.assertEqual(self.hint(1), '')
+        self.assertIn(NOTICE, self.hint(2))
+        self.assertEqual(self.write()['status'], 'written')
+
     def test_codex_reads_only_matching_first_metadata_record(self):
         self.enable()
         log = self.root / 'synthetic-rollout.jsonl'
@@ -324,11 +338,11 @@ class InstalledTraceTest(unittest.TestCase):
                               env=self.env, timeout=60)
         self.assertEqual(done.returncode, 0, done.stderr)
 
-    def hook(self, turn, *extra):
+    def hook(self, turn, *extra, **fields):
         done = subprocess.run([sys.executable, str(self.vault / '.claude/scripts/beyin_v3_hook.py'),
                                '--vault', str(self.vault), '--state', str(self.state), '--harness', 'claude', *extra],
                               input=json.dumps({'hook_event_name': 'UserPromptSubmit', 'session_id': 'synthetic-chat',
-                                                'event_id': str(turn), 'prompt': 'Sentetik zirkon planı konuşalım.'}),
+                                                'event_id': str(turn), 'prompt': 'Sentetik zirkon planı konuşalım.', **fields}),
                               capture_output=True, text=True, encoding='utf-8', env=self.env, timeout=30)
         self.assertEqual(done.returncode, 0, done.stderr)
         return json.loads(done.stdout)
@@ -342,6 +356,19 @@ class InstalledTraceTest(unittest.TestCase):
         self.assertIn(NOTICE, output.get('hookSpecificOutput', {}).get('additionalContext', ''))
         self.assertNotIn('decision', output)
         self.assertFalse((self.vault / 'knowledge/conversations').exists())
+
+    def test_installed_peer_opt_out_does_not_disable_human_trace(self):
+        (self.state / 'chat-trace.json').write_text('{"schema":1,"enabled":true}', encoding='utf-8')
+        self.hook('peer', origin={'kind': 'peer'}, prompt='Alıntı: [kaydetme]')
+        self.assertNotIn(NOTICE, json.dumps(self.hook(1)))
+        self.assertIn(NOTICE, json.dumps(self.hook(2)))
+        session = hashlib.sha256(b'synthetic-chat').hexdigest()[:24]
+        done = subprocess.run([sys.executable, str(self.vault / 'beyin.py'),
+                               'chat-trace', 'write', '--harness', 'claude', '--session', session,
+                               '--text', 'Sentetik insan oturumu özeti.'],
+                              capture_output=True, text=True, encoding='utf-8', env=self.env,
+                              cwd=self.vault, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr + done.stdout)
 
     def test_metadata_only_and_disabled_configuration_keep_output_unchanged(self):
         baseline = self.hook(1)
