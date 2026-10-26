@@ -125,6 +125,30 @@ class JevCardPassageTest(unittest.TestCase):
         self.assertIn('Restore the previous release.', card['excerpt'])
         self.assertLessEqual(len(card['excerpt']), advisor.AUTO_EXCERPT)
 
+    def test_loose_short_root_candidate_sends_matching_body_in_card(self):
+        client.set_mode(self.state, 'on', enable=['auto_context'])
+        query = 'quartz boyum pricing'
+        text = '# General\n\n' + ('Unrelated furniture records. ' * 45)
+        text += '\n\n## Ölçüm\n\nBoy: 180 cm.\n'
+        self.record('height', text)
+        context = self.store.context_for('claude', query, strict=True)
+        self.assertEqual(context['records'], [])
+        advisor.auto_context(self.store, 'claude', query, context,
+                             budget_chars=4000, transport=self.transport)
+        self.assertEqual(len(self.calls), 1)
+        card = next(iter(self.calls[0][0]['state']['notes'].values()))
+        self.assertIn('180 cm', card['excerpt'])
+        self.assertLessEqual(len(card['excerpt']), advisor.AUTO_EXCERPT)
+
+    def test_excerpt_short_roots_keep_whole_words_and_project_exclusions(self):
+        for query, project, tail in [('durum', None, 'Dur: red traffic light.'),
+                                     ('boyum', 'boy', 'Boy: 180 cm.')]:
+            with self.subTest(query=query, project=project):
+                text = '# General\n\n' + ('Unrelated furniture records. ' * 45)
+                text += '\n\n## Detail\n\n' + tail
+                self.assertEqual(advisor.card_excerpt({'text': text}, query, project),
+                                 text[:advisor.AUTO_EXCERPT])
+
     def test_card_excerpt_preserves_short_note_and_strict_passage(self):
         # Short note
         short_rec = {'id': 'short', 'text': 'Kisa metin.', 'text_truncated': False}

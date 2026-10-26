@@ -223,11 +223,21 @@ def card_excerpt(record, query='', project=None):
         return text[:AUTO_EXCERPT]
 
     try:
-        from beyin_v3 import _tokens, STOPWORDS, _strict_terms
+        from beyin_v3 import _tokens, STOPWORDS, _strict_terms, _query_roots
         from beyin_v3_passage import split_blocks
-        terms = _strict_terms(_tokens(query) - STOPWORDS - _tokens(project or ''))
+        ignored = STOPWORDS | _tokens(project or '')
+        terms = _strict_terms(_tokens(query) - ignored)
         if not terms:
             return text[:AUTO_EXCERPT]
+
+        # Admission already selected this candidate. Use the shared conservative
+        # query-root rules only to locate its matching excerpt, never to admit notes.
+        vocabulary = _tokens(text)
+        roots = _query_roots(terms, lambda token: int(token in vocabulary), ignored)
+
+        def overlap(value):
+            tokens = _tokens(value)
+            return sum(term in tokens or roots.get(term) in tokens for term in terms)
 
         blocks = split_blocks(text, target=AUTO_EXCERPT // 2, overlap=AUTO_EXCERPT // 6)
         if not blocks:
@@ -244,13 +254,13 @@ def card_excerpt(record, query='', project=None):
                 # Keep matched words whole and score what is actually sent.
                 windows = [head[:head_limit]]
                 for match in re.finditer(r'\S+', head):
-                    if terms & _tokens(match.group()):
+                    if overlap(match.group()):
                         heading_start = max(0, match.end() - head_limit)
                         windows.append(head[heading_start:heading_start + head_limit])
-                head = max(windows, key=lambda value: len(terms & _tokens(value)))
+                head = max(windows, key=overlap)
             body = text[start:end]
             passage = (head + '\n\n' + body if head else body)[:AUTO_EXCERPT]
-            score = len(terms & _tokens(passage))
+            score = overlap(passage)
             if score > best_score:
                 best_score = score
                 best_block = passage
