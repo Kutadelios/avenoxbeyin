@@ -61,3 +61,14 @@ class Vault4IntegrationTest(EvidenceFixture):
         context = self.store.context_for('claude', 'database migration rollback', strict=True, limit=1)
         self.assertEqual([r['id'] for r in context['records']], ['due'])
         self.assertIn('due', context.evidence)
+
+    def test_vault_completed_task_remains_strong_historical_passage_evidence(self):
+        marker = 'Quartz rollback deployment uses the copper switch.'
+        self.note('finished', marker, kind='task', status='done')
+        for index in range(7):
+            self.note('background' + str(index), 'Quartz rollback deployment background. ' +
+                      'Unrelated furniture records. ' * 20)
+        context = self.store.context_for('claude', 'quartz rollback deployment copper switch',
+                                         strict=True, limit=1, budget_chars=5000)
+        self.assertEqual([r['id'] for r in context['records']], ['finished'])
+        self.assertIn(marker, rt.render_context(context, 4700)[0])
