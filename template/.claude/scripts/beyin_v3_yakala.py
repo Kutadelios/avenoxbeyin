@@ -6145,10 +6145,21 @@ class _JsonPipe:
         self.write_thread.start()
 
     def _read(self):
+        import errno
         import queue
+        retries = 0
         try:
             while not self.stopping.is_set():
-                line = self.reader.readline(WIN_MESSAGE_LIMIT + 1)
+                try:
+                    line = self.reader.readline(WIN_MESSAGE_LIMIT + 1)
+                except OSError as exc:
+                    if exc.errno not in (errno.EINTR, errno.EAGAIN, errno.EWOULDBLOCK) or retries >= 3:
+                        break
+                    retries += 1
+                    self.stopping.wait(0.01)
+                    continue
+                retries = 0
+                # A blocking pipe returns empty bytes only at EOF, never for a delayed packet.
                 if not line or len(line) > WIN_MESSAGE_LIMIT or not line.endswith(b'\n'):
                     break
                 message = json.loads(line)

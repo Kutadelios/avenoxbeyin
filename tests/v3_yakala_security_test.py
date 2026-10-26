@@ -666,5 +666,12 @@ class YakalaSecurityTest(unittest.TestCase):
                  if isinstance(handler, urllib.request.ProxyHandler) and handler.proxies == {}]
         self.assertEqual(empty, [])
 
+    def test_extra_urls_keep_public_only_validation(self):
+        for value in ('http://127.0.0.1/internal-ref', 'file:///secret',
+                      'https://user:pass@example.com/', '-option'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                yakala.capture(self.vault, url='https://example.com', extra_urls=[value])
+        self.assertEqual(yakala.cards(self.vault), [])
+
 if __name__ == '__main__':
     unittest.main()
