@@ -181,6 +181,8 @@ class InstructionBlockTest(unittest.TestCase):
         self.assertIn('Claude Code bugün proje adı göndermez', skill)
         # The pointer the skill shows is a rule the hook really scopes.
         pointer = re.search(r'`(- \[kapsam: <proje>\][^`]*)`', skill)[1].replace('<proje>', 'alpha')
+        self.assertIn('mevcut-proje-klasörü/Kurallar.md', pointer)
+        self.assertIn('`🏰 300-Projects/`', skill)
         self.assertEqual(companion.rule_scopes(pointer), {'alpha'})
         self.assertEqual(companion.filter_scoped_rules(pointer, 'alpha'), pointer)
         self.assertEqual(companion.filter_scoped_rules(pointer, None), pointer)
