@@ -82,7 +82,12 @@ def loose_passages(record, query, project=None):
     terms = query_terms(query, project)
     ignored = STOPWORDS | _tokens(project or '')
     blocks = split_blocks(record['text'])
-    score = lambda span: _score(span[0] + '\n' + record['text'][span[1]:span[2]], terms, ignored)
+    # Selected body evidence keeps its source-order ties (#530). Shared heading
+    # words must not crowd it off the two-passage card. Heading-only matches are
+    # a fallback when no body matches, retaining upstream's subsection repair.
+    body_matches = any(_score(record['text'][start:end], terms, ignored) for _, start, end in blocks)
+    score = lambda span: _score(('' if body_matches else span[0] + '\n') +
+                               record['text'][span[1]:span[2]], terms, ignored)
     ranked = sorted(enumerate(blocks), key=lambda item: (-score(item[1]), item[0]))
     if not ranked:
         return record, None, reference(record, [('', 0, len(record['text']))], 'loose')

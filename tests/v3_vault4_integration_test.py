@@ -33,6 +33,25 @@ class Vault4IntegrationTest(EvidenceFixture):
         excerpt = card_excerpt('boyum', dict(text=text), project='boy')
         self.assertNotIn('180 cm', excerpt)
 
+    def test_heading_overlap_does_not_displace_two_matching_body_passages(self):
+        from beyin_v3_evidence import card_excerpt, loose_passages
+        marker = 'Quartz deploy uses the copper switch.'
+        self.note('guide', '# Quartz\n\nQuartz metadata.\n\n## Recovery\n\n'
+                  'Quartz deploy overview.\n\n' + marker)
+        record = self.store._records()[0]
+        narrow, broad, ref = loose_passages(record, 'quartz deploy pricing')
+        self.assertIn(marker, card_excerpt('quartz deploy pricing', narrow, broad, ref))
+
+    def test_heading_only_sibling_does_not_dilute_the_primary_body_card(self):
+        from beyin_v3_evidence import card_excerpt, loose_passages
+        marker = 'Quartz rollback uses the copper switch.'
+        self.note('guide', '# Manual\n\n' + 'Background detail. ' * 12 + marker +
+                  '\n\n## Quartz rollback\n\n' + 'Unrelated furniture. ' * 50)
+        record = self.store._records()[0]
+        narrow, broad, ref = loose_passages(record, 'quartz rollback pricing')
+        self.assertIsNone(broad)
+        self.assertIn(marker, card_excerpt('quartz rollback pricing', narrow, broad, ref))
+
     def test_upstream_due_priority_survives_evidence_extensions(self):
         marker = 'Database migration rollback uses the amber switch.'
         for ident, due, updated in [('due', '2020-01-01', '2026-01-01'),
