@@ -120,8 +120,8 @@ def _check_source_trust(state: Path, source: str) -> None:
                         raise ValueError(f"source '{source}' is private or untrusted")
         except ValueError:
             raise
-        except Exception:
-            pass
+        except Exception as e:
+            raise ValueError(f"trust check failed: {e}")
 
 
 def stage_candidate(state: Path, session: str, candidate: str, source: str = "", scope: str = "global") -> dict:
@@ -221,25 +221,26 @@ def resolve_candidates(state: Path, session: str, target_status: str = "distille
     target_session = _normalize_session(session)
     try:
         with _ledger_lock(ledger.parent):
-            with open(ledger, "r", encoding="utf-8") as f:
+            with open(ledger, "r", encoding="utf-8", newline="") as f:
                 for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
                     try:
                         item = json.loads(line)
+                        if not isinstance(item, dict):
+                            records.append(line)
+                            continue
                         if item.get("session") in (target_session, "cli") and item.get("status") == "candidate":
                             item["status"] = target_status
                             item["resolved_at"] = datetime.now(timezone.utc).isoformat()
                             count += 1
-                        records.append(item)
-                    except Exception:
-                        continue
-            # Atomic rewrite
+                            records.append(json.dumps(item, ensure_ascii=False) + "\n")
+                        else:
+                            records.append(line)
+                    except (ValueError, TypeError):
+                        records.append(line)
+            # Preserve malformed and unrelated records byte-for-byte, including whitespace.
             temp = ledger.parent / (ledger.name + ".tmp")
-            with open(temp, "w", encoding="utf-8") as out:
-                for rec in records:
-                    out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            with open(temp, "w", encoding="utf-8", newline="") as out:
+                out.writelines(records)
                 out.flush()
                 os.fsync(out.fileno())
             os.replace(temp, ledger)
