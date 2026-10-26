@@ -1481,4 +1481,15 @@ class SyncEngine:
         self._record_redactions(redacted)
         receipt_res = {'id': event_id, 'event_id': event_id, 'status': 'succeeded', 'source': source,
                        'redacted': redacted, 'secrets_redacted': redacted}
+        # A replay must not consume candidates staged after the original receipt.
+        # An unrelated receipt is not evidence that every candidate was distilled.
+        if not row and event.get('session'):
+            try:
+                from beyin_v3_learning import resolve_candidates
+                resolved_count = resolve_candidates(self.state, session=event['session'],
+                                                    target_status="distilled", sources=refs)
+                if resolved_count:
+                    receipt_res['candidates_resolved'] = resolved_count
+            except Exception:
+                pass
         return self._write_diagnostics(receipt_res, result)
