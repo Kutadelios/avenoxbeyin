@@ -15,6 +15,7 @@ import re
 import sqlite3
 import stat
 import sys
+import tempfile
 import unicodedata
 import urllib.parse
 
@@ -636,6 +637,73 @@ def _token_counts(text):
 
 def _tokens(text):
     return set(_token_counts(text))
+
+
+@functools.lru_cache(maxsize=1)
+def _counts_version():
+    # Counts also depend on stemming, folding and Python's Unicode tables. Hash the
+    # implementation rather than relying on a probe to exercise every changed rule.
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest() + ':' + unicodedata.unidata_version
+
+
+class _CountCache:
+    """Disposable whole-note counts, never eligibility or query-dependent scores."""
+    MAX_BYTES = 64 * 1024 * 1024
+
+    def __init__(self, state_dir):
+        self.path = Path(state_dir) / 'token-counts.json'
+        self.entries, self.used, self.changed = {}, {}, False
+        try:
+            self.version = _counts_version()
+            if not self.path.is_symlink() and self.path.stat().st_size <= self.MAX_BYTES:
+                blob = json.loads(self.path.read_text(encoding='utf-8'))
+                if (isinstance(blob, dict) and blob.get('version') == self.version
+                        and isinstance(blob.get('records'), dict)):
+                    self.entries = blob['records']
+        except (OSError, ValueError, RecursionError):
+            self.version = None  # unavailable implementation or cache: compute normally
+
+    def counts(self, text):
+        key = hashlib.sha256(text.encode('utf-8', 'surrogatepass')).hexdigest()
+        entry = self.entries.get(key)
+        if (not isinstance(entry, dict) or not all(
+                isinstance(word, str) and type(count) is int and count > 0
+                for word, count in entry.items())):
+            entry = dict(_token_counts(text))
+            self.changed = True
+        self.used[key] = entry
+        # Stopword removal and short-root folding mutate the caller's copy.
+        return Counter(entry)
+
+    def save(self):
+        if not self.changed:
+            return
+        temporary = None
+        try:
+            version = self.version or _counts_version()
+            # Keep other scopes and both filename-salience variants within a bound.
+            entries = dict(self.entries) if len(self.entries) <= 2 * len(self.used) + 256 else {}
+            entries.update(self.used)
+            # Preserve Counter's first-seen key order as well as its values: strict
+            # ranking constructs sets from these keys before summing floating weights.
+            data = json.dumps(dict(version=version, records=entries), ensure_ascii=False, separators=(',', ':'))
+            if len(data.encode('utf-8')) > self.MAX_BYTES or self.path.is_symlink():
+                return
+            with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=self.path.parent,
+                                             prefix='.token-counts-', suffix='.tmp', delete=False) as handle:
+                temporary = handle.name
+                os.chmod(temporary, 0o600)
+                handle.write(data)
+            os.replace(temporary, self.path)
+            temporary = None
+        except (OSError, ValueError):
+            pass  # a missing, unwritable or concurrently replaced cache is only slower
+        finally:
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
 
 
 # Stopwords are matched against stems, so Turkish content words had to leave the list:
@@ -1392,6 +1460,7 @@ class MemoryStore:
         term_counts = {}
         name_scores = {}
         scanned = []
+        count_cache = _CountCache(self.state_dir) if terms else None
         for record in eligible:
             if record["id"] in superseded:
                 continue
@@ -1410,7 +1479,7 @@ class MemoryStore:
                            if name_score else "")
             # Without a query term no count can score or reorder a record (snapshots, scoped
             # listings, the advisor's eligibility pass), so the note text is not tokenised.
-            counts = (_token_counts(record["text"] + " " + _json(record["facts"]) + " " + str(record.get("title", "")) + " " + alias_text + " " + source_stem)
+            counts = (count_cache.counts(record["text"] + " " + _json(record["facts"]) + " " + str(record.get("title", "")) + " " + alias_text + " " + source_stem)
                       if terms else Counter())
             for stopword in STOPWORDS & counts.keys():
                 del counts[stopword]
@@ -1426,6 +1495,8 @@ class MemoryStore:
             score = len(terms & vocabulary)
             if score or record["id"] in name_scores or scoped_listing or snapshot:
                 ranked.append((score, record))
+        if count_cache is not None and not self.read_only:
+            count_cache.save()
         if strict and not snapshot:
             ranked = self._strict_rank(ranked, terms, vocabularies, name_scores=name_scores,
                                        today=today, allowed_statuses=allowed_statuses)

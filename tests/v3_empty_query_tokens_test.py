@@ -84,7 +84,11 @@ class EmptyQueryTokensTest(unittest.TestCase):
                                       limit=limit, budget_chars=budget, snapshot=True)
                         with self.subTest(**params):
                             fast, notes = self.tokenised(lambda: self.store._retrieve('', **params))
-                            oracle, oracle_notes = self.tokenised(lambda: self.store._retrieve(ABSENT, **params))
+                            # The oracle deliberately tokenises on every call, even when a
+                            # previous subtest has populated the persistent count cache.
+                            with patch.object(runtime._CountCache, 'counts',
+                                              lambda _, text: runtime._token_counts(text)):
+                                oracle, oracle_notes = self.tokenised(lambda: self.store._retrieve(ABSENT, **params))
                             self.assertEqual(notes, 0)
                             self.assertGreater(oracle_notes, 0)
                             self.assertEqual(fast, oracle)
