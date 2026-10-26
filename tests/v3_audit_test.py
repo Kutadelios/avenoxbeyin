@@ -417,6 +417,53 @@ class MemoryAuditorTest(unittest.TestCase):
                 self.assertEqual(len(findings), 1)
                 self.assertEqual(findings[0]['type'], 'near_duplicate')
 
+    def test_asymmetric_size_notes_do_not_produce_false_duplicate_or_body_conflict(self):
+        """Asymmetric pair (large document vs tiny note) must not be flagged as near-duplicate
+
+        or status contradiction from stray prose words (#466).
+        """
+        vocabulary = ("architecture service configuration system infrastructure parameter analysis "
+                      "model data pipeline testing database transaction concurrency reliability durability "
+                      "latency throughput partition sharding replication consistency consensus protocol "
+                      "transport network router gateway address subnet packet buffer socket process thread "
+                      "scheduler memory storage volume filesystem directory permission ownership encryption "
+                      "authentication authorization credential certificate signature checksum compression "
+                      "serialization validation migration rollback deployment release version package "
+                      "dependency registry container orchestration cluster monitoring tracing logging metrics "
+                      "alert incident recovery backup restore snapshot retention archive inventory catalog "
+                      "document record entity relation index query filter ranking relevance retrieval "
+                      "precision recall benchmark evaluation experiment hypothesis evidence research "
+                      "discovery inference reasoning context continuity session receipt capture synthesis").split()
+        large_body = " ".join(vocabulary) + " tamamlandi"
+        short_body = " ".join(vocabulary[:8]) + " bekliyor"
+        for name, body, date in [('buyuk-not.md', large_body, '2026-08-01'),
+                                 ('kucuk-not.md', short_body, '2026-10-01')]:
+            (self.knowledge / name).write_text(
+                f"---\ntitle: Shared Topic\nupdated_at: {date}\n---\n{body}\n", encoding='utf-8')
+        first, second = audit_module.scan_audit_candidates(self.vault, self.state)
+        shared = len(first['tokens'] & second['tokens'])
+        # Ensure this reaches the changed gate; repeated numbered filler does not.
+        self.assertGreaterEqual(shared / min(len(first['tokens']), len(second['tokens'])), 0.80)
+        self.assertLess(shared / len(first['tokens'] | second['tokens']), 0.20)
+
+        report = audit_module.audit_memory(self.vault, state=self.state, threshold=0.60, min_shared=5)
+        # Must not report near_duplicate or status_contradiction for asymmetric pair
+        self.assertEqual(len(report['findings']), 0)
+
+    def test_explicit_frontmatter_status_contradiction_still_detected(self):
+        """When frontmatter explicitly declares contradicting status, conflict is flagged."""
+        (self.knowledge / 'gorev-eski.md').write_text(
+            "---\ntitle: Gorev\nstatus: failed\nupdated_at: 2026-09-01\n---\n" + self.SHARED,
+            encoding='utf-8'
+        )
+        (self.knowledge / 'gorev-yeni.md').write_text(
+            "---\ntitle: Gorev\nstatus: passed\nupdated_at: 2026-10-01\n---\n" + self.SHARED,
+            encoding='utf-8'
+        )
+        report = audit_module.audit_memory(self.vault, state=self.state, min_shared=3)
+        self.assertEqual(len(report['findings']), 1)
+        self.assertEqual(report['findings'][0]['type'], 'status_contradiction')
+
     def _cli_result(self, args):
         cmd = [sys.executable, str(self.vault / '.claude/scripts/beyin_v3_cli.py'),
                '--vault', str(self.vault), '--state', str(self.state)] + args
