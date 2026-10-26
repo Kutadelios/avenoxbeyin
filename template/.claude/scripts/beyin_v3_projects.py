@@ -302,11 +302,61 @@ def manage(vault_root, action, folder=None, project=None, shared_unscoped=None):
     raise ValueError("unknown project-scope action: " + str(action))
 
 
+STANDARD_PROJECT_FOLDERS = ('projects', 'Projeler', 'projeler', 'Projects', '🏰 300-Projects', '300-Projects')
+
+
+def candidate_project_folders(vault_root=None) -> list[str]:
+    """Candidate project parent folders for rule discovery and project resolution (#467).
+    Prioritizes standard conventions and discovers root directories ending with
+    '-Projects' or '-Projeler' (such as official template '🏰 300-Projects').
+    """
+    seen = set()
+    result = []
+
+    def add(name: str):
+        if name and name not in seen:
+            seen.add(name)
+            result.append(name)
+
+    for folder in ('projects', 'Projeler', 'projeler', 'Projects', '🏰 300-Projects', '300-Projects'):
+        add(folder)
+
+    if vault_root is not None:
+        try:
+            root = Path(vault_root)
+            if root.is_dir():
+                for entry in sorted(root.iterdir()):
+                    if entry.is_dir() and not entry.is_symlink():
+                        name = entry.name
+                        lower = name.lower()
+                        if (
+                            lower.endswith(('-projects', '-projeler', '_projects', '_projeler')) or
+                            lower in ('projects', 'projeler')
+                        ):
+                            add(name)
+        except OSError:
+            pass
+
+    return result
+
+
+def is_project_parent_folder(name: str, vault_root=None) -> bool:
+    if not isinstance(name, str) or not name:
+        return False
+    if name in candidate_project_folders(vault_root):
+        return True
+    lower = name.lower()
+    return (
+        lower in ('projects', 'projeler') or
+        lower.endswith(('-projects', '-projeler', '_projects', '_projeler'))
+    )
+
+
 def resolve_active_project(vault, cwd):
     """Resolve the active project name from the current working directory.
-    Matches against .beyin-projects.json rules or standard folder names
-    ('projects', 'Projeler', 'projeler'). Also handles sibling/external project
-    repositories outside the vault. Returns None if unscoped.
+    Matches .beyin-projects.json rules and standard/discovered project folders.
+    Also handles sibling/external repositories outside the vault.
+    Returns None if unscoped or ambiguous.
     """
     if vault is None or cwd is None:
         return None
@@ -337,7 +387,7 @@ def resolve_active_project(vault, cwd):
                       if cand_key in (_scope_key(project), _scope_key(folder.split("/")[-1]))}
             if mapped:
                 return next(iter(mapped)) if len(mapped) == 1 else None
-            for folder in ("projects", "Projeler", "projeler"):
+            for folder in candidate_project_folders(vault_root):
                 target = vault_root / folder / cand
                 if target.is_dir() and not target.is_symlink():
                     return cand
@@ -355,7 +405,7 @@ def resolve_active_project(vault, cwd):
                 return project
 
     parts = rel_path.split("/")
-    if len(parts) >= 2 and parts[0] in ("projects", "Projeler", "projeler"):
+    if len(parts) >= 2 and is_project_parent_folder(parts[0], vault_root):
         return parts[1]
 
     return None
@@ -386,7 +436,7 @@ def resolve_project_from_query(vault, query):
             if base:
                 known.setdefault(_scope_key(base), set()).add(proj)
 
-    for folder in ("projects", "Projeler", "projeler"):
+    for folder in candidate_project_folders(vault_root):
         p_dir = vault_root / folder
         if p_dir.is_dir():
             try:

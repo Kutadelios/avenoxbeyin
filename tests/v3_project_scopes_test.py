@@ -425,6 +425,90 @@ class ProjectScopesTest(unittest.TestCase):
         self.assertIn('GLOBAL_RULE', text)
         self.assertNotIn('OTHER_RULE', text)
 
+    def test_resolve_active_project_template_folder_without_explicit_scopes(self):
+        """Official template folder '🏰 300-Projects' resolves active project and loads Kurallar.md (#467)."""
+        import beyin_v3_projects as projects
+        import beyin_v3_companion as companion
+        # Ensure no project scopes JSON exists
+        scopes_file = self.vault / runtime.PROJECT_SCOPES_FILE
+        if scopes_file.exists():
+            scopes_file.unlink()
+
+        template_folder = self.vault / '🏰 300-Projects/sentinel'
+        template_folder.mkdir(parents=True, exist_ok=True)
+
+        # CWD inside official template folder resolves project name automatically
+        self.assertEqual(projects.resolve_active_project(self.vault, template_folder), 'sentinel')
+
+        # Companion discovers and loads rules from template project folder automatically
+        (template_folder / 'Kurallar.md').write_text('# Sentinel Kuralları\n- **kural:** SENTINEL_TEMPLATE_RULE\n', encoding='utf-8')
+        comp_dir = self.vault / '🔮 850-Companion'
+        comp_dir.mkdir(parents=True, exist_ok=True)
+        (comp_dir / 'Core.md').write_text('# Core\nKimlik.\n', encoding='utf-8')
+        (comp_dir / 'Kurallar.md').write_text('# Kurallar\n- **kural:** GLOBAL_RULE\n', encoding='utf-8')
+        (comp_dir / 'Last-Session.md').write_text('# Son oturum\n', encoding='utf-8')
+        (comp_dir / 'Threads.md').write_text('# Threads\n', encoding='utf-8')
+
+        for f in ('Core.md', 'Kurallar.md', 'Last-Session.md', 'Threads.md'):
+            self.store.ingest({'id': f, 'kind': 'note', 'status': 'active',
+                               'source': f'🔮 850-Companion/{f}', 'text': (comp_dir / f).read_text(encoding='utf-8')})
+        self.store.ingest({'id': 'sentinel-rules', 'kind': 'note', 'status': 'active',
+                           'source': '🏰 300-Projects/sentinel/Kurallar.md',
+                           'text': (template_folder / 'Kurallar.md').read_text(encoding='utf-8')})
+
+        text = companion.context(self.store, 8000, 'test-template-session', 'claude', rules_project='sentinel')
+        self.assertIn('SENTINEL_TEMPLATE_RULE', text)
+        self.assertIn('GLOBAL_RULE', text)
+
+    def test_discovered_projects_resolve_external_cwd_and_query(self):
+        from beyin_v3_projects import resolve_active_project, resolve_project_from_query
+        for parent in ('🏰 300-Projects', '42-projects'):
+            with self.subTest(parent=parent):
+                project = self.vault / parent / 'sentinel'
+                project.mkdir(parents=True)
+                external = Path(self.tmp.name) / 'sentinel'
+                external.mkdir(exist_ok=True)
+                self.assertEqual(resolve_active_project(self.vault, external), 'sentinel')
+                self.assertEqual(resolve_project_from_query(self.vault, 'sentinel projesi'), 'sentinel')
+                project.rmdir()
+
+    def test_resolve_active_project_lowercase_discovered_folder(self):
+        """Official template folder '42-projects' resolves active project and loads Kurallar.md (#467)."""
+        import beyin_v3_projects as projects
+        import beyin_v3_companion as companion
+        # Ensure no project scopes JSON exists
+        scopes_file = self.vault / runtime.PROJECT_SCOPES_FILE
+        if scopes_file.exists():
+            scopes_file.unlink()
+
+        template_folder = self.vault / '42-projects/sentinel'
+        template_folder.mkdir(parents=True, exist_ok=True)
+
+        self.assertIn('42-projects', projects.candidate_project_folders(self.vault))
+
+        # CWD inside official template folder resolves project name automatically
+        self.assertEqual(projects.resolve_active_project(self.vault, template_folder), 'sentinel')
+
+        # Companion discovers and loads rules from template project folder automatically
+        (template_folder / 'Kurallar.md').write_text('# Sentinel Kuralları\n- **kural:** SENTINEL_TEMPLATE_RULE\n', encoding='utf-8')
+        comp_dir = self.vault / '🔮 850-Companion'
+        comp_dir.mkdir(parents=True, exist_ok=True)
+        (comp_dir / 'Core.md').write_text('# Core\nKimlik.\n', encoding='utf-8')
+        (comp_dir / 'Kurallar.md').write_text('# Kurallar\n- **kural:** GLOBAL_RULE\n', encoding='utf-8')
+        (comp_dir / 'Last-Session.md').write_text('# Son oturum\n', encoding='utf-8')
+        (comp_dir / 'Threads.md').write_text('# Threads\n', encoding='utf-8')
+
+        for f in ('Core.md', 'Kurallar.md', 'Last-Session.md', 'Threads.md'):
+            self.store.ingest({'id': f, 'kind': 'note', 'status': 'active',
+                               'source': f'🔮 850-Companion/{f}', 'text': (comp_dir / f).read_text(encoding='utf-8')})
+        self.store.ingest({'id': 'sentinel-rules', 'kind': 'note', 'status': 'active',
+                           'source': '42-projects/sentinel/Kurallar.md',
+                           'text': (template_folder / 'Kurallar.md').read_text(encoding='utf-8')})
+
+        text = companion.context(self.store, 8000, 'test-template-session', 'claude', rules_project='sentinel')
+        self.assertIn('SENTINEL_TEMPLATE_RULE', text)
+        self.assertIn('GLOBAL_RULE', text)
+
     def test_mapped_rules_preserve_path_spelling_and_visibility(self):
         import beyin_v3_companion as companion
         from beyin_v3_sync import SyncEngine

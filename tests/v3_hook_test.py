@@ -752,13 +752,13 @@ class HookInstallerTest(unittest.TestCase):
         first = [p.read_bytes() for p in paths]
         self.install()
         self.assertEqual([p.read_bytes() for p in paths], first)
-        claude = json.loads(paths[0].read_text())
+        claude = json.loads(paths[0].read_text(encoding='utf-8'))
         self.assertEqual(claude['permissions'], originals['.claude/settings.local.json']['permissions'])
         self.assertIn(originals['.claude/settings.local.json']['hooks']['SessionStart'][0], claude['hooks']['SessionStart'])
-        self.assertEqual(json.loads(paths[1].read_text())['trust'], {'synthetic-trust': 'unchanged'})
-        self.assertIn('synthetic-other-agent', json.loads(paths[2].read_text()))
-        self.assertIn('Keep this user content.', (self.vault / 'AGENTS.md').read_text())
-        agent_config = json.loads(paths[2].read_text())
+        self.assertEqual(json.loads(paths[1].read_text(encoding='utf-8'))['trust'], {'synthetic-trust': 'unchanged'})
+        self.assertIn('synthetic-other-agent', json.loads(paths[2].read_text(encoding='utf-8')))
+        self.assertIn('Keep this user content.', (self.vault / 'AGENTS.md').read_text(encoding='utf-8'))
+        agent_config = json.loads(paths[2].read_text(encoding='utf-8'))
         def commands(value):
             if isinstance(value, dict):
                 for key, item in value.items():
