@@ -198,14 +198,17 @@ def client_budget(harness, chars):
 
 
 def client_rebudget(harness, budget, text):
-    """A smaller character budget for text that was rendered with budget but is over the client's
-    own measure (a Turkish letter is two UTF-8 bytes for Codex), so a second render keeps every
-    section instead of losing the tail; None when it already fits."""
+    """A smaller character budget for rendered text over the client's own measure
+    (a Turkish letter is two UTF-8 bytes for Codex). Re-rendering can reapportion
+    section priorities instead of losing the tail; None when it already fits."""
     limit = CLIENT_TEXT_LIMITS.get(harness)
     size = client_size(harness, text) if limit else None
     if size is None or size <= limit[0]:
         return None
-    return budget * limit[0] // size
+    # Unused character allowance cannot absorb a byte/UTF-16 overflow. Scaling
+    # the configured budget can otherwise remove one character per retry while
+    # a shorter, unchanged rendering remains one unit over the client's cap.
+    return min(budget, len(text)) * limit[0] // size
 
 
 def fit_client(harness, text):
