@@ -1491,8 +1491,6 @@ class MemoryStore:
             if name_score:
                 name_scores[record["id"]] = name_score
             scanned.append(record)
-        if count_cache is not None and not self.read_only:
-            count_cache.save()
         # Root use is counted over every scanned note, so the counts are final only after the scan.
         _fold_query_roots(term_counts.values(), terms, STOPWORDS | project_tokens)
         for record in scanned:
