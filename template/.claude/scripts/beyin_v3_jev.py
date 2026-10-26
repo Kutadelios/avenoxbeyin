@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import re
 import time
 
 import beyin_v3_jev_client as client
@@ -224,7 +225,16 @@ def card_excerpt(record, query='', project=None):
         for head, start, end in blocks:
             # Score only the bounded window that will actually reach the advisor.
             # Reserve up to a third for headings; long paragraphs are split above.
-            head = head[:AUTO_EXCERPT // 3 - 2]
+            head_limit = AUTO_EXCERPT // 3 - 2
+            if len(head) > head_limit:
+                # A long parent heading must not hide the matching subsection.
+                # Consider word-aligned windows and score what is actually sent.
+                windows = [head[:head_limit]]
+                for match in re.finditer(r'\S+', head):
+                    if terms & _tokens(match.group()):
+                        start = max(0, match.end() - head_limit)
+                        windows.append(head[start:start + head_limit])
+                head = max(windows, key=lambda value: len(terms & _tokens(value)))
             body = text[start:end]
             passage = (head + '\n\n' + body if head else body)[:AUTO_EXCERPT]
             score = len(terms & _tokens(passage))
