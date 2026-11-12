@@ -379,7 +379,7 @@ def _weight(shared, frequency, total, size):
 
 
 def search(index, terms, limit=5, floor=FLOOR, min_shared=MIN_SHARED, ignored=STOPWORDS,
-           rank_adjustments=None, with_runner_up=False, compounds=None):
+           rank_adjustments=None, with_runner_up=False, compounds=None, prefer_open=False):
     """Best admitted passage per source, ranked. Returns [(rank weight, passage), ...].
 
     ignored: stems a query root may not become (the caller's stopwords and project words).
@@ -431,6 +431,9 @@ def search(index, terms, limit=5, floor=FLOOR, min_shared=MIN_SHARED, ignored=ST
             best[record["id"]] = (rank, passage)
     ranked = list(best.values())
     ranked.sort(key=lambda item: (item[1][0].get("updated_at", ""), item[1][0]["id"]), reverse=True)
+    if prefer_open:
+        from beyin_v3 import _is_closed_task
+        ranked.sort(key=lambda item: _is_closed_task(item[1][0]))
     ranked.sort(key=lambda item: -item[0])
     ranked = ranked[:limit]
     if not with_runner_up:
@@ -509,10 +512,12 @@ def context_for(store, harness, query, project=None, audience="internal", status
                   deadline=time.monotonic() + BUILD_SECONDS)
     if candidates and not index.passages:
         raise RuntimeError("passage index is empty")  # a failure, not an answer: caller falls back
-    from beyin_v3 import is_due_task, _is_closed_task
-    adjustments = {r["id"]: (store.DUE_STRICT_BONUS if is_due_task(r, today) else
-                   -store.CLOSED_TASK_PENALTY if statuses is None and _is_closed_task(r) else 0.0)
-                   for r in candidates}
+    from beyin_v3 import is_due_task
+    # Vault policy (fork): a completed task remains historical evidence in passage
+    # retrieval. It keeps its lexical rank; an open task wins only a tie
+    # (prefer_open). The due-task bonus stays; general task retrieval keeps the
+    # stronger closed-task penalty.
+    adjustments = {r["id"]: store.DUE_STRICT_BONUS for r in candidates if is_due_task(r, today)}
     # The advisor's loose pool (loose_ranking) reuses this index within the same process.
     store._passage_index = ((audience, project, statuses), index, adjustments)
     ignored = STOPWORDS | _tokens(project or "")
@@ -523,7 +528,7 @@ def context_for(store, harness, query, project=None, audience="internal", status
     records, wider, evidence, extensions = [], {}, {}, {}
     for _rank, first, second in search(index, terms, limit, config["floor"], ignored=ignored,
                                      rank_adjustments=adjustments, with_runner_up=True,
-                                     compounds=compounds):
+                                     compounds=compounds, prefer_open=True):
         record = first[0]
         # Only text and text_truncated change, so advisor signatures still match the index.
         records.append(dict(record, text=_excerpt(record, [first]), text_truncated=_partial(record, [first])))
